@@ -9,7 +9,6 @@ from .ppst import Plan, PlanEntry, TargetList
 from .queue_ditl import QueueDITL
 from .queue_scheduler import DumbQueueScheduler, Queue
 from .scheduler import DumbScheduler
-from .skyconstraints import SkyConstraints
 
 __all__ = [
     "ACS",
@@ -23,7 +22,6 @@ __all__ = [
     "Queue",
     "QueueDITL",
     "DumbScheduler",
-    "SkyConstraints",
     "Pass",
     "PassTimes",
     "GroundStation",
