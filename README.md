@@ -239,7 +239,7 @@ See LICENSE file for details.
 
 ## Author
 
-**Jamie A. Kennea**  
+**Jamie A. Kennea**
 Email: <jak51@psu.edu>
 
 ## Acknowledgments
