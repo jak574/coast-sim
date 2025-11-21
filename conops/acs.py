@@ -392,9 +392,8 @@ class ACS:
             # Check if slewing for charging - but only report CHARGING if in sunlight
             if self.current_slew.obstype == "CHARGE":
                 # Check eclipse state - no point being in CHARGING mode during eclipse
-                if self.ephem is not None:
-                    if not self.constraint.in_eclipse(ra=0, dec=0, time=utime):
-                        return ACSMode.SLEWING  # In eclipse, treat as normal slew
+                if self.constraint.in_eclipse(ra=0, dec=0, time=utime):
+                    return ACSMode.SLEWING  # In eclipse, treat as normal slew
                 return ACSMode.CHARGING
             return (
                 ACSMode.PASS if self.current_slew.obstype == "GSP" else ACSMode.SLEWING

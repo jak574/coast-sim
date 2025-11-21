@@ -233,11 +233,9 @@ class TestEmergencyCharging:
         """Test successful creation of charging pointing."""
         utime = 1700000000.0
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return False (in sunlight)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
 
         ppt = emergency_charging.create_charging_pointing(utime, mock_ephem)
@@ -256,11 +254,9 @@ class TestEmergencyCharging:
         """Test that obsid increments with each charging pointing."""
         utime = 1700000000.0
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return False (in sunlight)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
 
         ppt1 = emergency_charging.create_charging_pointing(utime, mock_ephem)
@@ -277,11 +273,9 @@ class TestEmergencyCharging:
         # Mock eclipse condition
         mock_ephem.in_eclipse = Mock(return_value=True)  # In eclipse
 
-        # Mock ephemeris_in_eclipse to return True (in eclipse)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return True (in eclipse)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: True
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: True
         )
 
         utime = 1700000000.0
@@ -311,11 +305,9 @@ class TestEmergencyCharging:
 
         emergency_charging.solar_panel.panel_illumination_fraction = mock_illumination
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return False (in sunlight)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
 
         utime = 1700000000.0
@@ -330,11 +322,9 @@ class TestEmergencyCharging:
         """Test that None is returned when no valid pointing exists."""
         emergency_charging.constraint.inoccult = Mock(return_value=True)
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return False (in sunlight)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
 
         utime = 1700000000.0
@@ -347,11 +337,9 @@ class TestEmergencyCharging:
         """Test clearing current charging PPT."""
         utime = 1700000000.0
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return False (in sunlight)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
 
         emergency_charging.create_charging_pointing(utime, mock_ephem)
@@ -368,11 +356,9 @@ class TestEmergencyCharging:
 
         utime = 1700000000.0
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
+        # Mock constraint.in_eclipse to return False (in sunlight)
         monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
+            emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
 
         emergency_charging.create_charging_pointing(utime, mock_ephem)
@@ -557,12 +543,8 @@ class TestEmergencyCharging:
 
         mock_solar_panel.panel_illumination_fraction = mock_illumination
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
-        monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
-        )
+        # Mock constraint.in_eclipse to return False (in sunlight)
+        monkeypatch.setattr(ec.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         utime = 1700000000.0
         # Current pointing at RA=0, Dec=0
@@ -842,12 +824,8 @@ class TestEmergencyCharging:
             sidemount=True,
         )
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import emergency_charging as ec_module
-
-        monkeypatch.setattr(
-            ec_module, "ephemeris_in_eclipse", lambda ephem, utime: False
-        )
+        # Mock constraint.in_eclipse to return False (in sunlight)
+        monkeypatch.setattr(ec.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         ppt = ec.create_charging_pointing(utime, mock_ephem)
 

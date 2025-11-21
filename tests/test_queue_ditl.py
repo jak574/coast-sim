@@ -317,19 +317,16 @@ class TestDetermineMode:
 
     def test_determine_mode_charging(self, mock_config, mock_ephem, monkeypatch):
         """Test mode determination during emergency charging."""
-        import conops.acs as acs_module
         from conops.acs import ACS
         from conops.constraint import Constraint
 
-        constraint = Constraint(ephem=None)
+        constraint = Mock(spec=Constraint)
         constraint.ephem = mock_ephem
 
-        # Patch ephemeris_in_eclipse to avoid Rust validation
-        monkeypatch.setattr(
-            acs_module, "ephemeris_in_eclipse", lambda ephem, utime: False
-        )
-
         acs = ACS(constraint=constraint, config=mock_config)
+
+        # Patch constraint.in_eclipse to avoid eclipse checking
+        monkeypatch.setattr(acs.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         # Create a charging slew
         charging_slew = Mock()

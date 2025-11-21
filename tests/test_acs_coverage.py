@@ -706,12 +706,8 @@ class TestGetModeCharging:
         mock_ephem.in_eclipse = Mock(return_value=True)
         acs.ephem = mock_ephem
 
-        # Mock ephemeris_in_eclipse to return True (in eclipse)
-        from conops import acs as acs_module
-
-        monkeypatch.setattr(
-            acs_module, "ephemeris_in_eclipse", lambda ephem, utime: True
-        )
+        # Mock constraint.in_eclipse to return True (in eclipse)
+        monkeypatch.setattr(acs.constraint, "in_eclipse", lambda ra, dec, time: True)
 
         mode = acs.get_mode(1514764800.0)
         assert mode == ACSMode.SLEWING
@@ -732,11 +728,9 @@ class TestGetModeCharging:
         mock_ephem.in_eclipse = Mock(return_value=True)
         acs.ephem = mock_ephem
 
-        # Mock ephemeris_in_eclipse
-        from conops import acs as acs_module
-
+        # Mock constraint.in_eclipse
         mock_in_eclipse = Mock(return_value=True)
-        monkeypatch.setattr(acs_module, "ephemeris_in_eclipse", mock_in_eclipse)
+        monkeypatch.setattr(acs.constraint, "in_eclipse", mock_in_eclipse)
 
         _ = acs.get_mode(1514764800.0)
 
@@ -758,12 +752,8 @@ class TestGetModeCharging:
         mock_ephem.in_eclipse = Mock(return_value=False)
         acs.ephem = mock_ephem
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import acs as acs_module
-
-        monkeypatch.setattr(
-            acs_module, "ephemeris_in_eclipse", lambda ephem, utime: False
-        )
+        # Mock constraint.in_eclipse to return False (in sunlight)
+        monkeypatch.setattr(acs.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         mode = acs.get_mode(1514764800.0)
         assert mode == ACSMode.CHARGING
@@ -784,11 +774,9 @@ class TestGetModeCharging:
         mock_ephem.in_eclipse = Mock(return_value=False)
         acs.ephem = mock_ephem
 
-        # Mock ephemeris_in_eclipse
-        from conops import acs as acs_module
-
+        # Mock constraint.in_eclipse
         mock_in_eclipse = Mock(return_value=False)
-        monkeypatch.setattr(acs_module, "ephemeris_in_eclipse", mock_in_eclipse)
+        monkeypatch.setattr(acs.constraint, "in_eclipse", mock_in_eclipse)
 
         _ = acs.get_mode(1514764800.0)
 
@@ -809,12 +797,8 @@ class TestGetModeCharging:
         mock_ephem.in_eclipse = Mock(return_value=False)
         acs.ephem = mock_ephem
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import acs as acs_module
-
-        monkeypatch.setattr(
-            acs_module, "ephemeris_in_eclipse", lambda ephem, utime: False
-        )
+        # Mock constraint.in_eclipse to return False (in sunlight)
+        monkeypatch.setattr(acs.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         mode = acs.get_mode(1514764800.0)
         assert mode == ACSMode.CHARGING
@@ -841,12 +825,8 @@ class TestIsInChargingMode:
         mock_ephem.earth_radius_angle = [1.0]
         acs.ephem = mock_ephem
 
-        # Mock ephemeris_in_eclipse to return False (in sunlight)
-        from conops import acs as acs_module
-
-        monkeypatch.setattr(
-            acs_module, "ephemeris_in_eclipse", lambda ephem, utime: False
-        )
+        # Mock constraint.in_eclipse to return False (in sunlight)
+        monkeypatch.setattr(acs.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         assert acs._is_in_charging_mode(1514764800.0) is True
 
