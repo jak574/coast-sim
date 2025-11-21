@@ -18,16 +18,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install the latest version of uv
+
+        uses: astral-sh/setup-uv@v7
         with:
+          activate-environment: true
           python-version: ${{ matrix.python-version }}
 
-      - name: Install with test dependencies
-        run: pip install -e .[dev]
+      - name: Install package
+        env:
+          SWIFT_TOO_API_VERSION: 1.2.0
+        run: uv pip install .[dev]
 
       - name: Run pytest
         run: pytest tests/ -v --tb=short
