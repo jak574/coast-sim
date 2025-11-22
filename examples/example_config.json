@@ -27,7 +27,8 @@
                 "eclipse_power": null,
                 "eclipse_power_mode": {}
             }
-        }
+        },
+        "constraint": null
     },
     "solar_panel": {
         "name": "Default Solar Panel",
@@ -58,7 +59,8 @@
                 },
                 "heater": null
             }
-        ]
+        ],
+        "constraint": null
     },
     "battery": {
         "name": "Default Battery",
