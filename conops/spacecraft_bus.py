@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 from pydantic import BaseModel
 
@@ -5,6 +7,9 @@ from .constants import DTOR
 from .power import PowerDraw
 from .thermal import Heater
 from .vector import great_circle, separation
+
+if TYPE_CHECKING:
+    from .constraint import Constraint
 
 
 class AttitudeControlSystem(BaseModel):
@@ -119,6 +124,7 @@ class SpacecraftBus(BaseModel):
     power_draw: PowerDraw = PowerDraw()
     attitude_control: AttitudeControlSystem = AttitudeControlSystem()
     heater: Heater | None = None
+    constraint: "Constraint | None" = None
 
     def power(self, mode: int | None = None, in_eclipse: bool = False) -> float:
         """Get the power draw for the spacecraft bus in the given mode.

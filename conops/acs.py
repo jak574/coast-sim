@@ -70,6 +70,10 @@ class ACS:
         self.constraint = constraint
         self.config = config
 
+        # Store references to bus and payload constraints for mode-specific selection
+        self.bus_constraint = config.spacecraft_bus.constraint
+        self.payload_constraint = config.payload.constraint
+
         # Current state
         self.ra = 0.0
         self.dec = 0.0
@@ -422,6 +426,9 @@ class ACS:
         # Update ACS mode based on current state
         self._update_mode(utime)
 
+        # Select appropriate constraint based on mode
+        self._select_active_constraint(utime)
+
         # Check current constraints
         self._check_constraints(utime)
 
@@ -527,6 +534,24 @@ class ACS:
     def _update_mode(self, utime: float) -> None:
         """Update ACS mode based on current slew/pass state."""
         self.acsmode = self.get_mode(utime)
+
+    def _select_active_constraint(self, utime: float) -> None:
+        """Select the appropriate constraint based on current ACS mode.
+
+        In SAFE mode, use spacecraft bus constraints.
+        Otherwise, use payload constraints for science operations.
+        """
+        if self.in_safe_mode or self.acsmode == ACSMode.SAFE:
+            # SAFE mode: use spacecraft bus constraints
+            if self.bus_constraint is not None:
+                self.constraint = self.bus_constraint
+        else:
+            # Normal operations: use payload constraints for science
+            if self.payload_constraint is not None:
+                self.constraint = self.payload_constraint
+            elif self.bus_constraint is not None:
+                # Fallback to bus constraint if no payload constraint
+                self.constraint = self.bus_constraint
 
     def _check_constraints(self, utime: float) -> None:
         """Check and log constraint violations for current pointing."""
