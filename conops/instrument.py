@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 
 from .spacecraft_bus import PowerDraw
+from .thermal import Heater
 
 
 class Instrument(BaseModel):
@@ -28,10 +29,23 @@ class Instrument(BaseModel):
 
     name: str = "Default Instrument"
     power_draw: PowerDraw = PowerDraw(nominal_power=50, peak_power=100, power_mode={})
+    heater: Heater | None = None
 
-    def power(self, mode: int | None = None) -> float:
-        """Get the power draw for the spacecraft bus in the given mode."""
-        return self.power_draw.power(mode)
+    def power(self, mode: int | None = None, in_eclipse: bool = False) -> float:
+        """Get the power draw for the instrument in the given mode.
+
+        Args:
+            mode: Operational mode (None for nominal)
+            in_eclipse: Whether spacecraft is in eclipse
+
+        Returns:
+            Total power draw in watts
+        """
+        base_power = self.power_draw.power(mode, in_eclipse=in_eclipse)
+        heater_power = (
+            self.heater.power(mode, in_eclipse=in_eclipse) if self.heater else 0.0
+        )
+        return base_power + heater_power
 
 
 class InstrumentSet(BaseModel):
@@ -56,6 +70,17 @@ class InstrumentSet(BaseModel):
 
     instruments: list[Instrument] = [Instrument()]
 
-    def power(self, mode: int | None = None) -> float:
-        """Get the total power draw for all instruments in the given mode."""
-        return sum(instrument.power(mode) for instrument in self.instruments)
+    def power(self, mode: int | None = None, in_eclipse: bool = False) -> float:
+        """Get the total power draw for all instruments in the given mode.
+
+        Args:
+            mode: Operational mode (None for nominal)
+            in_eclipse: Whether spacecraft is in eclipse
+
+        Returns:
+            Total power draw in watts
+        """
+        return sum(
+            instrument.power(mode, in_eclipse=in_eclipse)
+            for instrument in self.instruments
+        )

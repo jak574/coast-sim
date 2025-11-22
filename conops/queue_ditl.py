@@ -163,8 +163,13 @@ class QueueDITL(DITLMixin):
             # Close PPT timeline segment if no active observation
             self._close_ppt_timeline_if_needed(utime)
 
-            # Record spacecraft telemetry
-            self._record_spacecraft_state(i, utime, ra, dec, roll, obsid, mode)
+            # Record pointing and mode
+            self._record_pointing_data(ra, dec, roll, obsid, mode)
+
+            # Calculate and record power data
+            self._record_power_data(
+                i, utime, ra, dec, mode, in_eclipse=self.acs.in_eclipse
+            )
 
         # Make sure the last PPT of the day ends (if any)
         if self.ppst:
@@ -507,23 +512,6 @@ class QueueDITL(DITLMixin):
             print(f"{unixtime2date(utime)} No targets available from Queue")
             return lastra, lastdec
 
-    def _record_spacecraft_state(
-        self,
-        i: int,
-        utime: float,
-        ra: float,
-        dec: float,
-        roll: float,
-        obsid: int,
-        mode: ACSMode,
-    ) -> None:
-        """Record spacecraft state and power for this timestep."""
-        # Record pointing and mode
-        self._record_pointing_data(ra, dec, roll, obsid, mode)
-
-        # Calculate and record power data
-        self._record_power_data(i, utime, ra, dec, mode)
-
     def _record_pointing_data(
         self, ra: float, dec: float, roll: float, obsid: int, mode: ACSMode
     ) -> None:
@@ -535,7 +523,13 @@ class QueueDITL(DITLMixin):
         self.obsid.append(obsid)
 
     def _record_power_data(
-        self, i: int, utime: float, ra: float, dec: float, mode: ACSMode
+        self,
+        i: int,
+        utime: float,
+        ra: float,
+        dec: float,
+        mode: ACSMode,
+        in_eclipse: bool,
     ) -> None:
         """Calculate and record power generation, consumption, and battery state."""
         # Calculate solar panel power
@@ -544,7 +538,9 @@ class QueueDITL(DITLMixin):
         self.panel_power.append(panel_power)
 
         # Calculate total power consumption
-        total_power = self._calculate_power_consumption(mode)
+        total_power = self._calculate_power_consumption(
+            mode=mode, in_eclipse=in_eclipse
+        )
         self.power.append(total_power)
 
         # Update battery state
@@ -563,9 +559,11 @@ class QueueDITL(DITLMixin):
         assert isinstance(panel_power, float)
         return panel_illumination, panel_power
 
-    def _calculate_power_consumption(self, mode: ACSMode) -> float:
+    def _calculate_power_consumption(self, mode: ACSMode, in_eclipse: bool) -> float:
         """Calculate total spacecraft power consumption."""
-        return self.spacecraft_bus.power(mode) + self.instruments.power(mode)
+        return self.spacecraft_bus.power(
+            mode=mode, in_eclipse=in_eclipse
+        ) + self.instruments.power(mode=mode, in_eclipse=in_eclipse)
 
     def _update_battery_state(
         self, consumed_power: float, generated_power: float

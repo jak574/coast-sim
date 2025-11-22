@@ -61,6 +61,7 @@ class ACS:
     current_slew: Slew | Pass | None
     last_ppt: Slew | None
     last_slew: Slew | Pass | None
+    in_eclipse: bool
 
     def __init__(self, constraint: Constraint, config: Config) -> None:
         """Initialize the Attitude Control System."""
@@ -74,6 +75,7 @@ class ACS:
         self.roll = 0.0
         self.obstype = "PPT"
         self.acsmode = ACSMode.SCIENCE  # Start in science/pointing mode
+        self.in_eclipse = False  # Initialize eclipse state
 
         # Command queue (sorted by execution_time)
         self.command_queue = []
@@ -349,6 +351,9 @@ class ACS:
         3. Updates the current ACS mode based on slew/pass state
         4. Calculates current RA/Dec pointing
         """
+        # Determine if the spacecraft is currently in eclipse
+        self.in_eclipse = self.constraint.in_eclipse(ra=0, dec=0, time=utime)  # type: ignore[assignment]
+
         # Process any commands scheduled for execution at or before current time
         self._process_commands(utime)
 
@@ -384,6 +389,7 @@ class ACS:
         This is the authoritative source for determining spacecraft operational mode,
         considering slewing state, passes, SAA region, and battery charging.
         """
+
         # Check if actively slewing
         if self._is_actively_slewing(utime):
             assert self.current_slew is not None, (
@@ -392,7 +398,7 @@ class ACS:
             # Check if slewing for charging - but only report CHARGING if in sunlight
             if self.current_slew.obstype == "CHARGE":
                 # Check eclipse state - no point being in CHARGING mode during eclipse
-                if self.constraint.in_eclipse(ra=0, dec=0, time=utime):
+                if self.in_eclipse:
                     return ACSMode.SLEWING  # In eclipse, treat as normal slew
                 return ACSMode.CHARGING
             return (
@@ -436,9 +442,8 @@ class ACS:
             # No ephemeris, assume sunlight (charging possible)
             return True
 
-        in_eclipse = self.constraint.in_eclipse(ra=0, dec=0, time=utime)
         # Only charging mode if NOT in eclipse
-        return not in_eclipse
+        return not self.in_eclipse
 
     def _is_in_pass_dwell(self, utime: float) -> bool:
         """Check if spacecraft is in pass dwell phase (stationary during groundstation contact)."""

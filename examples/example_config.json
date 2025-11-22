@@ -8,13 +8,25 @@
             "power_mode": {
                 "0": 70.0,
                 "1": 100.0
-            }
+            },
+            "eclipse_power": null,
+            "eclipse_power_mode": {}
         },
         "attitude_control": {
             "slew_acceleration": 0.01,
-            "max_slew_rate": 1.0,
+            "max_slew_rate": 0.3,
             "slew_accuracy": 0.01,
             "settle_time": 10.0
+        },
+        "heater": {
+            "name": "Bus Heaters",
+            "power_draw": {
+                "nominal_power": 50.0,
+                "peak_power": 300.0,
+                "power_mode": {},
+                "eclipse_power": null,
+                "eclipse_power_mode": {}
+            }
         }
     },
     "solar_panel": {
@@ -44,8 +56,11 @@
                         "0": 200.0,
                         "1": 50.0,
                         "2": 50.0
-                    }
-                }
+                    },
+                    "eclipse_power": null,
+                    "eclipse_power_mode": {}
+                },
+                "heater": null
             }
         ]
     },
