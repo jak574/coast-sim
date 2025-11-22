@@ -18,7 +18,6 @@ class TestConfig:
         """Test that Config initializes correctly."""
         # Create minimal required objects
         spacecraft_bus = Mock(spec=SpacecraftBus)
-        spacecraft_bus.constraint = None  # Add constraint attribute
         solar_panel = Mock(spec=SolarPanelSet)
         payload = Mock(spec=Payload)
         payload.constraint = None  # Add constraint attribute
@@ -49,7 +48,6 @@ class TestConfig:
     def test_config_default_name(self):
         """Test that Config uses default name."""
         spacecraft_bus = Mock(spec=SpacecraftBus)
-        spacecraft_bus.constraint = None  # Add constraint attribute
         solar_panel = Mock(spec=SolarPanelSet)
         payload = Mock(spec=Payload)
         payload.constraint = None  # Add constraint attribute

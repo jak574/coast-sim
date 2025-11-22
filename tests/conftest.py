@@ -75,7 +75,6 @@ def mock_config():
     config = Mock()
     config.ground_stations = Mock()
     config.spacecraft_bus = Mock()
-    config.spacecraft_bus.constraint = None  # Add constraint attribute
     config.spacecraft_bus.attitude_control = Mock()
     config.spacecraft_bus.attitude_control.predict_slew = Mock(
         return_value=(0.0, (Mock(), Mock()))

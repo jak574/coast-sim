@@ -37,7 +37,6 @@ class MockDITL(DITLMixin):
 def create_test_config():
     """Create a minimal test config."""
     spacecraft_bus = Mock(spec=SpacecraftBus)
-    spacecraft_bus.constraint = None  # Add constraint attribute
     solar_panel = Mock(spec=SolarPanelSet)
     payload = Mock(spec=Payload)
     payload.constraint = None  # Add constraint attribute

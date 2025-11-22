@@ -69,10 +69,8 @@ class ACS:
         assert constraint is not None, "Constraint must be provided to ACS"
         self.constraint = constraint
         self.config = config
-
-        # Store references to bus and payload constraints for mode-specific selection
-        self.bus_constraint = config.spacecraft_bus.constraint
-        self.payload_constraint = config.payload.constraint
+        self.base_constraint = constraint  # Store base constraint from config
+        self.payload_constraint = config.payload.constraint  # Optional payload override
 
         # Current state
         self.ra = 0.0
@@ -538,20 +536,15 @@ class ACS:
     def _select_active_constraint(self, utime: float) -> None:
         """Select the appropriate constraint based on current ACS mode.
 
-        In SAFE mode, use spacecraft bus constraints.
-        Otherwise, use payload constraints for science operations.
+        Use base constraint for all operations. In Science mode, if a payload-specific
+        constraint is defined, use that instead.
         """
-        if self.in_safe_mode or self.acsmode == ACSMode.SAFE:
-            # SAFE mode: use spacecraft bus constraints
-            if self.bus_constraint is not None:
-                self.constraint = self.bus_constraint
+        if self.acsmode == ACSMode.SCIENCE and self.payload_constraint is not None:
+            # Science mode with payload constraint: use payload-specific constraint
+            self.constraint = self.payload_constraint
         else:
-            # Normal operations: use payload constraints for science
-            if self.payload_constraint is not None:
-                self.constraint = self.payload_constraint
-            elif self.bus_constraint is not None:
-                # Fallback to bus constraint if no payload constraint
-                self.constraint = self.bus_constraint
+            # All other modes: use base constraint
+            self.constraint = self.base_constraint
 
     def _check_constraints(self, utime: float) -> None:
         """Check and log constraint violations for current pointing."""

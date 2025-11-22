@@ -16,8 +16,8 @@ from conops.spacecraft_bus import SpacecraftBus
 
 
 @pytest.fixture
-def bus_constraint():
-    """Create a mock constraint for spacecraft bus."""
+def base_constraint():
+    """Create a mock base constraint for config."""
     constraint = Mock(spec=Constraint)
     ephem = Mock()
     ephem.step_size = 60
@@ -52,10 +52,9 @@ def payload_constraint():
 
 
 @pytest.fixture
-def config_with_separate_constraints(bus_constraint, payload_constraint):
-    """Create a config with separate bus and payload constraints."""
+def config_with_payload_constraint(base_constraint, payload_constraint):
+    """Create a config with base constraint and payload override."""
     spacecraft_bus = Mock(spec=SpacecraftBus)
-    spacecraft_bus.constraint = bus_constraint
     spacecraft_bus.attitude_control = Mock()
     spacecraft_bus.attitude_control.predict_slew = Mock(
         return_value=(0.0, (Mock(), Mock()))
@@ -71,14 +70,13 @@ def config_with_separate_constraints(bus_constraint, payload_constraint):
     battery = Mock(spec=Battery)
     ground_stations = Mock(spec=GroundStationRegistry)
 
-    # Use bus constraint as the top-level constraint for initialization
     config = Config(
         name="Test Config",
         spacecraft_bus=spacecraft_bus,
         solar_panel=solar_panel,
         payload=payload,
         battery=battery,
-        constraint=bus_constraint,
+        constraint=base_constraint,
         ground_stations=ground_stations,
     )
     return config
@@ -87,26 +85,22 @@ def config_with_separate_constraints(bus_constraint, payload_constraint):
 class TestConstraintSelection:
     """Test constraint selection based on ACS mode."""
 
-    def test_acs_stores_bus_and_payload_constraints(
-        self, config_with_separate_constraints, bus_constraint, payload_constraint
+    def test_acs_stores_base_and_payload_constraints(
+        self, config_with_payload_constraint, base_constraint, payload_constraint
     ):
-        """Test that ACS stores references to both bus and payload constraints."""
+        """Test that ACS stores references to both base and payload constraints."""
         with patch("conops.acs.PassTimes"):
-            acs = ACS(
-                constraint=bus_constraint, config=config_with_separate_constraints
-            )
+            acs = ACS(constraint=base_constraint, config=config_with_payload_constraint)
 
-            assert acs.bus_constraint is bus_constraint
+            assert acs.base_constraint is base_constraint
             assert acs.payload_constraint is payload_constraint
 
-    def test_normal_mode_uses_payload_constraint(
-        self, config_with_separate_constraints, bus_constraint, payload_constraint
+    def test_science_mode_uses_payload_constraint(
+        self, config_with_payload_constraint, base_constraint, payload_constraint
     ):
-        """Test that normal science mode uses payload constraint."""
+        """Test that science mode uses payload constraint when defined."""
         with patch("conops.acs.PassTimes"):
-            acs = ACS(
-                constraint=bus_constraint, config=config_with_separate_constraints
-            )
+            acs = ACS(constraint=base_constraint, config=config_with_payload_constraint)
             acs.acsmode = ACSMode.SCIENCE
 
             # Simulate pointing call which triggers constraint selection
@@ -115,45 +109,37 @@ class TestConstraintSelection:
             # Should be using payload constraint for science operations
             assert acs.constraint is payload_constraint
 
-    def test_safe_mode_uses_bus_constraint(
-        self, config_with_separate_constraints, bus_constraint, payload_constraint
+    def test_non_science_mode_uses_base_constraint(
+        self, config_with_payload_constraint, base_constraint, payload_constraint
     ):
-        """Test that SAFE mode uses spacecraft bus constraint."""
+        """Test that non-science modes use base constraint."""
         with patch("conops.acs.PassTimes"):
-            acs = ACS(
-                constraint=bus_constraint, config=config_with_separate_constraints
-            )
+            acs = ACS(constraint=base_constraint, config=config_with_payload_constraint)
 
-            # Enter safe mode
-            acs.request_safe_mode(1000.0)
-            acs.pointing(1000.0)
+            # Directly test the _select_active_constraint method
+            # Test PASS mode
+            acs.acsmode = ACSMode.PASS
+            acs._select_active_constraint(1000.0)
+            assert acs.constraint is base_constraint
 
-            # Should be using bus constraint in safe mode
-            assert acs.in_safe_mode
-            assert acs.constraint is bus_constraint
+            # Test SLEWING mode
+            acs.acsmode = ACSMode.SLEWING
+            acs._select_active_constraint(1000.0)
+            assert acs.constraint is base_constraint
 
-    def test_slewing_mode_uses_payload_constraint(
-        self, config_with_separate_constraints, bus_constraint, payload_constraint
-    ):
-        """Test that SLEWING mode uses payload constraint (not bus)."""
-        with patch("conops.acs.PassTimes"):
-            acs = ACS(
-                constraint=bus_constraint, config=config_with_separate_constraints
-            )
+            # Test CHARGING mode
+            acs.acsmode = ACSMode.CHARGING
+            acs._select_active_constraint(1000.0)
+            assert acs.constraint is base_constraint
 
-            # Set up a slew
-            acs.current_slew = Mock()
-            acs.current_slew.is_slewing = Mock(return_value=True)
-            acs.current_slew.obstype = "PPT"
+            # Test SAA mode
+            acs.acsmode = ACSMode.SAA
+            acs._select_active_constraint(1000.0)
+            assert acs.constraint is base_constraint
 
-            acs.pointing(1000.0)
-
-            # Even when slewing, should use payload constraint for science slews
-            assert acs.constraint is payload_constraint
-
-    def test_fallback_to_bus_constraint_when_no_payload(self):
-        """Test that ACS falls back to bus constraint if no payload constraint exists."""
-        bus_constraint = Mock(spec=Constraint)
+    def test_science_mode_without_payload_constraint(self):
+        """Test that science mode uses base constraint when no payload constraint exists."""
+        base_constraint = Mock(spec=Constraint)
         ephem = Mock()
         ephem.step_size = 60
         # Mock earth and sun arrays
@@ -162,12 +148,11 @@ class TestConstraintSelection:
         earth_mock.dec = Mock(deg=0.0)
         ephem.earth = [earth_mock]
         ephem.index = Mock(return_value=0)
-        bus_constraint.ephem = ephem
-        bus_constraint.in_eclipse = Mock(return_value=False)
-        bus_constraint.inoccult = Mock(return_value=False)
+        base_constraint.ephem = ephem
+        base_constraint.in_eclipse = Mock(return_value=False)
+        base_constraint.inoccult = Mock(return_value=False)
 
         spacecraft_bus = Mock(spec=SpacecraftBus)
-        spacecraft_bus.constraint = bus_constraint
         spacecraft_bus.attitude_control = Mock()
 
         payload = Mock(spec=Payload)
@@ -182,15 +167,15 @@ class TestConstraintSelection:
             solar_panel=solar_panel,
             payload=payload,
             battery=battery,
-            constraint=bus_constraint,
+            constraint=base_constraint,
             ground_stations=ground_stations,
         )
 
         with patch("conops.acs.PassTimes"):
-            acs = ACS(constraint=bus_constraint, config=config)
+            acs = ACS(constraint=base_constraint, config=config)
             acs.acsmode = ACSMode.SCIENCE
 
             acs.pointing(1000.0)
 
-            # Should fall back to bus constraint
-            assert acs.constraint is bus_constraint
+            # Should use base constraint
+            assert acs.constraint is base_constraint

@@ -12,8 +12,8 @@ class Config(BaseModel):
     """
     Configuration class for the spacecraft and its subsystems.
 
-    Constraints can be defined at the spacecraft_bus and/or payload level.
-    The top-level constraint field is maintained for backward compatibility.
+    The top-level constraint is used for all operations. If payload.constraint
+    is defined, it overrides the top-level constraint during Science mode operations.
     """
 
     name: str = "Default Config"
@@ -21,5 +21,5 @@ class Config(BaseModel):
     solar_panel: SolarPanelSet
     payload: Payload
     battery: Battery
-    constraint: Constraint | None = None
+    constraint: Constraint
     ground_stations: GroundStationRegistry
