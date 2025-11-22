@@ -2,7 +2,7 @@ from math import isclose
 
 import pytest
 
-from conops.instrument import Instrument, InstrumentSet
+from conops.instrument import Instrument, Payload
 from conops.power import PowerDraw
 from conops.thermal import Heater
 
@@ -25,7 +25,7 @@ def cam_instrument(pd_with_modes):
     return Instrument(name="Cam", power_draw=pd_with_modes)
 
 
-# fixtures for instrument set tests
+# fixtures for payload tests
 @pytest.fixture
 def i1_10_20():
     return Instrument(
@@ -41,8 +41,8 @@ def i2_20_40():
 
 
 @pytest.fixture
-def instrument_set_10_20_and_20_40(i1_10_20, i2_20_40):
-    return InstrumentSet(instruments=[i1_10_20, i2_20_40])
+def payload_10_20_and_20_40(i1_10_20, i2_20_40):
+    return Payload(instruments=[i1_10_20, i2_20_40])
 
 
 @pytest.fixture
@@ -53,8 +53,8 @@ def i1_5_10_mode0():
 
 
 @pytest.fixture
-def instrument_set_mixed(i1_5_10_mode0, i2_20_40):
-    return InstrumentSet(instruments=[i1_5_10_mode0, i2_20_40])
+def payload_mixed(i1_5_10_mode0, i2_20_40):
+    return Payload(instruments=[i1_5_10_mode0, i2_20_40])
 
 
 class TestInstrument:
@@ -94,31 +94,23 @@ class TestInstrument:
         assert isclose(inst.power(999), 75.0)
 
 
-class TestInstrumentSet:
-    def test_instrument_set_aggregates_nominal_power_initial(
-        self, instrument_set_10_20_and_20_40
-    ):
-        instrument_set = instrument_set_10_20_and_20_40
-        assert isclose(instrument_set.power(), 30.0)
+class TestPayload:
+    def test_payload_aggregates_nominal_power_initial(self, payload_10_20_and_20_40):
+        payload = payload_10_20_and_20_40
+        assert isclose(payload.power(), 30.0)
 
-    def test_instrument_set_aggregates_nominal_power_after_change(
-        self, i1_10_20, i2_20_40
-    ):
-        instrument_set = InstrumentSet(instruments=[i1_10_20, i2_20_40])
+    def test_payload_aggregates_nominal_power_after_change(self, i1_10_20, i2_20_40):
+        payload = Payload(instruments=[i1_10_20, i2_20_40])
         i1_10_20.power_draw.nominal_power = 15.0
-        assert isclose(instrument_set.power(), 35.0)
+        assert isclose(payload.power(), 35.0)
 
-    def test_instrument_set_aggregates_mode_0_with_mixed_modes(
-        self, instrument_set_mixed
-    ):
-        instrument_set = instrument_set_mixed
-        assert isclose(instrument_set.power(0), 120.0)
+    def test_payload_aggregates_mode_0_with_mixed_modes(self, payload_mixed):
+        payload = payload_mixed
+        assert isclose(payload.power(0), 120.0)
 
-    def test_instrument_set_aggregates_mode_missing_falls_back_to_nominal(
-        self, instrument_set_mixed
-    ):
-        instrument_set = instrument_set_mixed
-        assert isclose(instrument_set.power(99), 25.0)
+    def test_payload_aggregates_mode_missing_falls_back_to_nominal(self, payload_mixed):
+        payload = payload_mixed
+        assert isclose(payload.power(99), 25.0)
 
 
 class TestInstrumentEclipse:
@@ -192,10 +184,10 @@ class TestInstrumentEclipse:
         assert instrument.power(in_eclipse=True) == 30.0
 
 
-class TestInstrumentSetEclipse:
+class TestPayloadEclipse:
     """Test eclipse-aware power for instrument sets."""
 
-    def test_instrument_set_eclipse(self):
+    def test_payload_eclipse(self):
         """Test that instrument set passes eclipse to all instruments."""
         inst1 = Instrument(
             name="Cam1", power_draw=PowerDraw(nominal_power=30.0, eclipse_power=40.0)
@@ -204,14 +196,14 @@ class TestInstrumentSetEclipse:
             name="Cam2", power_draw=PowerDraw(nominal_power=20.0, eclipse_power=25.0)
         )
 
-        inst_set = InstrumentSet(instruments=[inst1, inst2])
+        inst_set = Payload(instruments=[inst1, inst2])
 
         # Sunlight: 30 + 20 = 50
         assert inst_set.power(in_eclipse=False) == 50.0
         # Eclipse: 40 + 25 = 65
         assert inst_set.power(in_eclipse=True) == 65.0
 
-    def test_instrument_set_with_heaters_eclipse(self):
+    def test_payload_with_heaters_eclipse(self):
         """Test instrument set with heaters in eclipse."""
         inst1 = Instrument(
             name="Detector",
@@ -230,7 +222,7 @@ class TestInstrumentSetEclipse:
             ),
         )
 
-        inst_set = InstrumentSet(instruments=[inst1, inst2])
+        inst_set = Payload(instruments=[inst1, inst2])
 
         # Sunlight: (35+5) + (25+3) = 68
         assert inst_set.power(in_eclipse=False) == 68.0
