@@ -1,12 +1,8 @@
-from typing import TYPE_CHECKING
-
 from pydantic import BaseModel
 
+from .constraint import Constraint
 from .spacecraft_bus import PowerDraw
 from .thermal import Heater
-
-if TYPE_CHECKING:
-    from .constraint import Constraint
 
 
 class Instrument(BaseModel):
@@ -75,7 +71,7 @@ class Payload(BaseModel):
     """
 
     payload: list[Instrument] = [Instrument()]
-    constraint: "Constraint | None" = None
+    constraint: Constraint | None = None
 
     def power(self, mode: int | None = None, in_eclipse: bool = False) -> float:
         """Get the total power draw for all instruments in the payload in the given mode.
