@@ -2,6 +2,7 @@ from pydantic import BaseModel
 
 from .battery import Battery
 from .constraint import Constraint
+from .fault_management import FaultManagement
 from .groundstation import GroundStationRegistry
 from .instrument import Payload
 from .solar_panel import SolarPanelSet
@@ -20,3 +21,21 @@ class Config(BaseModel):
     battery: Battery
     constraint: Constraint
     ground_stations: GroundStationRegistry
+    fault_management: FaultManagement | None = None
+
+    def init_fault_management_defaults(self) -> None:
+        """Initialize default fault thresholds if none provided.
+
+        Currently sets up a battery_level threshold using the battery
+        max_depth_of_discharge as YELLOW and (max_depth_of_discharge - 0.1)
+        as RED for demonstration. Users can override via config serialization.
+        """
+        if self.fault_management is None:
+            return
+        # Only add battery threshold if not already present
+        if "battery_level" not in self.fault_management.thresholds:
+            yellow = self.battery.max_depth_of_discharge
+            red = max(yellow - 0.1, 0.0)  # Ensure non-negative
+            self.fault_management.add_threshold(
+                name="battery_level", yellow=yellow, red=red, direction="below"
+            )
