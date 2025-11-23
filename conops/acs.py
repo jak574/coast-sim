@@ -1,9 +1,8 @@
-from enum import Enum, auto
 from typing import Any
 
 import rust_ephem
-from pydantic import BaseModel, ConfigDict
 
+from .acs_command import ACSCommand, ACSCommandType
 from .common import ACSMode, dtutcfromtimestamp, unixtime2date, unixtime2yearday
 from .config import Config
 from .constants import DTOR
@@ -12,31 +11,6 @@ from .passes import Pass, PassTimes
 from .pointing import Pointing
 from .roll import optimum_roll
 from .slew import Slew
-
-
-class ACSCommandType(Enum):
-    """Types of commands that can be queued for the ACS."""
-
-    SLEW_TO_TARGET = auto()
-    START_PASS = auto()
-    END_PASS = auto()
-    START_BATTERY_CHARGE = auto()
-    END_BATTERY_CHARGE = auto()
-    ENTER_SAFE_MODE = auto()
-
-
-class ACSCommand(BaseModel):
-    """A command to be executed by the ACS state machine."""
-
-    command_type: ACSCommandType
-    execution_time: float
-    slew: Slew | Pass | None = None
-    ra: float | None = None
-    dec: float | None = None
-    obsid: int | None = None
-    obstype: str = "PPT"
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ACS:

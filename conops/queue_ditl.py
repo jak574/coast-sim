@@ -175,6 +175,15 @@ class QueueDITL(DITLMixin):
                 i, utime, ra, dec, mode, in_eclipse=self.acs.in_eclipse
             )
 
+            # Fault management checks (e.g., battery level thresholds)
+            if self.config.fault_management is not None:
+                self.config.fault_management.check(
+                    values={"battery_level": self.battery.battery_level},
+                    utime=utime,
+                    step_size=self.step_size,
+                    acs=self.acs,
+                )
+
         # Make sure the last PPT of the day ends (if any)
         if self.ppst:
             self.ppst[-1].end = utime
