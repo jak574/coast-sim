@@ -21,7 +21,7 @@
         "heater": {
             "name": "Bus Heaters",
             "power_draw": {
-                "nominal_power": 50.0,
+                "nominal_power": 150.0,
                 "peak_power": 300.0,
                 "power_mode": {},
                 "eclipse_power": null,
@@ -48,11 +48,15 @@
     "payload": {
         "payload": [
             {
-                "name": "Default Instrument",
+                "name": "Optical Imager",
                 "power_draw": {
                     "nominal_power": 50.0,
-                    "peak_power": 100.0,
-                    "power_mode": {},
+                    "peak_power": 300.0,
+                    "power_mode": {
+                        "0": 200.0,
+                        "1": 50.0,
+                        "2": 50.0
+                    },
                     "eclipse_power": null,
                     "eclipse_power_mode": {}
                 },
@@ -170,5 +174,18 @@
                 }
             }
         ]
+    },
+    "fault_management": {
+        "thresholds": {
+            "battery_level": {
+                "name": "battery_level",
+                "yellow": 0.5,
+                "red": 0.4,
+                "direction": "below"
+            }
+        },
+        "states": {},
+        "safe_mode_on_red": true,
+        "safe_mode_requested": false
     }
 }
