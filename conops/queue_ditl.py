@@ -198,8 +198,6 @@ class QueueDITL(DITLMixin):
                 self.config.fault_management.safe_mode_requested
                 and not self.acs.in_safe_mode
             ):
-                from .acs import ACSCommand, ACSCommandType
-
                 command = ACSCommand(
                     command_type=ACSCommandType.ENTER_SAFE_MODE,
                     execution_time=utime,
