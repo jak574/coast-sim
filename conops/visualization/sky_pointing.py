@@ -411,15 +411,31 @@ class SkyPointingController:
         body_dec : float or None
             Dec of celestial body (for marker).
         """
-        # Use a uniform grid sampling the full sky
-        ra_samples = np.linspace(0, 360, self.n_grid_points * 2, endpoint=False)
+        # Sample uniformly in Mollweide projection space for even point density
+        # The Mollweide projection compresses RA (longitude) near the poles
+        # We need fewer RA samples at high declinations to maintain even visual density
+
+        # Linear declination sampling is fine
         dec_samples = np.linspace(-90, 90, self.n_grid_points)
 
-        ra_mesh, dec_mesh = np.meshgrid(ra_samples, dec_samples)
-        ra_flat = ra_mesh.flatten()
-        dec_flat = dec_mesh.flatten()
+        # For each declination, calculate how many RA samples we need
+        # based on cos(dec) - this accounts for the convergence of longitude lines
+        all_ra = []
+        all_dec = []
 
-        # Evaluate constraint for all points
+        for dec in dec_samples:
+            # Number of RA samples proportional to cos(latitude)
+            # Use more samples near equator, fewer near poles
+            cos_factor = np.cos(np.radians(dec))
+            # Ensure at least a few samples even at poles
+            n_ra_at_dec = max(8, int(self.n_grid_points * 2 * cos_factor))
+            ra_at_dec = np.linspace(0, 360, n_ra_at_dec, endpoint=False)
+
+            all_ra.extend(ra_at_dec)
+            all_dec.extend([dec] * len(ra_at_dec))
+
+        ra_flat = np.array(all_ra)
+        dec_flat = np.array(all_dec)  # Evaluate constraint for all points
         constrained_points = []
         for ra, dec in zip(ra_flat, dec_flat):
             try:
