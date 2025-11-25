@@ -457,11 +457,12 @@ class SkyPointingController:
             dec_rad = np.radians(dec)
             earth_dec_rad = np.radians(earth_dec)
 
+            cos_value = (
+                np.sin(earth_dec_rad) * np.sin(dec_rad)
+                + np.cos(earth_dec_rad) * np.cos(dec_rad) * np.cos(delta_ra)
+            )
             angular_dist = np.degrees(
-                np.arccos(
-                    np.sin(earth_dec_rad) * np.sin(dec_rad)
-                    + np.cos(earth_dec_rad) * np.cos(dec_rad) * np.cos(delta_ra)
-                )
+                np.arccos(np.clip(cos_value, -1.0, 1.0))
             )
 
             if angular_dist <= earth_angular_radius:
