@@ -264,6 +264,7 @@ class SkyPointingController:
         idx = self._find_time_index(utime)
         current_ra = self.ditl.ra[idx]
         current_dec = self.ditl.dec[idx]
+        current_mode = self.ditl.mode[idx]
 
         # Plot scheduled observations
         self._plot_scheduled_observations()
@@ -272,7 +273,7 @@ class SkyPointingController:
         self._plot_constraint_regions(utime)
 
         # Plot current pointing
-        self._plot_current_pointing(current_ra, current_dec)
+        self._plot_current_pointing(current_ra, current_dec, current_mode)
 
         # Set up the plot
         self._setup_plot_appearance(utime)
@@ -477,7 +478,7 @@ class SkyPointingController:
                 zorder=3,
             )
 
-    def _plot_current_pointing(self, ra, dec):
+    def _plot_current_pointing(self, ra, dec, mode):
         """Plot the current spacecraft pointing direction.
 
         Parameters
@@ -486,9 +487,24 @@ class SkyPointingController:
             Right ascension in degrees.
         dec : float
             Declination in degrees.
+        mode : ACSMode
+            Current ACS mode.
         """
         # Convert RA for plotting
         ra_plot = ra if ra <= 180 else ra - 360
+
+        # Color based on ACS mode
+        mode_colors = {
+            "SCIENCE": "green",
+            "SLEWING": "orange",
+            "SAA": "purple",
+            "PASS": "cyan",
+            "CHARGING": "yellow",
+            "SAFE": "red",
+        }
+
+        mode_name = mode.name if hasattr(mode, "name") else str(mode)
+        color = mode_colors.get(mode_name, "red")
 
         # Plot with distinctive marker
         self.ax.plot(
@@ -496,10 +512,10 @@ class SkyPointingController:
             np.deg2rad(dec),
             marker="*",
             markersize=25,
-            markerfacecolor="red",
+            markerfacecolor=color,
             markeredgecolor="white",
             markeredgewidth=2,
-            label="Current Pointing",
+            label=f"Current Pointing ({mode_name})",
             zorder=5,
         )
 
@@ -508,7 +524,7 @@ class SkyPointingController:
             (np.deg2rad(ra_plot), np.deg2rad(dec)),
             radius=np.deg2rad(5),
             fill=False,
-            edgecolor="red",
+            edgecolor=color,
             linewidth=2,
             zorder=4,
         )
@@ -542,12 +558,45 @@ class SkyPointingController:
         # Legend (reduce clutter by only showing unique labels)
         handles, labels = self.ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
+
+        # Add ACS mode color legend entries
+        from matplotlib.lines import Line2D
+
+        mode_colors = {
+            "SCIENCE": "green",
+            "SLEWING": "orange",
+            "SAA": "purple",
+            "PASS": "cyan",
+            "CHARGING": "yellow",
+            "SAFE": "red",
+        }
+
+        # Add separator and ACS mode entries
+        mode_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="*",
+                color="w",
+                markerfacecolor=color,
+                markersize=10,
+                markeredgecolor="white",
+                markeredgewidth=1,
+                label=f"{mode}",
+            )
+            for mode, color in mode_colors.items()
+        ]
+
+        all_handles = list(by_label.values()) + mode_handles
+        all_labels = list(by_label.keys()) + [h.get_label() for h in mode_handles]
+
         self.ax.legend(
-            by_label.values(),
-            by_label.keys(),
+            all_handles,
+            all_labels,
             loc="upper left",
             bbox_to_anchor=(1.02, 1),
             fontsize=9,
+            title="ACS Modes",
         )
 
         # Set RA tick labels (mollweide uses radians internally)
