@@ -82,15 +82,15 @@ def plot_ditl_timeline(
     if config is None:
         # Resolve config: if the provided config is not a VisualizationConfig instance,
         # then try to use ditl.config.visualization if it's a VisualizationConfig, else use defaults.
-        if not isinstance(config, VisualizationConfig):
-            if (
-                hasattr(ditl, "config")
-                and hasattr(ditl.config, "visualization")
-                and isinstance(ditl.config.visualization, VisualizationConfig)
-            ):
-                config = ditl.config.visualization
-            else:
-                config = VisualizationConfig()
+        if (
+            hasattr(ditl, "config")
+            and hasattr(ditl.config, "visualization")
+            and isinstance(ditl.config.visualization, VisualizationConfig)
+        ):
+            config = ditl.config.visualization
+        else:
+            config = VisualizationConfig()
+
     # Set default font settings
     if font_family is None:
         font_family = config.font_family
