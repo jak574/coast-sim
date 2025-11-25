@@ -537,7 +537,8 @@ class SkyPointingController:
             try:
                 if constraint_func(ra, dec, utime):
                     constrained_points.append((ra, dec))
-            except Exception:
+            except Exception as e:
+                print(f"ERROR: Constraint check failed for RA={ra}, Dec={dec}: {e}")
                 continue
 
         # Plot constrained region, handling RA wrapping at boundaries
