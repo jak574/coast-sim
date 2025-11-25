@@ -411,47 +411,87 @@ class SkyPointingController:
         body_dec : float or None
             Dec of celestial body (for marker).
         """
-        # Sample points around the celestial body if available
-        if body_ra is not None and body_dec is not None:
-            # Create a denser grid around the body
-            ra_samples = np.linspace(
-                max(0, body_ra - 90), min(360, body_ra + 90), self.n_grid_points // 2
-            )
-            dec_samples = np.linspace(
-                max(-90, body_dec - 60), min(90, body_dec + 60), self.n_grid_points // 2
-            )
-        else:
-            # Use full sky grid
-            ra_samples = ra_grid
-            dec_samples = dec_grid
+        # Use a uniform grid sampling the full sky
+        ra_samples = np.linspace(0, 360, self.n_grid_points * 2, endpoint=False)
+        dec_samples = np.linspace(-90, 90, self.n_grid_points)
 
-        # Find constrained regions (vectorized)
+        ra_mesh, dec_mesh = np.meshgrid(ra_samples, dec_samples)
+        ra_flat = ra_mesh.flatten()
+        dec_flat = dec_mesh.flatten()
+
+        # Evaluate constraint for all points
         constrained_points = []
-        for ra in ra_samples:
-            for dec in dec_samples:
-                try:
-                    if constraint_func(ra, dec, utime):
-                        # Convert for plotting
-                        ra_plot = ra if ra <= 180 else ra - 360
-                        constrained_points.append(
-                            (np.deg2rad(ra_plot), np.deg2rad(dec))
-                        )
-                except Exception:
-                    # Skip points that cause errors
-                    continue
+        for ra, dec in zip(ra_flat, dec_flat):
+            try:
+                if constraint_func(ra, dec, utime):
+                    constrained_points.append((ra, dec))
+            except Exception:
+                continue
 
-        # Plot constrained region
+        # Plot constrained region, handling RA wrapping at boundaries
         if constrained_points:
             points = np.array(constrained_points)
+            ra_vals = points[:, 0]
+            dec_vals = points[:, 1]
+
+            # For Mollweide projection: RA range is -180 to 180
+            # Plot points in their natural position
+            ra_plot = np.where(ra_vals <= 180, ra_vals, ra_vals - 360)
+
+            # Find points near the boundaries (within ~20 degrees)
+            # These need to be plotted twice to handle wrapping
+            near_left = ra_vals > 340  # near RA=360
+            near_right = ra_vals < 20  # near RA=0
+
+            # Plot main points
             self.ax.scatter(
-                points[:, 0],
-                points[:, 1],
+                np.deg2rad(ra_plot),
+                np.deg2rad(dec_vals),
+                s=20,
+                c=color,
+                alpha=self.constraint_alpha,
+                marker="s",
+                zorder=1,
+                edgecolors="none",
+            )
+
+            # Plot wrapped copies for points near left edge (RA~360)
+            if np.any(near_left):
+                ra_wrapped = ra_plot[near_left] + 360  # wrap to positive side
+                self.ax.scatter(
+                    np.deg2rad(ra_wrapped),
+                    np.deg2rad(dec_vals[near_left]),
+                    s=20,
+                    c=color,
+                    alpha=self.constraint_alpha,
+                    marker="s",
+                    zorder=1,
+                    edgecolors="none",
+                )
+
+            # Plot wrapped copies for points near right edge (RA~0)
+            if np.any(near_right):
+                ra_wrapped = ra_plot[near_right] - 360  # wrap to negative side
+                self.ax.scatter(
+                    np.deg2rad(ra_wrapped),
+                    np.deg2rad(dec_vals[near_right]),
+                    s=20,
+                    c=color,
+                    alpha=self.constraint_alpha,
+                    marker="s",
+                    zorder=1,
+                    edgecolors="none",
+                )
+
+            # Add single legend entry
+            self.ax.scatter(
+                [],
+                [],
                 s=20,
                 c=color,
                 alpha=self.constraint_alpha,
                 marker="s",
                 label=f"{name} Constraint",
-                zorder=1,
             )
 
         # Mark celestial body position
