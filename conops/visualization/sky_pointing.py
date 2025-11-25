@@ -56,6 +56,8 @@ def plot_sky_pointing(
         The created figure.
     ax : matplotlib.axes.Axes
         The axes containing the sky map.
+    controller : SkyPointingController or None
+        The controller object if show_controls=True, otherwise None.
 
     Examples
     --------
