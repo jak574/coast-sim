@@ -449,11 +449,6 @@ class SkyPointingController:
             # Plot points in their natural position
             ra_plot = np.where(ra_vals <= 180, ra_vals, ra_vals - 360)
 
-            # Find points near the boundaries (within ~20 degrees)
-            # These need to be plotted twice to handle wrapping
-            # near_left = ra_vals > 340  # near RA=360
-            # near_right = ra_vals < 20  # near RA=0
-
             # Plot main points
             self.ax.scatter(
                 np.deg2rad(ra_plot),
