@@ -4,8 +4,10 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
 
 from conops import DITL, ACSMode
+from conops.ditl.ditl_mixin import DITLMixin
 
 
 class DummyEphemeris:
@@ -72,6 +74,15 @@ def mock_config_detailed():
     # Mock payload
     config.payload = Mock()
     config.payload.power = Mock(return_value=30.0)
+    config.payload.data_generated = Mock(return_value=0.0)
+
+    # Mock recorder
+    config.recorder = Mock()
+    config.recorder.current_volume_gb = 0.0
+    config.recorder.get_fill_fraction = Mock(return_value=0.0)
+    config.recorder.get_alert_level = Mock(return_value="none")
+    config.recorder.add_data = Mock()
+    config.recorder.remove_data = Mock(return_value=0.0)
 
     # Mock solar panel
     config.solar_panel = Mock()
@@ -119,3 +130,191 @@ def ditl(mock_config_detailed, mock_ephem):
         )
 
         return ditl
+
+
+@pytest.fixture
+def mock_pass_inst():
+    """Mock PassTimes instance."""
+    return Mock()
+
+
+@pytest.fixture
+def mock_acs_inst():
+    """Mock ACS instance."""
+    return Mock()
+
+
+@pytest.fixture
+def ditl_instance(mock_config, mock_pass_inst, mock_acs_inst):
+    """Fixture to create a DITLMixin instance with mocked dependencies."""
+    with (
+        patch("conops.ditl.ditl_mixin.PassTimes") as mock_pass_class,
+        patch("conops.ditl.ditl_mixin.ACS") as mock_acs_class,
+        patch("conops.ditl.ditl_mixin.Plan") as mock_plan_class,
+    ):
+        # Set return values for patched classes
+        mock_pass_class.return_value = mock_pass_inst
+        mock_acs_class.return_value = mock_acs_inst
+        mock_plan_class.return_value = Mock()
+
+        ditl = DITLMixin(config=mock_config)
+        return ditl, mock_pass_inst, mock_acs_inst
+
+
+@pytest.fixture
+def populated_ditl(ditl_instance):
+    """Fixture to populate DITLMixin with sample data for plotting."""
+    ditl, _, _ = ditl_instance
+    # Populate data arrays of same length
+    base_time = 1514764800.0
+    ditl.utime = [base_time + i * 60 for i in range(4)]
+    ditl.ra = [1.0, 2.0, 3.0, 4.0]
+    ditl.dec = [0.5, 0.6, 0.7, 0.8]
+    ditl.mode = [0, 1, 2, 3]
+    ditl.batterylevel = [0.2, 0.3, 0.4, 0.5]
+    ditl.panel = [0.1, 0.2, 0.3, 0.4]
+    ditl.power = [5.0, 6.0, 7.0, 8.0]
+    ditl.obsid = [0, 1, 2, 3]
+    return ditl
+
+
+@pytest.fixture
+def comprehensive_ditl(ditl_instance, mock_config):
+    """Fixture to populate DITLMixin with comprehensive data for statistics."""
+    from conops.ditl.ditl_stats import DITLStats
+
+    # Create a class that inherits from both mixins
+    class TestDITLWithStats(DITLMixin, DITLStats):
+        pass
+
+    ditl = TestDITLWithStats(config=mock_config)
+    # Copy the initialized attributes from the ditl_instance
+    original_ditl, _, _ = ditl_instance
+    ditl.passes = original_ditl.passes
+    ditl.acs = original_ditl.acs
+    ditl.plan = original_ditl.plan
+    ditl.executed_passes = original_ditl.executed_passes
+    ditl.begin = original_ditl.begin
+    ditl.end = original_ditl.end
+    ditl.step_size = original_ditl.step_size
+
+    # Mock battery capacity
+    mock_config.battery.watthour = 100.0
+    mock_config.battery.max_depth_of_discharge = 0.1
+
+    # Mock recorder capacity
+    mock_config.recorder.capacity_gb = 100.0
+    mock_config.recorder.yellow_threshold = 0.8
+    mock_config.recorder.red_threshold = 0.95
+
+    # Populate comprehensive telemetry data
+    base_time = 1514764800.0  # 2018-01-01 00:00:00 UTC
+    ditl.utime = [base_time + i * 60 for i in range(10)]
+    ditl.mode = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0]  # Mix of modes
+    ditl.obsid = [0, 10000, 10001, 0, 10002, 10003, 0, 10004, 10005, 0]
+    ditl.ra = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+    ditl.dec = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]
+    ditl.roll = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
+    ditl.batterylevel = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.8, 0.7]
+    ditl.charge_state = [0, 1, 1, 0, 1, 1, 0, 1, 1, 0]
+    ditl.power = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0]
+    ditl.power_bus = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5]
+    ditl.power_payload = [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5]
+    ditl.panel_power = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+    ditl.panel = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+    # Data management
+    ditl.recorder_volume_gb = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+    ditl.recorder_fill_fraction = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    ditl.recorder_alert = [0, 0, 0, 1, 1, 1, 2, 2, 2, 2]
+    ditl.data_generated_gb = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    ditl.data_downlinked_gb = [
+        0.0,
+        0.05,
+        0.1,
+        0.15,
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+    ]
+
+    # Mock queue and ACS commands for statistics
+    ditl.queue = Mock()
+    ditl.queue.targets = [Mock(done=True), Mock(done=False), Mock(done=True)]
+
+    ditl.acs = Mock()
+    mock_cmd1 = Mock()
+    mock_cmd1.command_type = Mock()
+    mock_cmd1.command_type.name = "SLEW"
+    mock_cmd2 = Mock()
+    mock_cmd2.command_type = Mock()
+    mock_cmd2.command_type.name = "OBSERVE"
+    ditl.acs.commands = [mock_cmd1, mock_cmd2, mock_cmd1]
+
+    # Mock executed passes
+    mock_pass = Mock()
+    mock_pass.begin = base_time + 120
+    mock_pass.end = base_time + 240
+    ditl.executed_passes = Mock()
+    ditl.executed_passes.passes = [mock_pass]
+
+    return ditl
+
+
+@pytest.fixture
+def statistics_output(comprehensive_ditl):
+    """Fixture to capture output of print_statistics."""
+    import io
+    from contextlib import redirect_stdout
+
+    f = io.StringIO()
+    with redirect_stdout(f):
+        comprehensive_ditl.print_statistics()
+    return f.getvalue()
+
+
+@pytest.fixture
+def plot_figure(populated_ditl):
+    """Fixture to create and yield the plot figure."""
+    plt.close("all")
+    with patch("matplotlib.pyplot.show"):
+        populated_ditl.plot()
+    fig = plt.gcf()
+    yield fig
+    plt.close("all")
+
+
+@pytest.fixture
+def ditl_with_payload_and_recorder(ditl_instance):
+    """Fixture to set up ditl with payload and recorder mocks."""
+    ditl, _, _ = ditl_instance
+    ditl.payload = Mock()
+    ditl.payload.data_generated.return_value = 0.1
+    ditl.recorder = Mock()
+    ditl.recorder.add_data.return_value = None
+    ditl.recorder.remove_data.return_value = 0.05
+    return ditl
+
+
+@pytest.fixture
+def ditl_with_pass_setup(ditl_instance, mock_config):
+    """Fixture to set up ditl with pass-related mocks."""
+    ditl, _, _ = ditl_instance
+    ditl.payload = Mock()
+    ditl.payload.data_generated.return_value = 0.1
+    ditl.recorder = Mock()
+    ditl.recorder.add_data.return_value = None
+    ditl.recorder.remove_data.return_value = 0.05
+    mock_pass = Mock()
+    mock_pass.in_pass.return_value = True
+    mock_pass.station = "station1"
+    ditl.acs = Mock()
+    ditl.acs.passrequests = Mock()
+    ditl.acs.passrequests.passes = [mock_pass]
+    mock_station = Mock()
+    mock_station.antenna.max_data_rate_mbps = 100.0
+    ditl.config.ground_stations = {"station1": mock_station}
+    return ditl

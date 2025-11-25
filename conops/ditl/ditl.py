@@ -2,14 +2,15 @@ import numpy as np
 
 from ..config import Config  # type: ignore[attr-defined]
 from .ditl_mixin import DITLMixin
+from .ditl_stats import DITLStats
 
 
-class DITL(DITLMixin):
+class DITL(DITLMixin, DITLStats):
     """Day In The Life (DITL) simulation class.
 
     Simulates a single day of spacecraft operations by executing a pre-planned
     observing schedule  and tracking spacecraft state including power usage,
-    battery levels, and pointing angles.
+    battery levels, pointing angles, and data management.
 
     Inherits from DITLMixin which provides shared initialization and plotting
     functionality for DITL simulations.
@@ -20,6 +21,7 @@ class DITL(DITLMixin):
         spacecraft_bus (SpacecraftBus): Spacecraft bus configuration and power draw.
         payload (Payload): Instrument configuration and power draw.
         solar_panel (SolarPanelSet): Solar panel configuration and power generation.
+        recorder (OnboardRecorder): Onboard data storage device.
         ephem (Ephemeris): Ephemeris data for position and illumination calculations.
         plan (Plan): Pre-planned pointing schedule to execute.
         acs (ACS): Attitude Control System for pointing and slew calculations.
@@ -36,6 +38,11 @@ class DITL(DITLMixin):
         batterylevel (np.ndarray): Battery state of charge at each timestep.
         batteryalert (np.ndarray): Battery alert status at each timestep.
         obsid (np.ndarray): Observation ID at each timestep.
+        recorder_volume_gb (np.ndarray): Recorder data volume in Gb at each timestep.
+        recorder_fill_fraction (np.ndarray): Recorder fill fraction (0-1) at each timestep.
+        recorder_alert (np.ndarray): Recorder alert level (0/1/2) at each timestep.
+        data_generated_gb (np.ndarray): Data generated in Gb at each timestep.
+        data_downlinked_gb (np.ndarray): Data downlinked in Gb at each timestep.
     """
 
     def __init__(self, config: Config) -> None:
@@ -55,11 +62,7 @@ class DITL(DITLMixin):
             All subsystems are extracted from the provided config for direct access.
         """
         DITLMixin.__init__(self, config=config)
-        # Initialize subsystems from config
-        self.constraint = self.config.constraint
-        self.battery = self.config.battery
-        self.spacecraft_bus = self.config.spacecraft_bus
-        self.payload = self.config.payload
+        # DITL also needs solar_panel
         self.solar_panel = self.config.solar_panel
 
     def calc(self) -> bool:
@@ -130,6 +133,12 @@ class DITL(DITLMixin):
         # Subsystem power tracking
         self.power_bus = np.zeros(simlen).tolist()
         self.power_payload = np.zeros(simlen).tolist()
+        # Data recorder tracking
+        self.recorder_volume_gb = np.zeros(simlen).tolist()
+        self.recorder_fill_fraction = np.zeros(simlen).tolist()
+        self.recorder_alert = np.zeros(simlen).astype(int).tolist()
+        self.data_generated_gb = np.zeros(simlen).tolist()
+        self.data_downlinked_gb = np.zeros(simlen).tolist()
 
         # Set up initial target in ACS
         self.ppt = self.plan.which_ppt(self.utime[0])
@@ -181,6 +190,21 @@ class DITL(DITLMixin):
             self.batterylevel[i] = self.battery.battery_level
             self.charge_state[i] = self.battery.charge_state
             self.obsid[i] = obsid
+
+            # Data management: generate and downlink data
+            data_generated, data_downlinked = self._process_data_management(
+                self.utime[i], mode, self.step_size
+            )
+
+            # Record data telemetry (cumulative values)
+            prev_generated = self.data_generated_gb[i - 1] if i > 0 else 0.0
+            prev_downlinked = self.data_downlinked_gb[i - 1] if i > 0 else 0.0
+
+            self.recorder_volume_gb[i] = self.recorder.current_volume_gb
+            self.recorder_fill_fraction[i] = self.recorder.get_fill_fraction()
+            self.recorder_alert[i] = self.recorder.get_alert_level()
+            self.data_generated_gb[i] = prev_generated + data_generated
+            self.data_downlinked_gb[i] = prev_downlinked + data_downlinked
 
         return True
 

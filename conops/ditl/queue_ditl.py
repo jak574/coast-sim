@@ -13,9 +13,10 @@ from ..simulation.emergency_charging import EmergencyCharging
 from ..simulation.slew import Slew
 from ..targets import Plan, Pointing, Queue
 from .ditl_mixin import DITLMixin
+from .ditl_stats import DITLStats
 
 
-class QueueDITL(DITLMixin):
+class QueueDITL(DITLMixin, DITLStats):
     """
     Class to run a Day In The Life (DITL) simulation based on a target
     Queue. Rather than creating a observing plan and then running it, this
@@ -25,31 +26,18 @@ class QueueDITL(DITLMixin):
     separate Plan first.
     """
 
-    ppt: Pointing | None
+    # QueueDITL-specific type definitions (types defined in DITLMixin are inherited)
+    ppt: Pointing | None  # Override to use Pointing instead of PlanEntry
     charging_ppt: Pointing | None
     emergency_charging: EmergencyCharging
-    ra: list[float]
-    dec: list[float]
-    roll: list[float]
-    mode: list[int]
-    panel: list[float]
-    power: list[float]
-    panel_power: list[float]
-    batterylevel: list[float]
-    obsid: list[int]
-    plan: Plan
-    utime: list[float]
-    ephem: rust_ephem.TLEEphemeris
+    utime: list[float]  # Override to specify float instead of generic list
+    ephem: rust_ephem.TLEEphemeris  # Override to make non-optional
 
     def __init__(self, config: Config) -> None:
         DITLMixin.__init__(self, config=config)
-        # Initialize subsystems from config
-        self.constraint = self.config.constraint
-        self.battery = self.config.battery
-        self.spacecraft_bus = self.config.spacecraft_bus
-        self.payload = self.config.payload
+        # Subsystems are initialized by the mixin's _init_subsystems()
 
-        # Current target
+        # Current target (already set in mixin but repeated for clarity)
         self.ppt = None
 
         # Pointing history
@@ -69,6 +57,12 @@ class QueueDITL(DITLMixin):
         # Subsystem power tracking
         self.power_bus = list()
         self.power_payload = list()
+        # Data recorder tracking
+        self.recorder_volume_gb = list()
+        self.recorder_fill_fraction = list()
+        self.recorder_alert = list()
+        self.data_generated_gb = list()
+        self.data_downlinked_gb = list()
         # Target Queue
         self.queue = Queue()
 
@@ -174,6 +168,9 @@ class QueueDITL(DITLMixin):
                 i, utime, ra, dec, mode, in_eclipse=self.acs.in_eclipse
             )
 
+            # Handle data generation and downlink
+            self._handle_data_management(utime, mode)
+
             # Fault management checks (e.g., battery level thresholds)
             self._handle_fault_management(utime)
 
@@ -183,11 +180,33 @@ class QueueDITL(DITLMixin):
 
         return True
 
+    def _handle_data_management(self, utime: float, mode: ACSMode) -> None:
+        """Handle data generation during observations and downlink during passes."""
+        # Use the mixin method to process data generation and downlink
+        data_generated, data_downlinked = self._process_data_management(
+            utime, mode, self.step_size
+        )
+
+        # Record data telemetry (cumulative values)
+        prev_generated = self.data_generated_gb[-1] if self.data_generated_gb else 0.0
+        prev_downlinked = (
+            self.data_downlinked_gb[-1] if self.data_downlinked_gb else 0.0
+        )
+
+        self.recorder_volume_gb.append(self.recorder.current_volume_gb)
+        self.recorder_fill_fraction.append(self.recorder.get_fill_fraction())
+        self.recorder_alert.append(self.recorder.get_alert_level())
+        self.data_generated_gb.append(prev_generated + data_generated)
+        self.data_downlinked_gb.append(prev_downlinked + data_downlinked)
+
     def _handle_fault_management(self, utime: float) -> None:
         """Handle fault management checks and safe mode requests."""
         if self.config.fault_management is not None:
             self.config.fault_management.check(
-                values={"battery_level": self.battery.battery_level},
+                values={
+                    "battery_level": self.battery.battery_level,
+                    "recorder_fill_fraction": self.recorder.get_fill_fraction(),
+                },
                 utime=utime,
                 step_size=self.step_size,
                 acs=self.acs,
