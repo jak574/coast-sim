@@ -420,22 +420,17 @@ class SkyPointingController:
 
         # For each declination, calculate how many RA samples we need
         # based on cos(dec) - this accounts for the convergence of longitude lines
-        all_ra = []
-        all_dec = []
+        # Create the sky grid points, sampling RA density by cos(dec)
+        cos_factors = np.cos(np.radians(dec_samples))
+        n_ra_array = np.maximum(8, (self.n_grid_points * 2 * cos_factors).astype(int))
 
-        for dec in dec_samples:
-            # Number of RA samples proportional to cos(latitude)
-            # Use more samples near equator, fewer near poles
-            cos_factor = np.cos(np.radians(dec))
-            # Ensure at least a few samples even at poles
-            n_ra_at_dec = max(8, int(self.n_grid_points * 2 * cos_factor))
-            ra_at_dec = np.linspace(0, 360, n_ra_at_dec, endpoint=False)
+        ra_flat = np.concatenate(
+            [np.linspace(0, 360, n, endpoint=False) for n in n_ra_array]
+        )
+        dec_flat = np.concatenate(
+            [np.full(n, dec) for n, dec in zip(n_ra_array, dec_samples)]
+        )
 
-            all_ra.extend(ra_at_dec)
-            all_dec.extend([dec] * len(ra_at_dec))
-
-        ra_flat = np.array(all_ra)
-        dec_flat = np.array(all_dec)  # Evaluate constraint for all points
         constrained_points = []
         for ra, dec in zip(ra_flat, dec_flat):
             try:
@@ -456,8 +451,8 @@ class SkyPointingController:
 
             # Find points near the boundaries (within ~20 degrees)
             # These need to be plotted twice to handle wrapping
-            near_left = ra_vals > 340  # near RA=360
-            near_right = ra_vals < 20  # near RA=0
+            # near_left = ra_vals > 340  # near RA=360
+            # near_right = ra_vals < 20  # near RA=0
 
             # Plot main points
             self.ax.scatter(
@@ -469,44 +464,6 @@ class SkyPointingController:
                 marker="s",
                 zorder=1,
                 edgecolors="none",
-            )
-
-            # Plot wrapped copies for points near left edge (RA~360)
-            if np.any(near_left):
-                ra_wrapped = ra_plot[near_left] + 360  # wrap to positive side
-                self.ax.scatter(
-                    np.deg2rad(ra_wrapped),
-                    np.deg2rad(dec_vals[near_left]),
-                    s=20,
-                    c=color,
-                    alpha=self.constraint_alpha,
-                    marker="s",
-                    zorder=1,
-                    edgecolors="none",
-                )
-
-            # Plot wrapped copies for points near right edge (RA~0)
-            if np.any(near_right):
-                ra_wrapped = ra_plot[near_right] - 360  # wrap to negative side
-                self.ax.scatter(
-                    np.deg2rad(ra_wrapped),
-                    np.deg2rad(dec_vals[near_right]),
-                    s=20,
-                    c=color,
-                    alpha=self.constraint_alpha,
-                    marker="s",
-                    zorder=1,
-                    edgecolors="none",
-                )
-
-            # Add single legend entry
-            self.ax.scatter(
-                [],
-                [],
-                s=20,
-                c=color,
-                alpha=self.constraint_alpha,
-                marker="s",
                 label=f"{name} Constraint",
             )
 
