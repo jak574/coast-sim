@@ -84,9 +84,21 @@
     },
     "constraint": {
         "sun_constraint": {
-            "type": "sun",
-            "min_angle": 90.0,
-            "max_angle": null
+            "type": "and",
+            "constraints": [
+                {
+                    "type": "sun",
+                    "min_angle": 90.0,
+                    "max_angle": null
+                },
+                {
+                    "type": "not",
+                    "constraint": {
+                        "type": "eclipse",
+                        "umbra_only": true
+                    }
+                }
+            ]
         },
         "anti_sun_constraint": {
             "type": "sun",
@@ -106,9 +118,21 @@
             "horizon_dip": false
         },
         "panel_constraint": {
-            "type": "sun",
-            "min_angle": 45.0,
-            "max_angle": 135.0
+            "type": "and",
+            "constraints": [
+                {
+                    "type": "sun",
+                    "min_angle": 45.0,
+                    "max_angle": 135.0
+                },
+                {
+                    "type": "not",
+                    "constraint": {
+                        "type": "eclipse",
+                        "umbra_only": true
+                    }
+                }
+            ]
         }
     },
     "ground_stations": {
