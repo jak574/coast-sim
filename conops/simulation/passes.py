@@ -169,25 +169,59 @@ class Pass(BaseModel):
         return timetopassstring
 
     def ra_dec(self, utime: float) -> tuple[float | None, float | None]:
-        if utime < self.begin:
-            if self.pre_slew is None:
-                return None, None
-            return self.pre_slew.slew_ra_dec(utime)
-        else:
+        """Get spacecraft pointing at given time during pass or pre-pass slew.
+
+        Handles the transition from slew to pass tracking smoothly:
+        - Before slew starts: uses pre_slew.slew_ra_dec for interpolation
+        - During slew: uses pre_slew.slew_ra_dec for interpolation
+        - After slew ends: uses pass tracking profile
+
+        The transition to pass tracking happens at slewend (when slew completes),
+        not at begin (when pass contact starts). This prevents teleportation if
+        the slew starts late or early.
+        """
+        if self.pre_slew is None:
+            # No slew configured - use pass tracking if available
             return self.pass_ra_dec(utime)
 
-    def pass_ra_dec(self, utime: float) -> tuple[float | None, float | None]:
-        """Return the RA/Dec of the Spacecraft during a groundstation pass"""
-        if self.in_pass(utime):
-            ras = roll_over_angle(self.ra)  # Deal with RA roll-overs, 360 -> 0
-            ra = (
-                np.interp(utime, self.utime, ras) % 360
-            )  # so "interp" doesn't do some crazy thing
-            dec = np.interp(utime, self.utime, self.dec)
+        # Check if a slew has been planned (slewstart > 0 means it's configured)
+        slew_is_configured = self.slewstart is not None and self.slewstart > 0
+
+        if slew_is_configured:
+            # Check if slew is complete (we're past slewend)
+            if self.slewend is not None and utime >= self.slewend:
+                # Slew is complete, use pass tracking profile
+                return self.pass_ra_dec(utime)
+            # Still in slew phase - use slew interpolation
+            return self.pre_slew.slew_ra_dec(utime)
         else:
-            # print("PASS OVER _ GET OVER IT")
-            ra = np.interp(utime, self.utime, self.ra)
-            dec = np.interp(utime, self.utime, self.dec)
+            # No slew configured - use slew interpolation for pre-pass pointing
+            # (slew_ra_dec handles the case where slew isn't planned)
+            return self.pre_slew.slew_ra_dec(utime)
+
+    def pass_ra_dec(self, utime: float) -> tuple[float | None, float | None]:
+        """Return the RA/Dec of the Spacecraft during a groundstation pass.
+
+        Interpolates along the pre-computed groundstation tracking profile.
+        If called before the pass starts (e.g., slew finished early), returns
+        the start-of-pass pointing to avoid discontinuities.
+        """
+        # Handle empty tracking profile
+        if not self.utime or not self.ra or not self.dec:
+            return self.gsstartra, self.gsstartdec
+
+        # If before the pass tracking profile starts, return start position
+        if utime < self.utime[0]:
+            return self.gsstartra, self.gsstartdec
+
+        # If after the pass ends, return end position
+        if utime > self.utime[-1]:
+            return self.gsendra, self.gsenddec
+
+        # Interpolate along the tracking profile
+        ras = roll_over_angle(self.ra)  # Deal with RA roll-overs, 360 -> 0
+        ra = np.interp(utime, self.utime, ras) % 360
+        dec = np.interp(utime, self.utime, self.dec)
         return ra, dec
 
     def time_to_slew(self, utime: float) -> bool:
@@ -423,12 +457,17 @@ class PassTimes:
             horizontal_dist = np.sqrt(gs_to_sc_enu[:, 0] ** 2 + gs_to_sc_enu[:, 1] ** 2)
             elevations = np.degrees(np.arctan2(gs_to_sc_enu[:, 2], horizontal_dist))
 
-            # Compute RA/Dec for SC-to-GS pointing (vectorized)
-            # We want the vector from SC to GS (opposite direction) in GCRS
-            sc_to_gs = -gs_to_sc_gcrs
-            ra_all = np.arctan2(sc_to_gs[:, 1], sc_to_gs[:, 0])
-            dec_all = np.arcsin(sc_to_gs[:, 2] / np.linalg.norm(sc_to_gs, axis=1))
-            ra_all_deg = np.degrees(ra_all)
+            # Compute RA/Dec for telescope pointing during pass (vectorized)
+            # The antenna is on the opposite end from the telescope, so we point
+            # the telescope AWAY from the groundstation (gs_to_sc direction in GCRS).
+            # This way the antenna on the back of the spacecraft faces the GS.
+            telescope_pointing = gs_to_sc_gcrs  # Points away from GS
+            ra_all = np.arctan2(telescope_pointing[:, 1], telescope_pointing[:, 0])
+            dec_all = np.arcsin(
+                telescope_pointing[:, 2] / np.linalg.norm(telescope_pointing, axis=1)
+            )
+            # Convert to degrees and normalize RA to [0, 360) range
+            ra_all_deg = np.degrees(ra_all) % 360
             dec_all_deg = np.degrees(dec_all)
 
             # Find passes using elevation threshold

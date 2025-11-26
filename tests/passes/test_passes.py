@@ -312,11 +312,12 @@ class TestPassMethods:
         assert dec is not None
 
     def test_ra_dec_none_pre_slew(self, basic_pass):
-        """Test ra_dec returns None when pre_slew is None and before pass."""
+        """Test ra_dec returns pass tracking when pre_slew is None."""
         basic_pass.pre_slew = None
+        # With no pre_slew, ra_dec falls back to pass_ra_dec which uses gsstartra/gsstartdec
         ra, dec = basic_pass.ra_dec(1514764700.0)
-        assert ra is None
-        assert dec is None
+        assert ra == basic_pass.gsstartra
+        assert dec == basic_pass.gsstartdec
 
     def test_pass_ra_dec_in_pass(self, basic_pass):
         """Test pass_ra_dec returns interpolated values during pass."""
@@ -593,13 +594,14 @@ class TestPassEdgeCases:
     """Test edge cases and error conditions."""
 
     def test_pass_with_empty_pointing_profile(self, basic_pass):
-        """Test Pass with empty ra/dec lists raises ValueError."""
+        """Test Pass with empty ra/dec lists returns fallback pointing."""
         basic_pass.utime = []
         basic_pass.ra = []
         basic_pass.dec = []
-        # Should raise ValueError from np.interp with empty arrays
-        with pytest.raises(ValueError, match="array of sample points is empty"):
-            basic_pass.pass_ra_dec(1514764900.0)
+        # With empty profile, pass_ra_dec returns gsstartra/gsstartdec as fallback
+        ra, dec = basic_pass.pass_ra_dec(1514764900.0)
+        assert ra == basic_pass.gsstartra
+        assert dec == basic_pass.gsstartdec
 
     def test_pass_obsid_default_value(self, mock_constraint, mock_acs_config):
         """Test Pass obsid has correct default value."""

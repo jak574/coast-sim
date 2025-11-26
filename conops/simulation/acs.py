@@ -188,6 +188,16 @@ class ACS:
         """
         self._adjust_slew_to_current_pointing(slew)
 
+        # For Pass objects, set up slew timing if not already configured
+        if isinstance(slew, Pass):
+            if slew.slewstart is None or slew.slewstart == 0:
+                slew.slewstart = utime
+                # Ensure slew time is calculated with current pointing
+                slew.startra = self.ra
+                slew.startdec = self.dec
+                if slew.pre_slew is not None:
+                    slew.pre_slew.calc_slewtime()
+
         self.current_slew = slew
         self.last_slew = slew  # keep reference, avoid copy losing slewstart
 
