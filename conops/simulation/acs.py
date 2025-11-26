@@ -185,18 +185,25 @@ class ACS:
 
         Use original slew object (no shallow copies) to preserve timing fields like
         slewstart that are required for interpolation (t = utime - slewstart).
-        """
-        self._adjust_slew_to_current_pointing(slew)
 
-        # For Pass objects, set up slew timing if not already configured
+        Always updates slewstart to utime and start position to current pointing
+        to ensure the slew starts correctly, preventing teleportation issues when
+        commands are executed later than originally scheduled.
+        """
+        # For Pass objects, set up slew timing
         if isinstance(slew, Pass):
-            if slew.slewstart is None or slew.slewstart == 0:
-                slew.slewstart = utime
-                # Ensure slew time is calculated with current pointing
-                slew.startra = self.ra
-                slew.startdec = self.dec
-                if slew.pre_slew is not None:
-                    slew.pre_slew.calc_slewtime()
+            slew.slewstart = utime
+            slew.startra = self.ra
+            slew.startdec = self.dec
+            if slew.pre_slew is not None:
+                slew.pre_slew.calc_slewtime()
+        else:
+            # For regular Slew objects, always update timing and start position
+            # to match current state, then recalculate slew time
+            slew.slewstart = utime
+            slew.startra = self.ra
+            slew.startdec = self.dec
+            slew.calc_slewtime()
 
         self.current_slew = slew
         self.last_slew = slew  # keep reference, avoid copy losing slewstart

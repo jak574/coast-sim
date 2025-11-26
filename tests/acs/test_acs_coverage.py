@@ -187,7 +187,8 @@ class TestStartSlewCoverage:
         acs._start_slew(mock_slew, 1514764800.0)
         mock_slew.calc_slewtime.assert_called_once()
 
-    def test_start_slew_no_adjustment_for_pass_keeps_startra(self, acs):
+    def test_start_slew_updates_pass_startra_to_current(self, acs):
+        """Pass startra should be updated to current ACS ra to prevent teleportation."""
         acs.ra = 10.0
         acs.dec = 20.0
 
@@ -198,11 +199,14 @@ class TestStartSlewCoverage:
         mock_pass.enddec = 30.0
         mock_pass.obstype = "GSP"
         mock_pass.calc_slewtime = Mock()
+        mock_pass.pre_slew = Mock()
+        mock_pass.pre_slew.calc_slewtime = Mock()
 
         acs._start_slew(mock_pass, 1514764800.0)
-        assert mock_pass.startra == 0.0
+        assert mock_pass.startra == 10.0  # Updated to current position
 
-    def test_start_slew_no_adjustment_for_pass_keeps_startdec(self, acs):
+    def test_start_slew_updates_pass_startdec_to_current(self, acs):
+        """Pass startdec should be updated to current ACS dec to prevent teleportation."""
         acs.ra = 10.0
         acs.dec = 20.0
 
@@ -213,11 +217,14 @@ class TestStartSlewCoverage:
         mock_pass.enddec = 30.0
         mock_pass.obstype = "GSP"
         mock_pass.calc_slewtime = Mock()
+        mock_pass.pre_slew = Mock()
+        mock_pass.pre_slew.calc_slewtime = Mock()
 
         acs._start_slew(mock_pass, 1514764800.0)
-        assert mock_pass.startdec == 0.0
+        assert mock_pass.startdec == 20.0  # Updated to current position
 
-    def test_start_slew_no_calc_called_for_pass(self, acs):
+    def test_start_slew_calls_pre_slew_calc_for_pass(self, acs):
+        """Pass pre_slew.calc_slewtime should be called to recalculate slew profile."""
         acs.ra = 10.0
         acs.dec = 20.0
 
@@ -228,11 +235,14 @@ class TestStartSlewCoverage:
         mock_pass.enddec = 30.0
         mock_pass.obstype = "GSP"
         mock_pass.calc_slewtime = Mock()
+        mock_pass.pre_slew = Mock()
+        mock_pass.pre_slew.calc_slewtime = Mock()
 
         acs._start_slew(mock_pass, 1514764800.0)
-        mock_pass.calc_slewtime.assert_not_called()
+        mock_pass.pre_slew.calc_slewtime.assert_called_once()
 
-    def test_start_slew_no_adjust_when_ra_dec_zero_keeps_startra(self, acs):
+    def test_start_slew_updates_startra_even_when_acs_ra_zero(self, acs):
+        """Slew startra should be updated to current ACS ra even when it's 0.0."""
         acs.ra = 0.0
         acs.dec = 0.0
 
@@ -245,9 +255,10 @@ class TestStartSlewCoverage:
         mock_slew.calc_slewtime = Mock()
 
         acs._start_slew(mock_slew, 1514764800.0)
-        assert mock_slew.startra == 5.0
+        assert mock_slew.startra == 0.0  # Updated to current position
 
-    def test_start_slew_no_adjust_when_ra_dec_zero_keeps_startdec(self, acs):
+    def test_start_slew_updates_startdec_even_when_acs_dec_zero(self, acs):
+        """Slew startdec should be updated to current ACS dec even when it's 0.0."""
         acs.ra = 0.0
         acs.dec = 0.0
 
@@ -260,9 +271,10 @@ class TestStartSlewCoverage:
         mock_slew.calc_slewtime = Mock()
 
         acs._start_slew(mock_slew, 1514764800.0)
-        assert mock_slew.startdec == 10.0
+        assert mock_slew.startdec == 0.0  # Updated to current position
 
-    def test_start_slew_no_calc_when_already_matched(self, acs):
+    def test_start_slew_always_calls_calc_slewtime(self, acs):
+        """calc_slewtime should always be called to recalculate slew profile."""
         acs.ra = 10.0
         acs.dec = 20.0
 
@@ -275,7 +287,7 @@ class TestStartSlewCoverage:
         mock_slew.calc_slewtime = Mock()
 
         acs._start_slew(mock_slew, 1514764800.0)
-        mock_slew.calc_slewtime.assert_not_called()
+        mock_slew.calc_slewtime.assert_called_once()
 
     def test_start_slew_does_not_change_already_matched_startra(self, acs):
         acs.ra = 10.0
@@ -628,6 +640,8 @@ class TestExecuteCommandLogging:
         mock_pass.endra = 45.0
         mock_pass.enddec = 30.0
         mock_pass.obstype = "GSP"
+        mock_pass.pre_slew = Mock()
+        mock_pass.pre_slew.calc_slewtime = Mock()
         command2 = ACSCommand(
             command_type=ACSCommandType.START_PASS,
             execution_time=1514764800.0,
