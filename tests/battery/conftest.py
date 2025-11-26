@@ -138,6 +138,7 @@ def queue_ditl(mock_config):
         ditl.acs = Mock()
         ditl.acs.solar_panel = Mock()
         ditl.acs.solar_panel.optimal_charging_pointing = Mock(return_value=(180.0, 0.0))
+        ditl.acs.slew_rate = Mock(return_value=0.0)  # Add slew_rate mock
 
         # Initialize the tracking variables (already done in __init__ but ensure they exist)
         if not hasattr(ditl, "charging_ppt"):

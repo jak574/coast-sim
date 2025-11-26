@@ -106,6 +106,7 @@ def queue_ditl(mock_config, mock_ephem):
         mock_acs.passrequests = mock_pt
         mock_acs.slew_dists = []
         mock_acs.last_slew = None
+        mock_acs.slew_rate = Mock(return_value=0.0)  # Add slew_rate mock
         # Mock the helper methods used in _fetch_new_ppt
         mock_target_request = Mock()
         mock_target_request.next_vis = Mock(return_value=1000.0)

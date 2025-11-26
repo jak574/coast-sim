@@ -737,3 +737,24 @@ class ACS:
                 self.last_ppt.obsid,
                 utime,
             )
+
+    def slew_rate(self, utime: float) -> float:
+        """Return the current spacecraft angular rate in deg/s.
+
+        Queries the current slew or pass for its instantaneous rate based on
+        the bang-bang control profile or pass tracking profile.
+
+        Args:
+            utime: Unix timestamp to query
+
+        Returns:
+            Angular rate in deg/s. Returns 0.0 if not slewing or tracking.
+        """
+        if self.last_slew is None:
+            return 0.0
+
+        # Use the slew_rate method from either Slew or Pass
+        if hasattr(self.last_slew, "slew_rate"):
+            return self.last_slew.slew_rate(utime)
+
+        return 0.0

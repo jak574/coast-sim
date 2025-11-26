@@ -33,6 +33,7 @@ class TestQueueDITLInitialization:
             assert ditl.roll == []
             assert ditl.mode == []
             assert ditl.obsid == []
+            assert ditl.slew_rate == []
 
     def test_initialization_power_lists_empty_and_plan(self, mock_config):
         with (
@@ -522,58 +523,82 @@ class TestRecordSpacecraftState:
 
     def test_record_state_mode(self, queue_ditl):
         queue_ditl.utime = [1000.0, 1060.0, 1120.0]
+        queue_ditl.acs.slew_rate = Mock(return_value=0.0)
         queue_ditl._record_pointing_data(
             ra=45.0,
             dec=30.0,
             roll=15.0,
             obsid=1001,
             mode=ACSMode.SCIENCE,
+            utime=1000.0,
         )
         assert queue_ditl.mode == [ACSMode.SCIENCE]
 
     def test_record_state_ra(self, queue_ditl):
         queue_ditl.utime = [1000.0, 1060.0, 1120.0]
+        queue_ditl.acs.slew_rate = Mock(return_value=0.0)
         queue_ditl._record_pointing_data(
             ra=45.0,
             dec=30.0,
             roll=15.0,
             obsid=1001,
             mode=ACSMode.SCIENCE,
+            utime=1000.0,
         )
         assert queue_ditl.ra == [45.0]
 
     def test_record_state_dec(self, queue_ditl):
         queue_ditl.utime = [1000.0, 1060.0, 1120.0]
+        queue_ditl.acs.slew_rate = Mock(return_value=0.0)
         queue_ditl._record_pointing_data(
             ra=45.0,
             dec=30.0,
             roll=15.0,
             obsid=1001,
             mode=ACSMode.SCIENCE,
+            utime=1000.0,
         )
         assert queue_ditl.dec == [30.0]
 
     def test_record_state_roll(self, queue_ditl):
         queue_ditl.utime = [1000.0, 1060.0, 1120.0]
+        queue_ditl.acs.slew_rate = Mock(return_value=0.0)
         queue_ditl._record_pointing_data(
             ra=45.0,
             dec=30.0,
             roll=15.0,
             obsid=1001,
             mode=ACSMode.SCIENCE,
+            utime=1000.0,
         )
         assert queue_ditl.roll == [15.0]
 
     def test_record_state_obsid(self, queue_ditl):
         queue_ditl.utime = [1000.0, 1060.0, 1120.0]
+        queue_ditl.acs.slew_rate = Mock(return_value=0.0)
         queue_ditl._record_pointing_data(
             ra=45.0,
             dec=30.0,
             roll=15.0,
             obsid=1001,
             mode=ACSMode.SCIENCE,
+            utime=1000.0,
         )
         assert queue_ditl.obsid == [1001]
+
+    def test_record_state_slew_rate(self, queue_ditl):
+        """Test slew_rate is recorded from ACS."""
+        queue_ditl.utime = [1000.0, 1060.0, 1120.0]
+        queue_ditl.acs.slew_rate = Mock(return_value=0.15)
+        queue_ditl._record_pointing_data(
+            ra=45.0,
+            dec=30.0,
+            roll=15.0,
+            obsid=1001,
+            mode=ACSMode.SCIENCE,
+            utime=1000.0,
+        )
+        assert queue_ditl.slew_rate == [0.15]
 
     def test_record_state_panel_length(self, queue_ditl):
         queue_ditl.utime = [1000.0, 1060.0, 1120.0]

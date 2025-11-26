@@ -162,3 +162,24 @@ class Slew:
         self.slewdist, self.slewpath = self.acs_config.predict_slew(
             self.startra, self.startdec, self.endra, self.enddec, steps=20
         )
+
+    def slew_rate(self, utime: float) -> float:
+        """Return the angular rate (deg/s) at the given time.
+
+        Uses the AttitudeControlSystem's bang-bang control profile to determine
+        the instantaneous slew rate based on time since slew start.
+
+        Args:
+            utime: Unix timestamp to query
+
+        Returns:
+            Angular rate in deg/s. Returns 0.0 if not slewing or slew complete.
+        """
+        t = utime - self.slewstart
+        if t < 0:
+            return 0.0
+
+        if not self.acs_config or self.slewdist <= 0:
+            return 0.0
+
+        return self.acs_config.rate_of_t(self.slewdist, t)

@@ -63,6 +63,8 @@ class QueueDITL(DITLMixin, DITLStats):
         self.recorder_alert = list()
         self.data_generated_gb = list()
         self.data_downlinked_gb = list()
+        # Spacecraft motion rate tracking
+        self.slew_rate = list()
         # Target Queue
         self.queue = Queue()
 
@@ -161,7 +163,7 @@ class QueueDITL(DITLMixin, DITLStats):
             self._close_ppt_timeline_if_needed(utime)
 
             # Record pointing and mode
-            self._record_pointing_data(ra, dec, roll, obsid, mode)
+            self._record_pointing_data(ra, dec, roll, obsid, mode, utime)
 
             # Calculate and record power data
             self._record_power_data(
@@ -589,14 +591,22 @@ class QueueDITL(DITLMixin, DITLStats):
             return lastra, lastdec
 
     def _record_pointing_data(
-        self, ra: float, dec: float, roll: float, obsid: int, mode: ACSMode
+        self,
+        ra: float,
+        dec: float,
+        roll: float,
+        obsid: int,
+        mode: ACSMode,
+        utime: float,
     ) -> None:
-        """Record spacecraft pointing and mode data."""
+        """Record spacecraft pointing, mode, and motion rate data."""
         self.mode.append(mode)
         self.ra.append(ra)
         self.dec.append(dec)
         self.roll.append(roll)
         self.obsid.append(obsid)
+        # Record spacecraft angular motion rate
+        self.slew_rate.append(self.acs.slew_rate(utime))
 
     def _record_power_data(
         self,

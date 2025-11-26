@@ -33,6 +33,8 @@ class DITLMixin:
     recorder_alert: list[int]
     data_generated_gb: list[float]
     data_downlinked_gb: list[float]
+    # Spacecraft motion rate tracking
+    slew_rate: list[float]
 
     def __init__(self, config: Config) -> None:
         # Defining telemetry data points

@@ -224,6 +224,81 @@ class Pass(BaseModel):
         dec = np.interp(utime, self.utime, self.dec)
         return ra, dec
 
+    def slew_rate(self, utime: float) -> float:
+        """Return the angular rate (deg/s) at the given time during pass or pre-pass slew.
+
+        Args:
+            utime: Unix timestamp to query
+
+        Returns:
+            Angular rate in deg/s:
+            - During pre-pass slew: uses bang-bang control profile rate
+            - During pass tracking: calculates rate from pointing profile
+            - Before slew or after pass: returns 0.0
+        """
+        if self.pre_slew is None:
+            return 0.0
+
+        # Check if a slew has been planned (slewstart > 0 means it's configured)
+        slew_is_configured = self.slewstart is not None and self.slewstart > 0
+
+        if slew_is_configured:
+            # Check if slew is complete (we're past slewend)
+            if self.slewend is not None and utime >= self.slewend:
+                # Slew is complete, calculate tracking rate from pass profile
+                return self._pass_tracking_rate(utime)
+            # Still in slew phase - use slew rate
+            return self.pre_slew.slew_rate(utime)
+        else:
+            return 0.0
+
+    def _pass_tracking_rate(self, utime: float) -> float:
+        """Calculate the angular tracking rate during the pass dwell phase.
+
+        Uses finite difference on the tracking profile to estimate instantaneous rate.
+
+        Returns:
+            Angular rate in deg/s, or 0.0 if outside pass or no profile available.
+        """
+        # Handle empty tracking profile or outside pass
+        if not self.utime or len(self.utime) < 2:
+            return 0.0
+
+        if utime < self.utime[0] or utime > self.utime[-1]:
+            return 0.0
+
+        # Find the index where utime falls
+        idx = np.searchsorted(self.utime, utime)
+        if idx == 0:
+            idx = 1
+        if idx >= len(self.utime):
+            idx = len(self.utime) - 1
+
+        # Calculate rate from adjacent points
+        dt = self.utime[idx] - self.utime[idx - 1]
+        if dt <= 0:
+            return 0.0
+
+        # Get RA values and handle wrap-around
+        ra1, ra2 = self.ra[idx - 1], self.ra[idx]
+        dec1, dec2 = self.dec[idx - 1], self.dec[idx]
+
+        # Handle RA wrap-around (e.g., 359 -> 1)
+        dra = ra2 - ra1
+        if dra > 180:
+            dra -= 360
+        elif dra < -180:
+            dra += 360
+
+        ddec = dec2 - dec1
+
+        # Calculate angular distance (small angle approximation for nearby points)
+        # For small angles, angular distance ≈ sqrt(dra^2 * cos^2(dec) + ddec^2)
+        cos_dec = np.cos(np.radians((dec1 + dec2) / 2))
+        angular_dist = np.sqrt((dra * cos_dec) ** 2 + ddec**2)
+
+        return angular_dist / dt
+
     def time_to_slew(self, utime: float) -> bool:
         """Determine whether to begin slewing for this pass.
 

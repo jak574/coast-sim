@@ -110,3 +110,60 @@ class AttitudeControlSystem(BaseModel):
         )
         slewpath = great_circle(startra, startdec, endra, enddec, steps)
         return slewdist, slewpath
+
+    def rate_of_t(self, angle_deg: float, t: float) -> float:
+        """Angular rate (deg/s) at time t during a slew under bang-bang control.
+
+        This is the instantaneous rate of the spacecraft motion at time t,
+        useful for telemetry and constraint checking.
+
+        Args:
+            angle_deg: Total slew angle in degrees
+            t: Time since slew start in seconds
+
+        Returns:
+            Angular rate in deg/s. Returns 0.0 if slew is complete or not started.
+        """
+        if angle_deg <= 0 or t < 0:
+            return 0.0
+
+        a = float(self.slew_acceleration)
+        vmax = float(self.max_slew_rate)
+        if a <= 0 or vmax <= 0:
+            return 0.0
+
+        # Determine profile type
+        t_accel = vmax / a
+        d_accel = 0.5 * a * t_accel**2
+
+        if 2 * d_accel >= angle_deg:
+            # Triangular profile - never reaches max rate
+            t_peak = (angle_deg / a) ** 0.5
+            motion_time = 2 * t_peak
+            if t >= motion_time:
+                return 0.0  # Slew complete
+            if t <= t_peak:
+                # Accelerating phase
+                return a * t
+            else:
+                # Decelerating phase
+                return a * (motion_time - t)
+
+        # Trapezoidal profile
+        d_cruise = angle_deg - 2 * d_accel
+        t_cruise = d_cruise / vmax
+        motion_time = 2 * t_accel + t_cruise
+
+        if t >= motion_time:
+            return 0.0  # Slew complete
+
+        if t <= t_accel:
+            # Accelerating phase
+            return a * t
+        elif t <= t_accel + t_cruise:
+            # Cruise phase - at max rate
+            return vmax
+        else:
+            # Decelerating phase
+            t_dec = t - (t_accel + t_cruise)
+            return vmax - a * t_dec

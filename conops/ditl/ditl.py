@@ -139,6 +139,8 @@ class DITL(DITLMixin, DITLStats):
         self.recorder_alert = np.zeros(simlen).astype(int).tolist()
         self.data_generated_gb = np.zeros(simlen).tolist()
         self.data_downlinked_gb = np.zeros(simlen).tolist()
+        # Spacecraft motion rate tracking
+        self.slew_rate = np.zeros(simlen).tolist()
 
         # Set up initial target in ACS
         self.ppt = self.plan.which_ppt(self.utime[0])
@@ -173,6 +175,9 @@ class DITL(DITLMixin, DITLStats):
             assert isinstance(panel_illumination, float)
             assert isinstance(panel_power, float)
 
+            # Get spacecraft angular motion rate
+            current_slew_rate = self.acs.slew_rate(self.utime[i])
+
             # Record all the useful DITL values
             self.batteryalert[i] = self.battery.battery_alert
             self.ra[i] = ra
@@ -182,6 +187,7 @@ class DITL(DITLMixin, DITLStats):
             self.power[i] = power_usage
             self.power_bus[i] = bus_power
             self.power_payload[i] = payload_power
+            self.slew_rate[i] = current_slew_rate
             # Drain the battery based on power usage
             self.battery.drain(power_usage, self.step_size)
             # Charge the battery based on solar panel power
