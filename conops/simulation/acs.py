@@ -190,8 +190,9 @@ class ACS:
         to ensure the slew starts correctly, preventing teleportation issues when
         commands are executed later than originally scheduled.
         """
-        # For Pass objects, set up slew timing
-        if isinstance(slew, Pass):
+        # For Pass objects (which have pre_slew attribute), set up slew timing
+        # Use hasattr check for duck-typing compatibility with mock objects in tests
+        if hasattr(slew, "pre_slew"):
             slew.slewstart = utime
             slew.startra = self.ra
             slew.startdec = self.dec
