@@ -399,6 +399,7 @@ class SkyPointingController:
             linewidths=0.5,
             label="Targets",
             zorder=2,
+            rasterized=True,  # Rasterize for faster rendering
         )
 
     def _precompute_constraints(self, time_indices=None):
@@ -667,6 +668,7 @@ class SkyPointingController:
             edgecolors="none",
             label=label,
             zorder=zorder,
+            rasterized=True,  # Rasterize for faster rendering
         )
 
     def _plot_single_constraint(
