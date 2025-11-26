@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.font_manager import FontProperties
 from matplotlib.widgets import Button, Slider
+from rust_ephem import Constraint
 
 from ..common import dtutcfromtimestamp
 from ..config.visualization import VisualizationConfig
@@ -400,23 +401,43 @@ class SkyPointingController:
         earth_ra = ephem.earth[idx].ra.deg
         earth_dec = ephem.earth[idx].dec.deg
 
-        # Create a grid of RA/Dec points
-        ra_grid = np.linspace(0, 360, self.n_grid_points)
-        dec_grid = np.linspace(-90, 90, self.n_grid_points)
-
         # Check each constraint type and plot regions
         constraint_types = [
-            ("Sun", self.ditl.constraint.in_sun, "yellow", sun_ra, sun_dec),
-            ("Moon", self.ditl.constraint.in_moon, "gray", moon_ra, moon_dec),
-            ("Earth", self.ditl.constraint.in_earth, "blue", earth_ra, earth_dec),
+            (
+                "Sun",
+                self.ditl.config.constraint.sun_constraint,
+                "yellow",
+                sun_ra,
+                sun_dec,
+            ),
+            (
+                "Moon",
+                self.ditl.config.constraint.moon_constraint,
+                "gray",
+                moon_ra,
+                moon_dec,
+            ),
+            (
+                "Earth",
+                self.ditl.config.constraint.earth_constraint,
+                "blue",
+                earth_ra,
+                earth_dec,
+            ),
             (
                 "Anti-Sun",
-                self.ditl.constraint.in_anti_sun,
+                self.ditl.config.constraint.anti_sun_constraint,
                 "orange",
                 (sun_ra + 180) % 360,
                 -sun_dec,
             ),
-            ("Panel", self.ditl.constraint.in_panel, "green", None, None),
+            (
+                "Panel",
+                self.ditl.config.constraint.panel_constraint,
+                "green",
+                None,
+                None,
+            ),
         ]
 
         for name, constraint_func, color, body_ra, body_dec in constraint_types:
@@ -425,8 +446,6 @@ class SkyPointingController:
                 constraint_func,
                 color,
                 utime,
-                ra_grid,
-                dec_grid,
                 body_ra,
                 body_dec,
             )
@@ -572,15 +591,21 @@ class SkyPointingController:
         )
 
     def _plot_single_constraint(
-        self, name, constraint_func, color, utime, ra_grid, dec_grid, body_ra, body_dec
-    ):
+        self,
+        name: str,
+        constraint_func: Constraint,
+        color: str,
+        utime: float,
+        body_ra: float,
+        body_dec: float,
+    ) -> None:
         """Plot a single constraint region.
 
         Parameters
         ----------
         name : str
             Name of the constraint.
-        constraint_func : callable
+        constraint_func : Constraint
             Function to check if a point violates the constraint.
         color : str
             Color for the constraint region.
@@ -598,18 +623,19 @@ class SkyPointingController:
         # Get sky grid points
         ra_flat, dec_flat = self._create_sky_grid(self.n_grid_points)
 
-        constrained_points = []
-        for ra, dec in zip(ra_flat, dec_flat):
-            try:
-                if constraint_func(ra, dec, utime):
-                    constrained_points.append((ra, dec))
-            except Exception as e:
-                print(f"ERROR: Constraint check failed for RA={ra}, Dec={dec}: {e}")
-                continue
+        constrained_coords = constraint_func.evaluate_batch(
+            ephemeris=self.ditl.ephem,
+            target_ras=ra_flat,
+            target_decs=dec_flat,
+            times=dtutcfromtimestamp(utime),
+        ).T[0]
 
         # Plot constrained region
-        if constrained_points:
-            points = np.array(constrained_points)
+        if constrained_coords.any():
+            points = np.column_stack(
+                (ra_flat[constrained_coords], dec_flat[constrained_coords])
+            )
+
             ra_vals = points[:, 0]
             dec_vals = points[:, 1]
 
