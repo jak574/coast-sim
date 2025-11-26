@@ -5,7 +5,6 @@ of the sky with scheduled observations and constraint regions.
 """
 
 import os
-from datetime import timezone
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -50,7 +49,7 @@ def plot_sky_pointing(
     n_grid_points=100,
     show_controls=True,
     time_step_seconds=None,
-    constraint_alpha=1.0,
+    constraint_alpha=0.3,
     config=None,
 ):
     """Plot spacecraft pointing on a mollweide sky map with constraints.
@@ -159,7 +158,7 @@ class SkyPointingController:
         ax,
         n_grid_points=100,
         time_step_seconds=60,
-        constraint_alpha=1.0,
+        constraint_alpha=0.3,
         config=None,
     ):
         """Initialize the controller.
@@ -535,8 +534,6 @@ class SkyPointingController:
     def _plot_earth_disk(self, utime):
         """Plot the physical extent of Earth as seen from the spacecraft.
 
-        Shows Earth with realistic surface coloring, coastlines, and day/night terminator.
-
         Parameters
         ----------
         utime : float
@@ -550,10 +547,6 @@ class SkyPointingController:
         earth_ra = ephem.earth[idx].ra.deg
         earth_dec = ephem.earth[idx].dec.deg
         earth_angular_radius = ephem.earth_radius_deg[idx]
-
-        # Get Sun position for illumination calculation
-        sun_ra = ephem.sun[idx].ra.deg
-        sun_dec = ephem.sun[idx].dec.deg
 
         # Get sky grid points (use cached if available)
         if hasattr(self, "_constraint_cache"):
@@ -575,502 +568,14 @@ class SkyPointingController:
         # Find points inside the Earth disk
         inside_earth = angular_dist <= earth_angular_radius
 
-        if not inside_earth.any():
-            return
+        # Plot Earth disk points
+        if inside_earth.any():
+            ra_vals = ra_flat[inside_earth]
+            dec_vals = dec_flat[inside_earth]
 
-        # Get points on Earth disk
-        ra_vals = ra_flat[inside_earth]
-        dec_vals = dec_flat[inside_earth]
-
-        # Convert sky coordinates to Earth surface coordinates
-        earth_lon, earth_lat = self._sky_to_earth_surface(
-            ra_vals, dec_vals, earth_ra, earth_dec, dt
-        )
-
-        # Get colors for each point based on Earth surface and illumination
-        colors = self._get_earth_surface_colors(
-            earth_lon, earth_lat, sun_ra, sun_dec, earth_ra, earth_dec, dt
-        )
-
-        # Plot Earth disk with surface colors
-        ra_plot = self._convert_ra_for_plotting(ra_vals)
-        self.ax.scatter(
-            np.deg2rad(ra_plot),
-            np.deg2rad(dec_vals),
-            s=20,
-            c=colors,
-            alpha=0.9,
-            marker="s",
-            edgecolors="none",
-            label="Earth",
-            zorder=2.5,
-            rasterized=True,
-        )
-
-    def _sky_to_earth_surface(self, ra_vals, dec_vals, earth_ra, earth_dec, dt):
-        """Convert sky coordinates to Earth surface lat/lon.
-
-        Uses orthographic projection from the spacecraft's viewpoint to map
-        the visible hemisphere of Earth onto surface coordinates.
-
-        Parameters
-        ----------
-        ra_vals : array
-            RA coordinates of points on Earth disk (degrees).
-        dec_vals : array
-            Dec coordinates of points on Earth disk (degrees).
-        earth_ra : float
-            RA of Earth center as seen from spacecraft (degrees).
-        earth_dec : float
-            Dec of Earth center as seen from spacecraft (degrees).
-        dt : datetime
-            Time for Earth rotation calculation.
-
-        Returns
-        -------
-        lon : array
-            Longitude on Earth surface (-180 to 180 degrees).
-        lat : array
-            Latitude on Earth surface (-90 to 90 degrees).
-        """
-        # The subsatellite point (point on Earth directly under spacecraft)
-        # corresponds to the Earth center in the sky (earth_ra, earth_dec)
-
-        # Calculate Greenwich Mean Sidereal Time for Earth rotation
-        from datetime import datetime
-
-        j2000 = datetime(2000, 1, 1, 12, 0, 0)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        days_since_j2000 = (
-            dt.replace(tzinfo=timezone.utc) - j2000.replace(tzinfo=timezone.utc)
-        ).total_seconds() / 86400
-
-        # GMST calculation (simplified)
-        gmst = (280.46061837 + 360.98564736629 * days_since_j2000) % 360
-
-        # Subsatellite point on Earth surface
-        subsatellite_lat = (
-            earth_dec  # Dec of Earth center = latitude of subsatellite point
-        )
-        subsatellite_lon = (earth_ra - gmst) % 360
-        if subsatellite_lon > 180:
-            subsatellite_lon -= 360
-
-        # Convert to radians for calculation
-        ra_rad = np.radians(ra_vals)
-        dec_rad = np.radians(dec_vals)
-        earth_ra_rad = np.radians(earth_ra)
-        earth_dec_rad = np.radians(earth_dec)
-
-        # Calculate angular separation from Earth center (subsatellite point)
-        # This is the angular distance in the sky
-        delta_ra = ra_rad - earth_ra_rad
-        cos_angular_dist = np.sin(earth_dec_rad) * np.sin(dec_rad) + np.cos(
-            earth_dec_rad
-        ) * np.cos(dec_rad) * np.cos(delta_ra)
-        angular_dist = np.arccos(np.clip(cos_angular_dist, -1, 1))
-
-        # Calculate position angle (azimuth from subsatellite point)
-        # This tells us the direction from Earth center to the point in the sky
-        sin_pa = np.sin(delta_ra) * np.cos(dec_rad)
-        cos_pa = np.cos(earth_dec_rad) * np.sin(dec_rad) - np.sin(
-            earth_dec_rad
-        ) * np.cos(dec_rad) * np.cos(delta_ra)
-        position_angle = np.arctan2(sin_pa, cos_pa)
-
-        # For orthographic projection from spacecraft:
-        # angular_dist in sky = angular_dist on Earth sphere
-        # The position angle in sky = azimuth on Earth surface
-
-        # Convert from subsatellite point coordinates to lat/lon
-        subsatellite_lat_rad = np.radians(subsatellite_lat)
-
-        # Latitude on Earth using spherical trigonometry
-        lat_rad = np.arcsin(
-            np.sin(subsatellite_lat_rad) * np.cos(angular_dist)
-            + np.cos(subsatellite_lat_rad)
-            * np.sin(angular_dist)
-            * np.cos(position_angle)
-        )
-        lat = np.degrees(lat_rad)
-
-        # Longitude offset from subsatellite point
-        dlon = np.arctan2(
-            np.sin(position_angle) * np.sin(angular_dist),
-            np.cos(angular_dist) - np.sin(subsatellite_lat_rad) * np.sin(lat_rad),
-        )
-
-        lon = subsatellite_lon + np.degrees(dlon)
-
-        # Normalize to -180 to 180
-        lon = lon % 360
-        lon = np.where(lon > 180, lon - 360, lon)
-
-        return lon, lat
-
-    def _get_earth_surface_colors(
-        self, lon, lat, sun_ra, sun_dec, earth_ra, earth_dec, dt
-    ):
-        """Get colors for Earth surface points based on geography and illumination.
-
-        Parameters
-        ----------
-        lon : array
-            Longitude on Earth surface (-180 to 180 degrees).
-        lat : array
-            Latitude on Earth surface (-90 to 90 degrees).
-        sun_ra : float
-            RA of Sun (degrees).
-        sun_dec : float
-            Dec of Sun (degrees).
-        earth_ra : float
-            RA of Earth center (degrees).
-        earth_dec : float
-            Dec of Earth center (degrees).
-        dt : datetime
-            Time for GMST calculation.
-
-        Returns
-        -------
-        colors : array
-            RGB colors for each point.
-        """
-        # Detailed ocean colors with depth variation
-        ocean_shallow = np.array([0.15, 0.35, 0.65])  # Lighter coastal blue
-        ocean_deep = np.array([0.05, 0.15, 0.45])  # Deep ocean blue
-
-        # Diverse land colors by biome
-        # Tropical rainforest
-        land_rainforest = np.array([0.15, 0.5, 0.2])  # Dark green
-        # Savanna/grassland
-        land_savanna = np.array([0.55, 0.55, 0.25])  # Yellow-green
-        # Desert
-        land_desert = np.array([0.75, 0.65, 0.45])  # Sandy tan
-        # Temperate forest
-        land_temperate = np.array([0.3, 0.6, 0.3])  # Green
-        # Boreal forest/tundra
-        land_boreal = np.array([0.25, 0.45, 0.3])  # Dark green-gray
-        # Mountain/highland
-        land_mountain = np.array([0.5, 0.4, 0.3])  # Brown
-        # Ice/snow
-        land_ice = np.array([0.95, 0.95, 0.98])  # Bright white
-
-        # Determine land mask
-        is_land = self._approximate_land_mask(lon, lat)
-
-        # Create latitude-based biome classification
-        abs_lat = np.abs(lat)
-
-        # Calculate biome weights for land areas
-        # Polar regions (>60°): ice
-        ice_weight = np.maximum(0, (abs_lat - 60) / 30)
-        # Boreal (45-60°): boreal forest/tundra
-        boreal_weight = np.maximum(0, 1 - np.abs(abs_lat - 52.5) / 15)  # Peak at 52.5°
-        # Temperate (30-50°): temperate forest
-        temperate_weight = np.maximum(0, 1 - np.abs(abs_lat - 40) / 15)  # Peak at 40°
-        # Subtropical/desert (15-35°): mix of desert and grassland
-        desert_weight = np.maximum(0, 1 - np.abs(abs_lat - 25) / 15)  # Peak at 25°
-        # Tropical (0-20°): rainforest and savanna
-        tropical_weight = np.maximum(0, 1 - abs_lat / 20)
-
-        # Add longitude-based variation for deserts (e.g., Sahara, Arabian, Australian)
-        # Enhance desert in specific regions
-        desert_regions = (
-            # Sahara
-            ((lon > -10) & (lon < 40) & (abs_lat > 15) & (abs_lat < 30))
-            |
-            # Arabian
-            ((lon > 35) & (lon < 60) & (abs_lat > 15) & (abs_lat < 35))
-            |
-            # Australian interior
-            ((lon > 115) & (lon < 145) & (lat > -35) & (lat < -20))
-            |
-            # Kalahari
-            ((lon > 15) & (lon < 30) & (lat > -30) & (lat < -18))
-            |
-            # Atacama
-            ((lon > -75) & (lon < -68) & (lat > -30) & (lat < -18))
-            |
-            # Great Basin/Mojave
-            ((lon > -120) & (lon < -110) & (lat > 35) & (lat < 42))
-        )
-        desert_weight = np.where(desert_regions, desert_weight * 2, desert_weight)
-
-        # Normalize weights
-        total_weight = (
-            ice_weight
-            + boreal_weight
-            + temperate_weight
-            + desert_weight
-            + tropical_weight
-            + 1e-10
-        )
-        ice_weight /= total_weight
-        boreal_weight /= total_weight
-        temperate_weight /= total_weight
-        desert_weight /= total_weight
-        tropical_weight /= total_weight
-
-        # Split tropical between rainforest and savanna
-        # Rainforest: equatorial regions
-        rainforest_weight = tropical_weight * np.maximum(0, 1 - abs_lat / 10)
-        savanna_weight = tropical_weight - rainforest_weight
-
-        # Calculate blended land color
-        land_color = (
-            ice_weight[:, np.newaxis] * land_ice
-            + boreal_weight[:, np.newaxis] * land_boreal
-            + temperate_weight[:, np.newaxis] * land_temperate
-            + desert_weight[:, np.newaxis] * land_desert
-            + rainforest_weight[:, np.newaxis] * land_rainforest
-            + savanna_weight[:, np.newaxis] * land_savanna
-        )
-
-        # Add mountain coloring for high elevation regions (rough approximation)
-        # Major mountain ranges
-        is_mountain = (
-            # Himalayas
-            ((lon > 70) & (lon < 95) & (lat > 25) & (lat < 40))
-            |
-            # Andes
-            ((lon > -78) & (lon < -65) & (lat > -50) & (lat < 10))
-            |
-            # Rockies
-            ((lon > -120) & (lon < -105) & (lat > 35) & (lat < 55))
-            |
-            # Alps
-            ((lon > 5) & (lon < 16) & (lat > 44) & (lat < 48))
-            |
-            # Ethiopian Highlands
-            ((lon > 35) & (lon < 45) & (lat > 5) & (lat < 15))
-        )
-        land_color = np.where(is_mountain[:, np.newaxis], land_mountain, land_color)
-
-        # Vary ocean color with latitude (simulating depth)
-        # Deeper oceans near equator and poles
-        ocean_depth_factor = 0.5 + 0.5 * np.cos(np.radians(lat * 2))
-        ocean_color = ocean_deep * ocean_depth_factor[:, np.newaxis] + ocean_shallow * (
-            1 - ocean_depth_factor[:, np.newaxis]
-        )
-
-        # Mix land and ocean
-        base_colors = np.where(is_land[:, np.newaxis], land_color, ocean_color)
-
-        # Calculate solar illumination
-        # The subsolar point is where the Sun vector from Earth center points
-        # Convert Sun position to Earth surface coordinates
-        # Sun's declination directly gives latitude
-        subsolar_lat = sun_dec
-
-        # Calculate Sun's longitude using the same GMST calculation
-        from datetime import datetime
-
-        j2000 = datetime(2000, 1, 1, 12, 0, 0)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        days_since_j2000 = (
-            dt.replace(tzinfo=timezone.utc) - j2000.replace(tzinfo=timezone.utc)
-        ).total_seconds() / 86400
-        gmst = (280.46061837 + 360.98564736629 * days_since_j2000) % 360
-        subsolar_lon = (sun_ra - gmst) % 360
-        if subsolar_lon > 180:
-            subsolar_lon -= 360
-
-        # Calculate solar zenith angle for each point
-        lat_rad = np.radians(lat)
-        lon_rad = np.radians(lon)
-        subsolar_lat_rad = np.radians(subsolar_lat)
-        subsolar_lon_rad = np.radians(subsolar_lon)
-
-        # Cosine of solar zenith angle (dot product of surface normal with sun vector)
-        cos_zenith = np.sin(lat_rad) * np.sin(subsolar_lat_rad) + np.cos(
-            lat_rad
-        ) * np.cos(subsolar_lat_rad) * np.cos(lon_rad - subsolar_lon_rad)
-
-        # Illumination factor (0 = night, 1 = full daylight)
-        # Add twilight zone (sun 6° below horizon)
-        twilight_angle = np.radians(6)
-        illumination = np.clip(
-            (cos_zenith + np.sin(twilight_angle)) / np.sin(twilight_angle), 0, 1
-        )
-
-        # Apply illumination to colors
-        # Night side is darker, day side is brighter
-        night_factor = 0.1  # How dark the night side should be
-        illuminated_colors = base_colors * (
-            night_factor + (1 - night_factor) * illumination[:, np.newaxis]
-        )
-
-        return illuminated_colors
-
-    def _approximate_land_mask(self, lon, lat):
-        """Create detailed land mask based on accurate continental boundaries.
-
-        Parameters
-        ----------
-        lon : array
-            Longitude (-180 to 180 degrees).
-        lat : array
-            Latitude (-90 to 90 degrees).
-
-        Returns
-        -------
-        is_land : array
-            Boolean array, True for land, False for ocean.
-        """
-        is_land = np.zeros(len(lon), dtype=bool)
-
-        # AFRICA - detailed regions
-        # North Africa
-        is_land |= (lon > -17) & (lon < 52) & (lat > 10) & (lat < 38)
-        # West Africa (bulge)
-        is_land |= (lon > -18) & (lon < 16) & (lat > 4) & (lat < 15)
-        # Central/East Africa
-        is_land |= (lon > 7) & (lon < 52) & (lat > -12) & (lat < 18)
-        # Southern Africa
-        is_land |= (lon > 10) & (lon < 41) & (lat > -35) & (lat < -8)
-        # Horn of Africa
-        is_land |= (lon > 33) & (lon < 51) & (lat > -5) & (lat < 18)
-        # Madagascar
-        is_land |= (lon > 43) & (lon < 51) & (lat > -26) & (lat < -12)
-
-        # EURASIA - detailed regions
-        # Europe - Western
-        is_land |= (lon > -10) & (lon < 30) & (lat > 36) & (lat < 72)
-        # Europe - Northern (Scandinavia)
-        is_land |= (lon > 4) & (lon < 32) & (lat > 55) & (lat < 72)
-        # Europe - Mediterranean
-        is_land |= (lon > -10) & (lon < 45) & (lat > 35) & (lat < 47)
-        # Eastern Europe/Western Russia
-        is_land |= (lon > 20) & (lon < 65) & (lat > 45) & (lat < 72)
-        # Central Asia
-        is_land |= (lon > 45) & (lon < 95) & (lat > 35) & (lat < 55)
-        # Siberia
-        is_land |= (lon > 60) & (lon < 180) & (lat > 50) & (lat < 78)
-        # Far East Russia
-        is_land |= (lon > 100) & (lon < 180) & (lat > 40) & (lat < 70)
-        # Middle East - Arabian Peninsula
-        is_land |= (lon > 34) & (lon < 60) & (lat > 12) & (lat < 32)
-        # Middle East - Anatolia/Levant
-        is_land |= (lon > 26) & (lon < 48) & (lat > 31) & (lat < 42)
-        # Indian Subcontinent
-        is_land |= (lon > 68) & (lon < 89) & (lat > 8) & (lat < 36)
-        # India - southern tip
-        is_land |= (lon > 74) & (lon < 81) & (lat > 6) & (lat < 12)
-        # Southeast Asia - mainland
-        is_land |= (lon > 92) & (lon < 110) & (lat > 5) & (lat < 28)
-        # Southeast Asia - Malay Peninsula
-        is_land |= (lon > 99) & (lon < 105) & (lat > 1) & (lat < 8)
-        # China
-        is_land |= (lon > 73) & (lon < 135) & (lat > 18) & (lat < 54)
-        # Korea
-        is_land |= (lon > 124) & (lon < 131) & (lat > 33) & (lat < 43)
-        # Japan
-        is_land |= (lon > 129) & (lon < 146) & (lat > 30) & (lat < 46)
-        # Indonesia - Sumatra
-        is_land |= (lon > 95) & (lon < 106) & (lat > -6) & (lat < 6)
-        # Indonesia - Java
-        is_land |= (lon > 105) & (lon < 115) & (lat > -9) & (lat < -6)
-        # Indonesia - Borneo
-        is_land |= (lon > 109) & (lon < 119) & (lat > -4) & (lat < 7)
-        # Indonesia - Sulawesi
-        is_land |= (lon > 119) & (lon < 125) & (lat > -6) & (lat < 2)
-        # Philippines
-        is_land |= (lon > 117) & (lon < 127) & (lat > 5) & (lat < 20)
-        # Taiwan
-        is_land |= (lon > 120) & (lon < 122) & (lat > 22) & (lat < 25.5)
-
-        # NORTH AMERICA - detailed regions
-        # Canada - Western/Arctic
-        is_land |= (lon > -141) & (lon < -95) & (lat > 50) & (lat < 75)
-        # Canada - Eastern
-        is_land |= (lon > -95) & (lon < -52) & (lat > 42) & (lat < 72)
-        # Canada - Arctic islands
-        is_land |= (lon > -120) & (lon < -60) & (lat > 60) & (lat < 84)
-        # Alaska
-        is_land |= (lon > -169) & (lon < -130) & (lat > 54) & (lat < 72)
-        # USA - West Coast
-        is_land |= (lon > -125) & (lon < -104) & (lat > 31) & (lat < 49)
-        # USA - Central
-        is_land |= (lon > -105) & (lon < -90) & (lat > 29) & (lat < 49)
-        # USA - East
-        is_land |= (lon > -90) & (lon < -67) & (lat > 25) & (lat < 48)
-        # Florida
-        is_land |= (lon > -87) & (lon < -80) & (lat > 25) & (lat < 31)
-        # Mexico - mainland
-        is_land |= (lon > -117) & (lon < -86) & (lat > 14) & (lat < 33)
-        # Baja California
-        is_land |= (lon > -115) & (lon < -109) & (lat > 22.5) & (lat < 32.5)
-        # Central America
-        is_land |= (lon > -93) & (lon < -77) & (lat > 7) & (lat < 18)
-        # Caribbean - Cuba
-        is_land |= (lon > -85) & (lon < -74) & (lat > 19.5) & (lat < 23.5)
-        # Caribbean - Hispaniola
-        is_land |= (lon > -75) & (lon < -68) & (lat > 17.5) & (lat < 20)
-        # Caribbean - Jamaica
-        is_land |= (lon > -78.5) & (lon < -76) & (lat > 17.5) & (lat < 18.5)
-        # Caribbean - Puerto Rico
-        is_land |= (lon > -67.5) & (lon < -65.5) & (lat > 17.8) & (lat < 18.6)
-
-        # SOUTH AMERICA - detailed regions
-        # Colombia/Venezuela
-        is_land |= (lon > -79) & (lon < -59) & (lat > -4) & (lat < 13)
-        # Brazil - Amazon
-        is_land |= (lon > -75) & (lon < -48) & (lat > -16) & (lat < 5)
-        # Brazil - Southeast
-        is_land |= (lon > -55) & (lon < -34) & (lat > -34) & (lat < -3)
-        # Peru/Ecuador
-        is_land |= (lon > -82) & (lon < -68) & (lat > -18) & (lat < 2)
-        # Bolivia/Paraguay
-        is_land |= (lon > -70) & (lon < -54) & (lat > -28) & (lat < -10)
-        # Chile - long strip
-        is_land |= (lon > -76) & (lon < -66) & (lat > -56) & (lat < -17)
-        # Argentina
-        is_land |= (lon > -73) & (lon < -53) & (lat > -55) & (lat < -22)
-        # Uruguay
-        is_land |= (lon > -58.5) & (lon < -53) & (lat > -35) & (lat < -30)
-
-        # AUSTRALIA - detailed
-        # Western Australia
-        is_land |= (lon > 112) & (lon < 129) & (lat > -35) & (lat < -13)
-        # Northern Territory
-        is_land |= (lon > 129) & (lon < 138) & (lat > -26) & (lat < -11)
-        # Queensland/Eastern
-        is_land |= (lon > 138) & (lon < 154) & (lat > -29) & (lat < -10)
-        # South Australia
-        is_land |= (lon > 129) & (lon < 141) & (lat > -38) & (lat < -26)
-        # Tasmania
-        is_land |= (lon > 144) & (lon < 149) & (lat > -44) & (lat < -40)
-
-        # NEW ZEALAND
-        # North Island
-        is_land |= (lon > 172) & (lon < 179) & (lat > -42) & (lat < -34)
-        # South Island
-        is_land |= (lon > 166) & (lon < 175) & (lat > -47) & (lat < -40)
-
-        # ANTARCTICA - detailed by region
-        is_land |= lat < -60  # Base coverage
-
-        # GREENLAND - more accurate
-        is_land |= (lon > -73) & (lon < -18) & (lat > 59) & (lat < 84)
-
-        # ICELAND
-        is_land |= (lon > -25) & (lon < -13) & (lat > 63) & (lat < 67)
-
-        # BRITISH ISLES
-        # Great Britain
-        is_land |= (lon > -6) & (lon < 2) & (lat > 49.5) & (lat < 59)
-        # Ireland
-        is_land |= (lon > -11) & (lon < -6) & (lat > 51) & (lat < 55.5)
-
-        # PACIFIC ISLANDS
-        # New Guinea
-        is_land |= (lon > 140) & (lon < 151) & (lat > -11) & (lat < -1)
-        # Sri Lanka
-        is_land |= (lon > 79.5) & (lon < 82) & (lat > 5.5) & (lat < 10)
-
-        return is_land
+            self._plot_points_on_sky(
+                ra_vals, dec_vals, "darkblue", alpha=0.8, label="Earth Disk", zorder=2.5
+            )
 
     def _create_sky_grid(self, n_points):
         """Create a grid of RA/Dec points optimized for Mollweide projection.
@@ -1258,7 +763,7 @@ class SkyPointingController:
                             markersize=8,
                             markeredgecolor="black",
                             markerfacecolor=color,
-                            markeredgewidth=0,
+                            markeredgewidth=2,
                             zorder=3,
                         )
                     return
@@ -1302,7 +807,7 @@ class SkyPointingController:
                 markersize=12,
                 markerfacecolor=color,
                 markeredgecolor="black",
-                markeredgewidth=0,
+                markeredgewidth=2,
                 label=name,
                 zorder=3,
             )
@@ -1346,7 +851,7 @@ class SkyPointingController:
             markersize=25,
             markerfacecolor=color,
             markeredgecolor="white",
-            markeredgewidth=0,
+            markeredgewidth=2,
             label="Pointing",
             zorder=5,
         )
@@ -1508,7 +1013,7 @@ def save_sky_pointing_frames(
         ax=ax,
         n_grid_points=n_grid_points,
         time_step_seconds=ditl.step_size,
-        constraint_alpha=1.0,
+        constraint_alpha=0.3,
         config=config,
     )
 
@@ -1668,7 +1173,7 @@ def save_sky_pointing_movie(
         ax=ax,
         n_grid_points=n_grid_points,
         time_step_seconds=ditl.step_size,
-        constraint_alpha=1.0,
+        constraint_alpha=0.3,
         config=config,
     )
 
