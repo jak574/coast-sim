@@ -5,6 +5,7 @@ import rust_ephem
 
 from ..common import givename, roll_over_angle, unixtime2date
 from ..config import AttitudeControlSystem, Constraint
+from ..simulation.saa import SAA
 
 
 class PlanEntry:
@@ -19,7 +20,7 @@ class PlanEntry:
     ephem: rust_ephem.TLEEphemeris | None
     constraint: Constraint | None
     merit: float
-    saa: bool
+    saa: SAA | None
 
     def __init__(
         self,
@@ -43,7 +44,7 @@ class PlanEntry:
         self.end = 0
         self.obsid = 0
 
-        self.saa = False
+        self.saa = None
         self.merit = 101
         self.windows = list()
         self.obstype = "PPT"

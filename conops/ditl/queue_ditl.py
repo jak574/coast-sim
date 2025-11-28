@@ -1,4 +1,3 @@
-import copy
 from datetime import timezone
 from typing import Any
 
@@ -149,13 +148,12 @@ class QueueDITL(DITLMixin, DITLStats):
             # Get current pointing and mode from ACS
             ra, dec, roll, obsid = self.acs.pointing(utime)
             mode = self.acs.get_mode(utime)
-            print(f"{unixtime2date(utime)}, RA: {ra}, Dec: {dec}, Mode: {mode.name}")
 
             # Check pass timing and manage passes
             self._check_and_manage_passes(utime, ra, dec)
 
             # Handle spacecraft operations based on current mode
-            lastra, lastdec = self._handle_mode_operations(mode, utime, lastra, lastdec)
+            lastra, lastdec = self._handle_mode_operations(mode, utime, ra, dec)
 
             # Close PPT timeline segment if no active observation
             self._close_ppt_timeline_if_needed(utime)
@@ -359,34 +357,63 @@ class QueueDITL(DITLMixin, DITLStats):
     def _check_and_manage_passes(self, utime: float, ra: float, dec: float) -> None:
         """Check pass timing and send appropriate commands to ACS."""
 
-        # Check what actions are needed for passes
-        pass_actions = self.acs.passrequests.check_pass_timing(
-            utime, ra, dec, self.step_size
-        )
+        # Check if we're in a pass, if yes, command ACS to start the pass
+        current_pass = self.acs.passrequests.current_pass(utime)
+        if current_pass is not None and self.acs.acsmode != ACSMode.PASS:
+            print(f"{unixtime2date(utime)} In pass, commanding ACS to start pass")
+            command = ACSCommand(
+                command_type=ACSCommandType.START_PASS,
+                execution_time=utime,
+            )
+            self.acs.enqueue_command(command)
+            return
 
-        # Handle pass end
-        if pass_actions["end_pass"]:
+        # Check if a pass just ended, if yes, command ACS to end the pass.
+        # FIXME: This works but isn't super clean.
+        if (
+            self.acs.passrequests.current_pass(utime - self.ephem.step_size)
+            and current_pass is None
+        ):
+            print(f"{unixtime2date(utime)} Pass ended, commanding ACS to end pass")
             command = ACSCommand(
                 command_type=ACSCommandType.END_PASS,
                 execution_time=utime,
             )
             self.acs.enqueue_command(command)
+            return
 
-        # Handle pass start
-        if pass_actions["start_pass"] is not None:
-            pass_obj = pass_actions["start_pass"]
-            # Set the obsid from last science pointing
-            pass_obj.obsid = getattr(self.acs.last_ppt, "obsid", 0xFFFF)
+        # Check to see if it's time to slew to the next pass
+        # Note that if we're already in PASS or SLEWING mode, we skip this,
+        # because you can't slew to a pass while already in a pass or slewing.
+        if self.acs.acsmode not in (ACSMode.PASS, ACSMode.SLEWING):
+            next_pass = self.acs.passrequests.next_pass(utime)
 
-            # Only start pass if we're in science or slewing mode
-            if self.acs.acsmode in (ACSMode.SCIENCE, ACSMode.SLEWING):
-                print(f"{unixtime2date(utime)} Pass start: {pass_obj.station}")
+            # If there's no next pass, nothing to do
+            if next_pass is None:
+                return
+
+            # Check if it's time to start slewing for the next pass
+            if next_pass.time_to_slew(utime=utime, ra=ra, dec=dec):
+                # If it's time to slew, enqueue the slew command
+                print(f"{unixtime2date(utime)} Slewing for pass to {next_pass.station}")
+
+                # Create slew object for the pass
+                slew = Slew(
+                    constraint=self.constraint,
+                    acs_config=self.config.spacecraft_bus.attitude_control,
+                )
+
+                slew.startra = ra
+                slew.startdec = dec
+                slew.endra = next_pass.gsstartra
+                slew.enddec = next_pass.gsstartdec
                 command = ACSCommand(
-                    command_type=ACSCommandType.START_PASS,
-                    execution_time=pass_obj.slewrequired,
-                    slew=copy.copy(pass_obj),
+                    command_type=ACSCommandType.SLEW_TO_TARGET,
+                    execution_time=utime,
+                    slew=slew,
                 )
                 self.acs.enqueue_command(command)
+                return
 
     def _handle_pass_mode(self, utime: float) -> None:
         """Handle spacecraft behavior during ground station passes."""

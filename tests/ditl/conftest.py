@@ -16,13 +16,17 @@ class DummyEphemeris:
     def __init__(self):
         from datetime import datetime, timezone
 
-        self.step_size = 1.0
-        # Cover 2018 day 331 (Nov 27) for 2 days
-        unix_times = np.arange(1543276800, 1543449600, 60)
+        self.step_size = 3600
+        # Cover 2018 day 331 (Nov 27) for 1 days - but use larger timestep (3600s instead of 60s)
+        # to reduce Mock object creation: 1 days @ 3600-second steps = 24 timesteps instead of 1440
+        unix_times = np.arange(1543276800, 1543446000, 3600)
         self.timestamp = [
             datetime.fromtimestamp(t, tz=timezone.utc) for t in unix_times
         ]
         self.utime = unix_times
+        # Add earth and sun attributes for ACS initialization
+        self.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0)) for _ in unix_times]
+        self.sun = [Mock(ra=Mock(deg=45.0), dec=Mock(deg=23.5)) for _ in unix_times]
 
     def index(self, time):
         """Mock index method."""
@@ -36,6 +40,7 @@ def mock_config():
     cfg.name = "test"
     cfg.constraint = Mock()
     cfg.constraint.ephem = Mock()  # DITLMixin asserts this is not None
+    cfg.constraint.ephem.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0))]
     cfg.battery = Mock()
     cfg.battery.max_depth_of_discharge = 0.5
     return cfg
@@ -70,6 +75,9 @@ def mock_config_detailed():
     # Mock spacecraft bus
     config.spacecraft_bus = Mock()
     config.spacecraft_bus.power = Mock(return_value=50.0)
+    config.spacecraft_bus.attitude_control = Mock()
+    config.spacecraft_bus.attitude_control.predict_slew = Mock(return_value=(45.0, []))
+    config.spacecraft_bus.attitude_control.slew_time = Mock(return_value=100.0)
 
     # Mock payload
     config.payload = Mock()
@@ -89,6 +97,7 @@ def mock_config_detailed():
     config.solar_panel.power = Mock(return_value=100.0)
     config.solar_panel.panel_illumination_fraction = Mock(return_value=0.5)
     config.solar_panel.illumination_and_power = Mock(return_value=(0.5, 100.0))
+    config.solar_panel.optimal_charging_pointing = Mock(return_value=(45.0, 23.5))
 
     # Mock ground stations
     config.ground_stations = Mock()
