@@ -358,6 +358,7 @@ class FaultManagement(BaseModel):
                         red_limit.time_threshold_seconds is not None
                         and fault_state.continuous_violation_seconds
                         >= red_limit.time_threshold_seconds
+                        and self.safe_mode_on_red
                     ):
                         # Trigger safe mode
                         if acs is None or not acs.in_safe_mode:
