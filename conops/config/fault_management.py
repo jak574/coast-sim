@@ -92,6 +92,32 @@ class FaultEvent:
     cause: str
     metadata: dict[str, Any] | None = None
 
+    def __str__(self) -> str:
+        """Concise human-readable summary for printing a list of events."""
+        try:
+            time_dt = dtutcfromtimestamp(self.utime)
+            time_str = time_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            time_str = f"utime={self.utime}"
+
+        base = f"[{time_str}] {self.event_type.upper():<20}: {self.name} - {self.cause}"
+
+        if not self.metadata:
+            return base
+
+        # Build a short preview of metadata: show up to 3 key=repr(value) pairs, truncating long values
+        parts: list[str] = []
+        for i, (k, v) in enumerate(self.metadata.items()):
+            if i >= 3:
+                parts.append("...")
+                break
+            v_repr = repr(v)
+            if len(v_repr) > 80:
+                v_repr = v_repr[:77] + "..."
+            parts.append(f"{k}={v_repr}")
+
+        return f"{base} | " + ", ".join(parts)
+
 
 @dataclass
 class FaultState:
@@ -186,8 +212,8 @@ class FaultManagement(BaseModel):
     can trigger safe mode after sustained violations beyond a time threshold.
     """
 
-    thresholds: dict[str, FaultThreshold] = Field(default_factory=dict)
-    red_limit_constraints: dict[str, FaultConstraint] = Field(default_factory=dict)
+    thresholds: list[FaultThreshold] = Field(default_factory=list)
+    red_limit_constraints: list[FaultConstraint] = Field(default_factory=list)
     states: dict[str, FaultState] = Field(default_factory=dict)
     safe_mode_on_red: bool = True  # Global policy: enter safe mode for any RED
     safe_mode_requested: bool = False  # Flag set when safe mode should be triggered
@@ -228,7 +254,7 @@ class FaultManagement(BaseModel):
 
         # Check regular threshold-based faults
         for name, val in values.items():
-            thresh = self.thresholds.get(name)
+            thresh = next((t for t in self.thresholds if t.name == name), None)
             if thresh is None:
                 continue  # Not monitored
             state = thresh.classify(val)
@@ -288,9 +314,9 @@ class FaultManagement(BaseModel):
         ):
             dt = dtutcfromtimestamp(utime)
 
-            for name, red_limit in self.red_limit_constraints.items():
+            for red_limit in self.red_limit_constraints:
                 # Ensure state exists
-                fault_state = self.ensure_state(name)
+                fault_state = self.ensure_state(red_limit.name)
 
                 # Check if currently in constraint violation
                 # Note: in_constraint returns True when constraint is VIOLATED
@@ -309,8 +335,8 @@ class FaultManagement(BaseModel):
                             FaultEvent(
                                 utime=utime,
                                 event_type="constraint_violation",
-                                name=name,
-                                cause=f"Entered constraint violation for {name}",
+                                name=red_limit.name,
+                                cause=f"Entered constraint violation for {red_limit.name}",
                                 metadata={
                                     "constraint_type": type(
                                         red_limit.constraint
@@ -340,7 +366,7 @@ class FaultManagement(BaseModel):
                                 FaultEvent(
                                     utime=utime,
                                     event_type="safe_mode_trigger",
-                                    name=name,
+                                    name=red_limit.name,
                                     cause="Constraint violation exceeded time threshold",
                                     metadata={
                                         "constraint_type": type(
@@ -360,8 +386,8 @@ class FaultManagement(BaseModel):
                             FaultEvent(
                                 utime=utime,
                                 event_type="constraint_violation",
-                                name=name,
-                                cause=f"Cleared constraint violation for {name}",
+                                name=red_limit.name,
+                                cause=f"Cleared constraint violation for {red_limit.name}",
                                 metadata={
                                     "constraint_type": type(
                                         red_limit.constraint
@@ -390,7 +416,7 @@ class FaultManagement(BaseModel):
 
         for name, st in self.states.items():
             # Check if this is a red limit constraint or threshold-based parameter
-            if name in self.red_limit_constraints:
+            if any(c.name == name for c in self.red_limit_constraints):
                 # Red limit constraint stats
                 stats[name] = {
                     "in_violation": st.in_violation,
@@ -410,8 +436,8 @@ class FaultManagement(BaseModel):
     def add_threshold(
         self, name: str, yellow: float, red: float, direction: str = "below"
     ) -> None:
-        self.thresholds[name] = FaultThreshold(
-            name=name, yellow=yellow, red=red, direction=direction
+        self.thresholds.append(
+            FaultThreshold(name=name, yellow=yellow, red=red, direction=direction)
         )
 
     def add_red_limit_constraint(
@@ -429,11 +455,13 @@ class FaultManagement(BaseModel):
             time_threshold_seconds: Max continuous violation time before safe mode (None = no trigger)
             description: Human-readable description
         """
-        self.red_limit_constraints[name] = FaultConstraint(
-            name=name,
-            constraint=constraint,
-            time_threshold_seconds=time_threshold_seconds,
-            description=description,
+        self.red_limit_constraints.append(
+            FaultConstraint(
+                name=name,
+                constraint=constraint,
+                time_threshold_seconds=time_threshold_seconds,
+                description=description,
+            )
         )
 
 

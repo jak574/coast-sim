@@ -105,7 +105,7 @@ class TestFaultManagementRedLimits:
             time_threshold_seconds=300.0,
             description="Sun constraint",
         )
-        assert "sun_limit" in fm.red_limit_constraints
+        assert any(c.name == "sun_limit" for c in fm.red_limit_constraints)
 
     def test_add_red_limit_constraint_name_correct(self, fm, constraint_sun_30):
         fm.add_red_limit_constraint(
@@ -114,7 +114,8 @@ class TestFaultManagementRedLimits:
             time_threshold_seconds=300.0,
             description="Sun constraint",
         )
-        assert fm.red_limit_constraints["sun_limit"].name == "sun_limit"
+        constraint = next(c for c in fm.red_limit_constraints if c.name == "sun_limit")
+        assert constraint.name == "sun_limit"
 
     def test_add_red_limit_constraint_time_threshold(self, fm, constraint_sun_30):
         fm.add_red_limit_constraint(
@@ -123,7 +124,8 @@ class TestFaultManagementRedLimits:
             time_threshold_seconds=300.0,
             description="Sun constraint",
         )
-        assert fm.red_limit_constraints["sun_limit"].time_threshold_seconds == 300.0
+        constraint = next(c for c in fm.red_limit_constraints if c.name == "sun_limit")
+        assert constraint.time_threshold_seconds == 300.0
 
     def test_add_multiple_red_limit_constraints_count(
         self, fm, constraint_sun_30, constraint_earth_10
@@ -153,7 +155,7 @@ class TestFaultManagementRedLimits:
             constraint=constraint_earth_10,
             time_threshold_seconds=600.0,
         )
-        assert "sun_limit" in fm.red_limit_constraints
+        assert any(c.name == "sun_limit" for c in fm.red_limit_constraints)
 
     def test_add_multiple_red_limit_constraints_contains_earth(
         self, fm, constraint_sun_30, constraint_earth_10
@@ -168,7 +170,7 @@ class TestFaultManagementRedLimits:
             constraint=constraint_earth_10,
             time_threshold_seconds=600.0,
         )
-        assert "earth_limit" in fm.red_limit_constraints
+        assert any(c.name == "earth_limit" for c in fm.red_limit_constraints)
 
     def test_check_red_limit_constraints_creates_states(
         self, fm, ephem, constraint_sun_30

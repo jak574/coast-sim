@@ -4,15 +4,18 @@ from conops import ACS
 
 
 def test_fault_management_adds_default_battery_threshold(base_config):
-    assert "battery_level" in base_config.fault_management.thresholds
+    assert any(
+        t.name == "battery_level" for t in base_config.fault_management.thresholds
+    )
 
 
 def test_fault_management_yellow_state_and_accumulation(base_config):
     fm = base_config.fault_management
     acs = ACS(constraint=base_config.constraint, config=base_config)
     # Simulate battery level between yellow and red
+    battery_threshold = next(t for t in fm.thresholds if t.name == "battery_level")
     base_config.battery.charge_level = base_config.battery.watthour * (
-        fm.thresholds["battery_level"].yellow - 0.01
+        battery_threshold.yellow - 0.01
     )
     fm.check(
         {"battery_level": base_config.battery.battery_level},
@@ -31,8 +34,9 @@ def test_fault_management_red_triggers_safe_mode(base_config):
     fm = base_config.fault_management
     acs = ACS(constraint=base_config.constraint, config=base_config)
     # Force battery below red limit
+    battery_threshold = next(t for t in fm.thresholds if t.name == "battery_level")
     base_config.battery.charge_level = base_config.battery.watthour * (
-        fm.thresholds["battery_level"].red - 0.01
+        battery_threshold.red - 0.01
     )
     fm.check(
         {"battery_level": base_config.battery.battery_level},
@@ -50,7 +54,8 @@ def test_fault_management_red_triggers_safe_mode(base_config):
 def test_fault_management_multiple_cycles_accumulate(base_config):
     fm = base_config.fault_management
     acs = ACS(constraint=base_config.constraint, config=base_config)
-    yellow_limit = fm.thresholds["battery_level"].yellow
+    battery_threshold = next(t for t in fm.thresholds if t.name == "battery_level")
+    yellow_limit = battery_threshold.yellow
     # Cycle 1: nominal (no accumulation)
     base_config.battery.charge_level = base_config.battery.watthour * (
         yellow_limit + 0.05
