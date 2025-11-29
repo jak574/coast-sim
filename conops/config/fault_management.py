@@ -71,7 +71,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from rust_ephem.constraints import ConstraintConfig
 
-from conops.common.common import dtutcfromtimestamp
+from ..common.common import dtutcfromtimestamp
 
 
 @dataclass
