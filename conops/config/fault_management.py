@@ -70,6 +70,8 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from rust_ephem.constraints import ConstraintConfig
 
+from conops.common.common import dtutcfromtimestamp
+
 
 @dataclass
 class FaultState:
@@ -77,7 +79,6 @@ class FaultState:
 
     Attributes:
         in_violation: Whether currently violating the constraint
-        total_violation_seconds: Total time spent in violation
         continuous_violation_seconds: Current continuous violation duration
         current: Current state for threshold-based faults (nominal/yellow/red)
         yellow_seconds: Time spent in yellow state (for threshold-based faults)
@@ -85,11 +86,10 @@ class FaultState:
     """
 
     in_violation: bool = False
-    total_violation_seconds: float = 0.0
     continuous_violation_seconds: float = 0.0
-    current: str = "nominal"  # For threshold-based faults: nominal | yellow | red
-    yellow_seconds: float = 0.0  # For threshold-based faults
-    red_seconds: float = 0.0  # For threshold-based faults
+    current: str = "nominal"  # Fault status: nominal | yellow | red
+    yellow_seconds: float = 0.0  # Number of seconds in yellow state
+    red_seconds: float = 0.0  # Number of seconds in red state
 
 
 class FaultConstraint(BaseModel):
@@ -229,13 +229,11 @@ class FaultManagement(BaseModel):
             and dec is not None
             and self.red_limit_constraints
         ):
-            from ..common import dtutcfromtimestamp
-
             dt = dtutcfromtimestamp(utime)
 
             for name, red_limit in self.red_limit_constraints.items():
                 # Ensure state exists
-                red_state = self.ensure_state(name)
+                fault_state = self.ensure_state(name)
 
                 # Check if currently in constraint violation
                 # Note: in_constraint returns True when constraint is VIOLATED
@@ -243,17 +241,18 @@ class FaultManagement(BaseModel):
                     ephemeris=ephem, target_ra=ra, target_dec=dec, time=dt
                 )
 
-                red_state.in_violation = in_violation
+                fault_state.in_violation = in_violation
 
                 if in_violation:
                     # Accumulate violation time
-                    red_state.total_violation_seconds += step_size
-                    red_state.continuous_violation_seconds += step_size
+                    fault_state.current = "red"
+                    fault_state.red_seconds += step_size
+                    fault_state.continuous_violation_seconds += step_size
 
                     # Check if we've exceeded the time threshold
                     if (
                         red_limit.time_threshold_seconds is not None
-                        and red_state.continuous_violation_seconds
+                        and fault_state.continuous_violation_seconds
                         >= red_limit.time_threshold_seconds
                     ):
                         # Trigger safe mode
@@ -261,7 +260,7 @@ class FaultManagement(BaseModel):
                             self.safe_mode_requested = True
                 else:
                     # Reset continuous violation counter when constraint is satisfied
-                    red_state.continuous_violation_seconds = 0.0
+                    fault_state.continuous_violation_seconds = 0.0
 
         return classifications
 
@@ -271,7 +270,7 @@ class FaultManagement(BaseModel):
         Returns:
             Dict mapping parameter/constraint name to statistics. For threshold-based
             parameters, includes yellow_seconds, red_seconds, and current state. For
-            red limit constraints, includes in_violation, total_violation_seconds,
+            red limit constraints, includes in_violation, red_seconds,
             and continuous_violation_seconds.
         """
         stats: dict[str, dict[str, float | str | bool]] = {}
@@ -282,7 +281,7 @@ class FaultManagement(BaseModel):
                 # Red limit constraint stats
                 stats[name] = {
                     "in_violation": st.in_violation,
-                    "total_violation_seconds": st.total_violation_seconds,
+                    "red_seconds": st.red_seconds,
                     "continuous_violation_seconds": st.continuous_violation_seconds,
                 }
             else:
