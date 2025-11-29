@@ -66,15 +66,108 @@ Safe Mode Behavior:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, Field
+from rust_ephem.constraints import ConstraintConfig
+
+from ..common.common import dtutcfromtimestamp
+
+
+@dataclass
+class FaultEvent:
+    """Records a single fault management event.
+
+    Attributes:
+        utime: Unix timestamp when the event occurred
+        event_type: Type of event (threshold_transition, constraint_violation, safe_mode_trigger)
+        name: Name of the parameter or constraint that triggered the event
+        cause: Human-readable description of what happened
+        metadata: Optional additional data (e.g., current values, thresholds, durations)
+    """
+
+    utime: float
+    event_type: str
+    name: str
+    cause: str
+    metadata: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        """Concise human-readable summary for printing a list of events."""
+        try:
+            time_dt = dtutcfromtimestamp(self.utime)
+            time_str = time_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            time_str = f"utime={self.utime}"
+
+        base = f"[{time_str}] {self.event_type.upper():<20}: {self.name} - {self.cause}"
+
+        if not self.metadata:
+            return base
+
+        # Build a short preview of metadata: show up to 3 key=repr(value) pairs, truncating long values
+        parts: list[str] = []
+        for i, (k, v) in enumerate(self.metadata.items()):
+            if i >= 3:
+                parts.append("...")
+                break
+            v_repr = repr(v)
+            if len(v_repr) > 80:
+                v_repr = v_repr[:77] + "..."
+            parts.append(f"{k}={v_repr}")
+
+        return f"{base} | " + ", ".join(parts)
 
 
 @dataclass
 class FaultState:
-    current: str = "nominal"  # nominal | yellow | red
-    yellow_seconds: float = 0.0
-    red_seconds: float = 0.0
+    """Tracks constraint violations (both red limit and regular thresholds).
+
+    Attributes:
+        in_violation: Whether currently violating the constraint
+        continuous_violation_seconds: Current continuous violation duration
+        current: Current state for threshold-based faults (nominal/yellow/red)
+        yellow_seconds: Time spent in yellow state (for threshold-based faults)
+        red_seconds: Time spent in red state (for threshold-based faults)
+    """
+
+    in_violation: bool = False
+    continuous_violation_seconds: float = 0.0
+    current: str = "nominal"  # Fault status: nominal | yellow | red
+    yellow_seconds: float = 0.0  # Number of seconds in yellow state
+    red_seconds: float = 0.0  # Number of seconds in red state
+
+
+class FaultConstraint(BaseModel):
+    """Spacecraft-level red limit constraint for health and safety.
+
+    These constraints define absolute limits that the spacecraft should never violate
+    for extended periods. They are typically looser than instrument constraints which
+    are optimized for data quality. Red limits exist purely for spacecraft health and safety.
+
+    Attributes:
+        name: Descriptive name for the constraint (e.g., 'spacecraft_sun_limit')
+        constraint: rust_ephem ConstraintConfig defining the constraint
+        time_threshold_seconds: Maximum continuous time allowed in violation before triggering safe mode.
+                              If None, no automatic safe mode trigger occurs.
+        description: Optional human-readable description of the constraint purpose
+
+    Example:
+        >>> # Spacecraft must not point within 30 degrees of Sun for more than 5 minutes
+        >>> constraint = FaultConstraint(
+        ...     name="spacecraft_sun_limit",
+        ...     constraint=rust_ephem.SunConstraint(min_angle=30.0),
+        ...     time_threshold_seconds=300.0,
+        ...     description="Prevent thermal damage from prolonged sun exposure"
+        ... )
+    """
+
+    name: str
+    constraint: ConstraintConfig
+    time_threshold_seconds: float | None = None
+    description: str = ""
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class FaultThreshold(BaseModel):
@@ -114,12 +207,19 @@ class FaultManagement(BaseModel):
     Monitors configured parameters each simulation cycle, classifies them
     into nominal / yellow / red states, records time spent in each state,
     and triggers ACS safe mode entry on RED conditions (once) where configured.
+
+    Also supports spacecraft-level red limit constraints for health and safety that
+    can trigger safe mode after sustained violations beyond a time threshold.
     """
 
-    thresholds: dict[str, FaultThreshold] = Field(default_factory=dict)
+    thresholds: list[FaultThreshold] = Field(default_factory=list)
+    red_limit_constraints: list[FaultConstraint] = Field(default_factory=list)
     states: dict[str, FaultState] = Field(default_factory=dict)
     safe_mode_on_red: bool = True  # Global policy: enter safe mode for any RED
     safe_mode_requested: bool = False  # Flag set when safe mode should be triggered
+    events: list[FaultEvent] = Field(
+        default_factory=list
+    )  # Event log with timestamps and causes
 
     def ensure_state(self, name: str) -> FaultState:
         if name not in self.states:
@@ -132,26 +232,55 @@ class FaultManagement(BaseModel):
         utime: float,
         step_size: float,
         acs: ACS | None = None,
+        ephem: TLEEphemeris | None = None,  # type: ignore # noqa: F821
+        ra: float | None = None,
+        dec: float | None = None,
     ) -> dict[str, str]:
-        """Evaluate all monitored parameters.
+        """Evaluate all monitored parameters and red limit constraints.
 
         Args:
             values: Mapping of parameter name -> current numeric value.
             utime: Current unix time of simulation.
             step_size: Simulation time step in seconds (used for duration accumulation).
             acs: ACS instance to trigger safe mode if needed.
+            ephem: Spacecraft ephemeris (required for red limit constraint checking).
+            ra: Current pointing RA in degrees (required for red limit constraint checking).
+            dec: Current pointing Dec in degrees (required for red limit constraint checking).
 
         Returns:
-            Dict mapping parameter name to classification string.
+            Dict mapping parameter name to classification string (for thresholds only).
         """
         classifications: dict[str, str] = {}
+
+        # Check regular threshold-based faults
         for name, val in values.items():
-            thresh = self.thresholds.get(name)
+            thresh = next((t for t in self.thresholds if t.name == name), None)
             if thresh is None:
                 continue  # Not monitored
             state = thresh.classify(val)
             classifications[name] = state
             st = self.ensure_state(name)
+
+            # Log state transitions
+            previous_state = st.current
+            if previous_state != state:
+                self.events.append(
+                    FaultEvent(
+                        utime=utime,
+                        event_type="threshold_transition",
+                        name=name,
+                        cause=f"Transitioned from {previous_state} to {state}",
+                        metadata={
+                            "previous_state": previous_state,
+                            "new_state": state,
+                            "value": val,
+                            "yellow_threshold": thresh.yellow,
+                            "red_threshold": thresh.red,
+                            "direction": thresh.direction,
+                        },
+                    )
+                )
+
             # Accumulate time
             if state == "yellow":
                 st.yellow_seconds += step_size
@@ -162,25 +291,178 @@ class FaultManagement(BaseModel):
             if state == "red" and self.safe_mode_on_red:
                 if acs is None or not acs.in_safe_mode:
                     self.safe_mode_requested = True
+                    self.events.append(
+                        FaultEvent(
+                            utime=utime,
+                            event_type="safe_mode_trigger",
+                            name=name,
+                            cause=f"RED threshold exceeded for {name}",
+                            metadata={
+                                "value": val,
+                                "red_threshold": thresh.red,
+                                "direction": thresh.direction,
+                            },
+                        )
+                    )
+
+        # Check spacecraft-level red limit constraints if ephemeris and pointing provided
+        if (
+            ephem is not None
+            and ra is not None
+            and dec is not None
+            and self.red_limit_constraints
+        ):
+            dt = dtutcfromtimestamp(utime)
+
+            for red_limit in self.red_limit_constraints:
+                # Ensure state exists
+                fault_state = self.ensure_state(red_limit.name)
+
+                # Check if currently in constraint violation
+                # Note: in_constraint returns True when constraint is VIOLATED
+                in_violation = red_limit.constraint.in_constraint(
+                    ephemeris=ephem, target_ra=ra, target_dec=dec, time=dt
+                )
+
+                # Log constraint violation events
+                previous_violation_state = fault_state.in_violation
+                fault_state.in_violation = in_violation
+
+                if in_violation:
+                    # Log new violation
+                    if not previous_violation_state:
+                        self.events.append(
+                            FaultEvent(
+                                utime=utime,
+                                event_type="constraint_violation",
+                                name=red_limit.name,
+                                cause=f"Entered constraint violation for {red_limit.name}",
+                                metadata={
+                                    "constraint_type": type(
+                                        red_limit.constraint
+                                    ).__name__,
+                                    "ra": ra,
+                                    "dec": dec,
+                                    "description": red_limit.description,
+                                },
+                            )
+                        )
+
+                    # Accumulate violation time
+                    fault_state.current = "red"
+                    fault_state.red_seconds += step_size
+                    fault_state.continuous_violation_seconds += step_size
+
+                    # Check if we've exceeded the time threshold
+                    if (
+                        red_limit.time_threshold_seconds is not None
+                        and fault_state.continuous_violation_seconds
+                        >= red_limit.time_threshold_seconds
+                        and self.safe_mode_on_red
+                    ):
+                        # Trigger safe mode
+                        if acs is None or not acs.in_safe_mode:
+                            self.safe_mode_requested = True
+                            self.events.append(
+                                FaultEvent(
+                                    utime=utime,
+                                    event_type="safe_mode_trigger",
+                                    name=red_limit.name,
+                                    cause="Constraint violation exceeded time threshold",
+                                    metadata={
+                                        "constraint_type": type(
+                                            red_limit.constraint
+                                        ).__name__,
+                                        "continuous_violation_seconds": fault_state.continuous_violation_seconds,
+                                        "time_threshold_seconds": red_limit.time_threshold_seconds,
+                                        "ra": ra,
+                                        "dec": dec,
+                                    },
+                                )
+                            )
+                else:
+                    # Log violation cleared
+                    if previous_violation_state:
+                        self.events.append(
+                            FaultEvent(
+                                utime=utime,
+                                event_type="constraint_violation",
+                                name=red_limit.name,
+                                cause=f"Cleared constraint violation for {red_limit.name}",
+                                metadata={
+                                    "constraint_type": type(
+                                        red_limit.constraint
+                                    ).__name__,
+                                    "total_violation_seconds": fault_state.continuous_violation_seconds,
+                                    "ra": ra,
+                                    "dec": dec,
+                                },
+                            )
+                        )
+                    # Reset continuous violation counter when constraint is satisfied
+                    fault_state.continuous_violation_seconds = 0.0
 
         return classifications
 
-    def statistics(self) -> dict[str, dict[str, float | str]]:
-        """Return accumulated statistics for all parameters."""
-        return {
-            name: {
-                "yellow_seconds": st.yellow_seconds,
-                "red_seconds": st.red_seconds,
-                "current": st.current,
-            }
-            for name, st in self.states.items()
-        }
+    def statistics(self) -> dict[str, dict[str, float | str | bool]]:
+        """Return accumulated statistics for all parameters and red limit constraints.
+
+        Returns:
+            Dict mapping parameter/constraint name to statistics. For threshold-based
+            parameters, includes yellow_seconds, red_seconds, and current state. For
+            red limit constraints, includes in_violation, red_seconds,
+            and continuous_violation_seconds.
+        """
+        stats: dict[str, dict[str, float | str | bool]] = {}
+
+        for name, st in self.states.items():
+            # Check if this is a red limit constraint or threshold-based parameter
+            if any(c.name == name for c in self.red_limit_constraints):
+                # Red limit constraint stats
+                stats[name] = {
+                    "in_violation": st.in_violation,
+                    "red_seconds": st.red_seconds,
+                    "continuous_violation_seconds": st.continuous_violation_seconds,
+                }
+            else:
+                # Threshold-based parameter stats
+                stats[name] = {
+                    "yellow_seconds": st.yellow_seconds,
+                    "red_seconds": st.red_seconds,
+                    "current": st.current,
+                }
+
+        return stats
 
     def add_threshold(
         self, name: str, yellow: float, red: float, direction: str = "below"
     ) -> None:
-        self.thresholds[name] = FaultThreshold(
-            name=name, yellow=yellow, red=red, direction=direction
+        self.thresholds.append(
+            FaultThreshold(name=name, yellow=yellow, red=red, direction=direction)
+        )
+
+    def add_red_limit_constraint(
+        self,
+        name: str,
+        constraint: ConstraintConfig,
+        time_threshold_seconds: float | None = None,
+        description: str = "",
+    ) -> None:
+        """Add a spacecraft-level red limit constraint.
+
+        Args:
+            name: Unique identifier for the constraint
+            constraint: rust_ephem ConstraintConfig defining the constraint
+            time_threshold_seconds: Max continuous violation time before safe mode (None = no trigger)
+            description: Human-readable description
+        """
+        self.red_limit_constraints.append(
+            FaultConstraint(
+                name=name,
+                constraint=constraint,
+                time_threshold_seconds=time_threshold_seconds,
+                description=description,
+            )
         )
 
 

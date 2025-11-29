@@ -110,8 +110,10 @@ class TestConfig:
             fault_management=fault_management,
         )
         config.init_fault_management_defaults()
-        assert "battery_level" in fault_management.thresholds
-        threshold = fault_management.thresholds["battery_level"]
+        assert any(t.name == "battery_level" for t in fault_management.thresholds)
+        threshold = next(
+            t for t in fault_management.thresholds if t.name == "battery_level"
+        )
         assert threshold.yellow == 0.8
         assert (
             abs(threshold.red - 0.7) < 1e-10
@@ -123,11 +125,13 @@ class TestConfig:
         fault_management.add_threshold(
             "battery_level", yellow=0.5, red=0.4, direction="below"
         )
+        battery = Mock(spec=Battery)
+        battery.max_depth_of_discharge = 0.2
         config = Config(
             spacecraft_bus=Mock(spec=SpacecraftBus),
             solar_panel=Mock(spec=SolarPanelSet),
             payload=Mock(spec=Payload),
-            battery=Mock(spec=Battery),
+            battery=battery,
             constraint=Mock(spec=Constraint),
             ground_stations=Mock(spec=GroundStationRegistry),
             fault_management=fault_management,
@@ -135,11 +139,16 @@ class TestConfig:
         config.init_fault_management_defaults()
         # Should have battery_level (that we added) and recorder_fill_fraction (added by init)
         assert len(fault_management.thresholds) == 2
-        assert "battery_level" in fault_management.thresholds
-        assert "recorder_fill_fraction" in fault_management.thresholds
+        assert any(t.name == "battery_level" for t in fault_management.thresholds)
+        assert any(
+            t.name == "recorder_fill_fraction" for t in fault_management.thresholds
+        )
         # Battery level should have our custom values, not defaults
-        assert fault_management.thresholds["battery_level"].yellow == 0.5
-        assert fault_management.thresholds["battery_level"].red == 0.4
+        battery_threshold = next(
+            t for t in fault_management.thresholds if t.name == "battery_level"
+        )
+        assert battery_threshold.yellow == 0.5
+        assert battery_threshold.red == 0.4
 
     def test_from_json_file(self, tmp_path):
         """Test loading Config from JSON file."""

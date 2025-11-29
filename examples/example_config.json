@@ -24,7 +24,7 @@
                 "nominal_power": 25.0,
                 "peak_power": 300.0,
                 "power_mode": {},
-                "eclipse_power": 50.0,
+                "eclipse_power": 75.0,
                 "eclipse_power_mode": {}
             }
         },
@@ -215,17 +215,42 @@
         "red_threshold": 0.9
     },
     "fault_management": {
-        "thresholds": {
-            "battery_level": {
+        "thresholds": [
+            {
                 "name": "battery_level",
-                "yellow": 0.5,
-                "red": 0.3,
+                "yellow": 0.6,
+                "red": 0.5,
                 "direction": "below"
             }
-        },
+        ],
+        "red_limit_constraints": [
+            {
+                "name": "Sun Avoidance",
+                "constraint": {
+                    "type": "and",
+                    "constraints": [
+                        {
+                            "type": "sun",
+                            "min_angle": 20.0,
+                            "max_angle": null
+                        },
+                        {
+                            "type": "not",
+                            "constraint": {
+                                "type": "eclipse",
+                                "umbra_only": true
+                            }
+                        }
+                    ]
+                },
+                "time_threshold_seconds": 2.0,
+                "description": "Spacecraft must avoid pointing too close to the Sun for extended periods."
+            }
+        ],
         "states": {},
         "safe_mode_on_red": true,
-        "safe_mode_requested": false
+        "safe_mode_requested": false,
+        "events": []
     },
     "observation_categories": {
         "categories": [
