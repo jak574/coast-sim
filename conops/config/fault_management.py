@@ -68,13 +68,60 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
+from rust_ephem.constraints import ConstraintConfig
 
 
 @dataclass
 class FaultState:
-    current: str = "nominal"  # nominal | yellow | red
-    yellow_seconds: float = 0.0
-    red_seconds: float = 0.0
+    """Tracks constraint violations (both red limit and regular thresholds).
+
+    Attributes:
+        in_violation: Whether currently violating the constraint
+        total_violation_seconds: Total time spent in violation
+        continuous_violation_seconds: Current continuous violation duration
+        current: Current state for threshold-based faults (nominal/yellow/red)
+        yellow_seconds: Time spent in yellow state (for threshold-based faults)
+        red_seconds: Time spent in red state (for threshold-based faults)
+    """
+
+    in_violation: bool = False
+    total_violation_seconds: float = 0.0
+    continuous_violation_seconds: float = 0.0
+    current: str = "nominal"  # For threshold-based faults: nominal | yellow | red
+    yellow_seconds: float = 0.0  # For threshold-based faults
+    red_seconds: float = 0.0  # For threshold-based faults
+
+
+class FaultConstraint(BaseModel):
+    """Spacecraft-level red limit constraint for health and safety.
+
+    These constraints define absolute limits that the spacecraft should never violate
+    for extended periods. They are typically looser than instrument constraints which
+    are optimized for data quality. Red limits exist purely for spacecraft health and safety.
+
+    Attributes:
+        name: Descriptive name for the constraint (e.g., 'spacecraft_sun_limit')
+        constraint: rust_ephem ConstraintConfig defining the constraint
+        time_threshold_seconds: Maximum continuous time allowed in violation before triggering safe mode.
+                              If None, no automatic safe mode trigger occurs.
+        description: Optional human-readable description of the constraint purpose
+
+    Example:
+        >>> # Spacecraft must not point within 30 degrees of Sun for more than 5 minutes
+        >>> constraint = FaultConstraint(
+        ...     name="spacecraft_sun_limit",
+        ...     constraint=rust_ephem.SunConstraint(min_angle=30.0),
+        ...     time_threshold_seconds=300.0,
+        ...     description="Prevent thermal damage from prolonged sun exposure"
+        ... )
+    """
+
+    name: str
+    constraint: ConstraintConfig
+    time_threshold_seconds: float | None = None
+    description: str = ""
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class FaultThreshold(BaseModel):
@@ -114,9 +161,13 @@ class FaultManagement(BaseModel):
     Monitors configured parameters each simulation cycle, classifies them
     into nominal / yellow / red states, records time spent in each state,
     and triggers ACS safe mode entry on RED conditions (once) where configured.
+
+    Also supports spacecraft-level red limit constraints for health and safety that
+    can trigger safe mode after sustained violations beyond a time threshold.
     """
 
     thresholds: dict[str, FaultThreshold] = Field(default_factory=dict)
+    red_limit_constraints: dict[str, FaultConstraint] = Field(default_factory=dict)
     states: dict[str, FaultState] = Field(default_factory=dict)
     safe_mode_on_red: bool = True  # Global policy: enter safe mode for any RED
     safe_mode_requested: bool = False  # Flag set when safe mode should be triggered
@@ -132,19 +183,27 @@ class FaultManagement(BaseModel):
         utime: float,
         step_size: float,
         acs: ACS | None = None,
+        ephem: TLEEphemeris | None = None,  # type: ignore # noqa: F821
+        ra: float | None = None,
+        dec: float | None = None,
     ) -> dict[str, str]:
-        """Evaluate all monitored parameters.
+        """Evaluate all monitored parameters and red limit constraints.
 
         Args:
             values: Mapping of parameter name -> current numeric value.
             utime: Current unix time of simulation.
             step_size: Simulation time step in seconds (used for duration accumulation).
             acs: ACS instance to trigger safe mode if needed.
+            ephem: Spacecraft ephemeris (required for red limit constraint checking).
+            ra: Current pointing RA in degrees (required for red limit constraint checking).
+            dec: Current pointing Dec in degrees (required for red limit constraint checking).
 
         Returns:
-            Dict mapping parameter name to classification string.
+            Dict mapping parameter name to classification string (for thresholds only).
         """
         classifications: dict[str, str] = {}
+
+        # Check regular threshold-based faults
         for name, val in values.items():
             thresh = self.thresholds.get(name)
             if thresh is None:
@@ -163,24 +222,106 @@ class FaultManagement(BaseModel):
                 if acs is None or not acs.in_safe_mode:
                     self.safe_mode_requested = True
 
+        # Check spacecraft-level red limit constraints if ephemeris and pointing provided
+        if (
+            ephem is not None
+            and ra is not None
+            and dec is not None
+            and self.red_limit_constraints
+        ):
+            from ..common import dtutcfromtimestamp
+
+            dt = dtutcfromtimestamp(utime)
+
+            for name, red_limit in self.red_limit_constraints.items():
+                # Ensure state exists
+                red_state = self.ensure_state(name)
+
+                # Check if currently in constraint violation
+                # Note: in_constraint returns True when constraint is VIOLATED
+                in_violation = red_limit.constraint.in_constraint(
+                    ephemeris=ephem, target_ra=ra, target_dec=dec, time=dt
+                )
+
+                red_state.in_violation = in_violation
+
+                if in_violation:
+                    # Accumulate violation time
+                    red_state.total_violation_seconds += step_size
+                    red_state.continuous_violation_seconds += step_size
+
+                    # Check if we've exceeded the time threshold
+                    if (
+                        red_limit.time_threshold_seconds is not None
+                        and red_state.continuous_violation_seconds
+                        >= red_limit.time_threshold_seconds
+                    ):
+                        # Trigger safe mode
+                        if acs is None or not acs.in_safe_mode:
+                            self.safe_mode_requested = True
+                else:
+                    # Reset continuous violation counter when constraint is satisfied
+                    red_state.continuous_violation_seconds = 0.0
+
         return classifications
 
-    def statistics(self) -> dict[str, dict[str, float | str]]:
-        """Return accumulated statistics for all parameters."""
-        return {
-            name: {
-                "yellow_seconds": st.yellow_seconds,
-                "red_seconds": st.red_seconds,
-                "current": st.current,
-            }
-            for name, st in self.states.items()
-        }
+    def statistics(self) -> dict[str, dict[str, float | str | bool]]:
+        """Return accumulated statistics for all parameters and red limit constraints.
+
+        Returns:
+            Dict mapping parameter/constraint name to statistics. For threshold-based
+            parameters, includes yellow_seconds, red_seconds, and current state. For
+            red limit constraints, includes in_violation, total_violation_seconds,
+            and continuous_violation_seconds.
+        """
+        stats: dict[str, dict[str, float | str | bool]] = {}
+
+        for name, st in self.states.items():
+            # Check if this is a red limit constraint or threshold-based parameter
+            if name in self.red_limit_constraints:
+                # Red limit constraint stats
+                stats[name] = {
+                    "in_violation": st.in_violation,
+                    "total_violation_seconds": st.total_violation_seconds,
+                    "continuous_violation_seconds": st.continuous_violation_seconds,
+                }
+            else:
+                # Threshold-based parameter stats
+                stats[name] = {
+                    "yellow_seconds": st.yellow_seconds,
+                    "red_seconds": st.red_seconds,
+                    "current": st.current,
+                }
+
+        return stats
 
     def add_threshold(
         self, name: str, yellow: float, red: float, direction: str = "below"
     ) -> None:
         self.thresholds[name] = FaultThreshold(
             name=name, yellow=yellow, red=red, direction=direction
+        )
+
+    def add_red_limit_constraint(
+        self,
+        name: str,
+        constraint: ConstraintConfig,
+        time_threshold_seconds: float | None = None,
+        description: str = "",
+    ) -> None:
+        """Add a spacecraft-level red limit constraint.
+
+        Args:
+            name: Unique identifier for the constraint
+            constraint: rust_ephem ConstraintConfig defining the constraint
+            time_threshold_seconds: Max continuous violation time before safe mode (None = no trigger)
+            description: Human-readable description
+        """
+        self.red_limit_constraints[name] = FaultConstraint(
+            name=name,
+            constraint=constraint,
+            time_threshold_seconds=time_threshold_seconds,
+            description=description,
         )
 
 
