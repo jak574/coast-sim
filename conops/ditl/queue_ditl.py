@@ -32,6 +32,20 @@ class QueueDITL(DITLMixin, DITLStats):
     emergency_charging: EmergencyCharging
     utime: list[float]  # Override to specify float instead of generic list
     ephem: rust_ephem.TLEEphemeris  # Override to make non-optional
+    _queue: Queue
+
+    @property
+    def queue(self) -> Queue:
+        """Get the target queue."""
+        return self._queue
+
+    @queue.setter
+    def queue(self, value: Queue) -> None:
+        """Set the target queue and wire the log into it."""
+        self._queue = value
+        # Wire log into queue if it exists
+        if hasattr(self, "log") and self.log is not None:
+            self._queue.log = self.log
 
     def __init__(self, config: Config) -> None:
         DITLMixin.__init__(self, config=config)
@@ -63,11 +77,16 @@ class QueueDITL(DITLMixin, DITLStats):
         self.recorder_alert = list()
         self.data_generated_gb = list()
         self.data_downlinked_gb = list()
-        # Target Queue
-        self.queue = Queue()
 
         # Event log
         self.log = DITLLog()
+
+        # Target Queue (pass log for silent operation)
+        self.queue = Queue(log=self.log)
+
+        # Wire log into ACS so it can log events (if ACS exists)
+        if hasattr(self, "acs"):
+            self.acs.log = self.log
 
         # Initialize emergency charging manager (will be fully set up after ACS is available)
         self.charging_ppt = None
@@ -76,6 +95,7 @@ class QueueDITL(DITLMixin, DITLStats):
             solar_panel=self.config.solar_panel,
             acs_config=self.config.spacecraft_bus.attitude_control,
             starting_obsid=999000,
+            log=self.log,
         )
 
     def timeindex(self, utime: float) -> int:

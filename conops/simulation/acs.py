@@ -1,4 +1,4 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import rust_ephem
 
@@ -17,6 +17,9 @@ from ..targets import Pointing
 from .acs_command import ACSCommand
 from .passes import Pass
 from .slew import Slew
+
+if TYPE_CHECKING:
+    from ..ditl.ditl_log import DITLLog
 
 
 class ACS:
@@ -43,11 +46,20 @@ class ACS:
     last_slew: Slew | None
     in_eclipse: bool
 
-    def __init__(self, constraint: Constraint, config: Config) -> None:
-        """Initialize the Attitude Control System."""
+    def __init__(
+        self, constraint: Constraint, config: Config, log: "DITLLog | None" = None
+    ) -> None:
+        """Initialize the Attitude Control System.
+
+        Args:
+            constraint: Constraint object with ephemeris.
+            config: Configuration object.
+            log: Optional DITLLog for event logging. If None, prints to stdout.
+        """
         assert constraint is not None, "Constraint must be provided to ACS"
         self.constraint = constraint
         self.config = config
+        self.log = log
 
         # Configuration
         assert self.constraint.ephem is not None, "Ephemeris must be set in Constraint"
@@ -88,6 +100,28 @@ class ACS:
         self.slew_dists: list[float] = []
         self.saa = None
 
+    def _log_or_print(self, utime: float, event_type: str, description: str) -> None:
+        """Log an event to DITLLog if available, otherwise print to stdout.
+
+        Args:
+            utime: Unix timestamp.
+            event_type: Event category (ACS, SLEW, PASS, etc.).
+            description: Human-readable description.
+        """
+        if self.log is not None:
+            self.log.log_event(
+                utime=utime,
+                event_type=event_type,
+                description=description,
+                obsid=getattr(self.last_slew, "obsid", None)
+                if self.last_slew
+                else None,
+                acs_mode=self.acsmode if hasattr(self, "acsmode") else None,
+            )
+        else:
+            # Fallback to print if no log available
+            print(description)
+
     def enqueue_command(self, command: ACSCommand) -> None:
         """Add a command to the queue, maintaining time-sorted order.
 
@@ -104,23 +138,29 @@ class ACS:
 
         # Prevent any commands from being enqueued in safe mode (except SAFE slews)
         if self.in_safe_mode and not is_safe_slew:
-            print(
-                f"{unixtime2date(command.execution_time)}: Command {command.command_type.name} rejected - spacecraft is in SAFE MODE"
+            self._log_or_print(
+                command.execution_time,
+                "ACS",
+                f"{unixtime2date(command.execution_time)}: Command {command.command_type.name} rejected - spacecraft is in SAFE MODE",
             )
             return
 
         self.command_queue.append(command)
         self.command_queue.sort(key=lambda cmd: cmd.execution_time)
-        print(
-            f"{unixtime2date(command.execution_time)}: Enqueued {command.command_type.name} command for execution  (queue size: {len(self.command_queue)})"
+        self._log_or_print(
+            command.execution_time,
+            "ACS",
+            f"{unixtime2date(command.execution_time)}: Enqueued {command.command_type.name} command for execution  (queue size: {len(self.command_queue)})",
         )
 
     def _process_commands(self, utime: float) -> None:
         """Process all commands scheduled for execution at or before current time."""
         while self.command_queue and self.command_queue[0].execution_time <= utime:
             command = self.command_queue.pop(0)
-            print(
-                f"{unixtime2date(utime)}: Executing {command.command_type.name} command."
+            self._log_or_print(
+                utime,
+                "ACS",
+                f"{unixtime2date(utime)}: Executing {command.command_type.name} command.",
             )
 
             # Dispatch to appropriate handler based on command type
@@ -157,11 +197,15 @@ class ACS:
         # Fetch the current pass from pass requests
         self.current_pass = self.passrequests.current_pass(utime)
         if self.current_pass is None:
-            print(f"{unixtime2date(utime)}: No active pass found to start.")
+            self._log_or_print(
+                utime, "PASS", f"{unixtime2date(utime)}: No active pass found to start."
+            )
             return
         self.acsmode = ACSMode.PASS
-        print(
-            f"{unixtime2date(utime)}: Starting pass over groundstation {self.current_pass.station}."
+        self._log_or_print(
+            utime,
+            "PASS",
+            f"{unixtime2date(utime)}: Starting pass over groundstation {self.current_pass.station}.",
         )
 
     def _end_pass(self, utime: float) -> None:
@@ -169,8 +213,10 @@ class ACS:
         self.current_pass = None
         self.acsmode = ACSMode.SCIENCE
 
-        print(
-            f"{unixtime2date(utime)}: Pass over - returning to last PPT {getattr(self.last_ppt, 'obsid', 'unknown')}"
+        self._log_or_print(
+            utime,
+            "PASS",
+            f"{unixtime2date(utime)}: Pass over - returning to last PPT {getattr(self.last_ppt, 'obsid', 'unknown')}",
         )
 
     # Handle Safe Mode Command
@@ -180,12 +226,16 @@ class ACS:
         Once safe mode is entered, it cannot be exited. The spacecraft will
         point solar panels at the Sun and obey bus-level constraints.
         """
-        print(f"{unixtime2date(utime)}: Entering SAFE MODE - irreversible")
+        self._log_or_print(
+            utime, "SAFE", f"{unixtime2date(utime)}: Entering SAFE MODE - irreversible"
+        )
         self.in_safe_mode = True
         # Clear command queue to prevent any future commands from executing
         self.command_queue.clear()
-        print(
-            f"{unixtime2date(utime)}: Command queue cleared - no further commands will be executed"
+        self._log_or_print(
+            utime,
+            "SAFE",
+            f"{unixtime2date(utime)}: Command queue cleared - no further commands will be executed",
         )
 
         # Initiate slew to Sun pointing for safe mode
@@ -200,8 +250,10 @@ class ACS:
             safe_ra = self.ephem.sun[index].ra.deg
             safe_dec = self.ephem.sun[index].dec.deg
 
-        print(
-            f"{unixtime2date(utime)}: Initiating slew to safe mode pointing at RA={safe_ra:.2f} Dec={safe_dec:.2f}"
+        self._log_or_print(
+            utime,
+            "SAFE",
+            f"{unixtime2date(utime)}: Initiating slew to safe mode pointing at RA={safe_ra:.2f} Dec={safe_dec:.2f}",
         )
         # Enqueue slew to safe pointing with a special obsid
         self._enqueue_slew(safe_ra, safe_dec, obsid=-999, utime=utime, obstype="SAFE")
@@ -220,9 +272,11 @@ class ACS:
         slew.slewstart = utime
         slew.calc_slewtime()
 
-        print(
+        self._log_or_print(
+            utime,
+            "SLEW",
             f"{unixtime2date(utime)}: Starting slew from RA={self.ra:.2f} Dec={self.dec:.2f} "
-            f"to RA={slew.endra:.2f} Dec={slew.enddec:.2f} (duration: {slew.slewtime:.1f}s)"
+            f"to RA={slew.endra:.2f} Dec={slew.enddec:.2f} (duration: {slew.slewtime:.1f}s)",
         )
 
         self.current_slew = slew
@@ -331,7 +385,11 @@ class ACS:
     def _is_slew_valid(self, visstart: float, obstype: str, utime: float) -> bool:
         """Check if the requested slew is valid (target is visible)."""
         if not visstart and obstype == "PPT":
-            print(f"{unixtime2date(utime)}: Slew rejected - target not visible")
+            self._log_or_print(
+                utime,
+                "SLEW",
+                f"{unixtime2date(utime)}: Slew rejected - target not visible",
+            )
             return False
         return True
 
@@ -348,22 +406,26 @@ class ACS:
             and self.last_slew.is_slewing(utime)
         ):
             execution_time = self.last_slew.slewstart + self.last_slew.slewtime
-            print(
+            self._log_or_print(
+                utime,
+                "SLEW",
                 "%s: Slewing - delaying next slew until %s"
                 % (
                     unixtime2date(utime),
                     unixtime2date(execution_time),
-                )
+                ),
             )
 
         # Wait for target visibility if constrained
         if visstart > execution_time and slew.obstype == "PPT":
-            print(
+            self._log_or_print(
+                utime,
+                "SLEW",
                 "%s: Slew delayed by %.1fs"
                 % (
                     unixtime2date(utime),
                     visstart - execution_time,
-                )
+                ),
             )
             execution_time = visstart
 
@@ -516,7 +578,9 @@ class ACS:
 
             # Print only if there are true constraints
             if true_constraints:
-                print(
+                self._log_or_print(
+                    utime,
+                    "CONSTRAINT",
                     "%s: CONSTRAINT: RA=%s Dec=%s obsid=%s %s"
                     % (
                         unixtime2date(utime),
@@ -524,7 +588,7 @@ class ACS:
                         self.last_slew.at.dec,
                         self.last_slew.obsid,
                         " ".join(true_constraints),
-                    )
+                    ),
                 )
             # Note: acsmode remains SCIENCE - the DITL will decide if charging is needed
 
@@ -579,11 +643,13 @@ class ACS:
         # Check for overlap with existing passes
         for existing_pass in self.passrequests.passes:
             if self._passes_overlap(gspass, existing_pass):
-                print("ERROR: Pass overlap detected: %s", gspass)
+                self._log_or_print(
+                    gspass.begin, "ERROR", "ERROR: Pass overlap detected: %s" % gspass
+                )
                 return
 
         self.passrequests.passes.append(gspass)
-        print("Pass requested: %s", gspass)
+        self._log_or_print(gspass.begin, "PASS", "Pass requested: %s" % gspass)
 
     def _passes_overlap(self, pass1: Pass, pass2: Pass) -> bool:
         """Check if two passes have overlapping time windows."""
@@ -606,7 +672,11 @@ class ACS:
             obsid=obsid,
         )
         self.enqueue_command(command)
-        print(f"Battery charge requested at RA={ra:.2f} Dec={dec:.2f} obsid={obsid}")
+        self._log_or_print(
+            utime,
+            "CHARGING",
+            f"Battery charge requested at RA={ra:.2f} Dec={dec:.2f} obsid={obsid}",
+        )
 
     def request_end_battery_charge(self, utime: float) -> None:
         """Request termination of emergency battery charging.
@@ -618,7 +688,7 @@ class ACS:
             execution_time=utime,
         )
         self.enqueue_command(command)
-        print("End battery charge requested")
+        self._log_or_print(utime, "CHARGING", "End battery charge requested")
 
     def request_safe_mode(self, utime: float) -> None:
         """Request entry into safe mode.
@@ -634,8 +704,10 @@ class ACS:
             execution_time=utime,
         )
         self.enqueue_command(command)
-        print(
-            f"{unixtime2date(utime)}: Safe mode entry requested - this is irreversible"
+        self._log_or_print(
+            utime,
+            "SAFE",
+            f"{unixtime2date(utime)}: Safe mode entry requested - this is irreversible",
         )
 
     def initiate_emergency_charging(
@@ -676,8 +748,10 @@ class ACS:
             and command.dec is not None
             and command.obsid is not None
         ):
-            print(
-                f"Starting battery charge at RA={command.ra:.2f} Dec={command.dec:.2f} obsid={command.obsid}"
+            self._log_or_print(
+                utime,
+                "CHARGING",
+                f"Starting battery charge at RA={command.ra:.2f} Dec={command.dec:.2f} obsid={command.obsid}",
             )
             self._enqueue_slew(
                 command.ra, command.dec, command.obsid, utime, obstype="CHARGE"
@@ -688,7 +762,7 @@ class ACS:
 
         Terminates charging mode by returning to previous science pointing.
         """
-        print("Ending battery charge")
+        self._log_or_print(utime, "CHARGING", "Ending battery charge")
 
         # Clear the charging slew state immediately so _is_in_charging_mode returns False
         # This prevents staying in CHARGING mode while slewing back to science
@@ -697,8 +771,10 @@ class ACS:
 
         # Return to the previous science PPT if one exists
         if self.last_ppt is not None:
-            print(
-                f"Returning to last PPT at RA={self.last_ppt.endra:.2f} Dec={self.last_ppt.enddec:.2f} obsid={self.last_ppt.obsid}"
+            self._log_or_print(
+                utime,
+                "CHARGING",
+                f"Returning to last PPT at RA={self.last_ppt.endra:.2f} Dec={self.last_ppt.enddec:.2f} obsid={self.last_ppt.obsid}",
             )
             self._enqueue_slew(
                 self.last_ppt.endra,

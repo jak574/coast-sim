@@ -1,10 +1,13 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import rust_ephem
 
 from ..common import unixtime2date
 from . import Pointing
+
+if TYPE_CHECKING:
+    from ..ditl.ditl_log import DITLLog
 
 
 class Queue:
@@ -14,12 +17,14 @@ class Queue:
     ephem: rust_ephem.TLEEphemeris
     utime: float | None
     gs: Any
+    log: "DITLLog | None"
 
-    def __init__(self):
+    def __init__(self, log: "DITLLog | None" = None):
         self.targets = []
         self.ephem = None
         self.utime = None
         self.gs = None
+        self.log = log
 
     def __getitem__(self, number: int) -> Pointing:
         return self.targets[number]
@@ -74,9 +79,19 @@ class Queue:
         # Select targets from queue
         targets = [t for t in self.targets if t.merit > 0 and not t.done]
 
-        print(
+        msg = (
             f"{unixtime2date(self.utime)} Searching {len(targets)} targets in queue..."
         )
+        if self.log is not None:
+            self.log.log_event(
+                utime=utime,
+                event_type="QUEUE",
+                description=msg,
+                obsid=None,
+                acs_mode=None,
+            )
+        else:
+            print(msg)
         # Check each candidate target
         for target in targets:
             target.slewtime = target.calc_slewtime(ra, dec)
