@@ -64,7 +64,9 @@ class DITLMixin:
         assert self.config.constraint.ephem is not None, (
             "Ephemeris must be set in Config Constraint"
         )
-        self.acs = ACS(constraint=self.config.constraint, config=self.config)
+        # Note: log will be set by subclass (DITL/QueueDITL) before use
+        # For now, create ACS without log (will be set later)
+        self.acs = ACS(constraint=self.config.constraint, config=self.config, log=None)
 
         # Current target
         self.ppt = None

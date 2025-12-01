@@ -67,6 +67,9 @@ class DITL(DITLMixin, DITLStats):
         self.solar_panel = self.config.solar_panel
         # Event log
         self.log = DITLLog()
+        # Wire log into ACS so it can log events (if ACS exists)
+        if hasattr(self, "acs"):
+            self.acs.log = self.log
 
     def calc(self) -> bool:
         """Execute Day In The Life simulation.

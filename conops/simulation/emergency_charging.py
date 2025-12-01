@@ -1,7 +1,12 @@
 """Emergency battery charging functionality for spacecraft operations."""
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import rust_ephem
+
+if TYPE_CHECKING:
+    from ..ditl.ditl_log import DITLLog
 
 from ..common import unixtime2date
 from ..common.vector import angular_separation
@@ -50,6 +55,7 @@ class EmergencyCharging:
         starting_obsid: int = 999000,
         max_slew_deg: float | None = None,
         sidemount: bool = False,
+        log: "DITLLog | None" = None,
     ):
         """
         Initialize emergency charging manager.
@@ -69,6 +75,16 @@ class EmergencyCharging:
         self.max_slew_deg = max_slew_deg
         self.sidemount = sidemount
         self._charging_suppressed_due_to_eclipse = False
+        self.log = log
+
+    def _log_or_print(self, utime: float, event_type: str, description: str) -> None:
+        """Log event to DITLLog if available, otherwise print."""
+        if self.log is not None:
+            self.log.log_event(
+                utime=utime, event_type=event_type, description=description
+            )
+        else:
+            print(f"{unixtime2date(utime)} {description}")
 
     def create_charging_pointing(
         self,
@@ -96,7 +112,9 @@ class EmergencyCharging:
         """
         # Check if we're in sunlight (eclipse check)
         if not self._is_in_sunlight(utime, ephem):
-            print(f"{unixtime2date(utime)} Cannot start emergency charging: in eclipse")
+            self._log_or_print(
+                utime, "ERROR", "Cannot start emergency charging: in eclipse"
+            )
             return None
 
         # Get optimal charging pointing from solar panel
@@ -115,15 +133,16 @@ class EmergencyCharging:
             )
 
         if charging_ra is None or charging_dec is None:
-            print(f"{unixtime2date(utime)} No valid charging pointing found")
+            self._log_or_print(utime, "ERROR", "No valid charging pointing found")
             return None
 
         # Create the charging PPT
         charging_ppt = self._create_pointing(charging_ra, charging_dec, utime)
 
-        print(
-            f"{unixtime2date(utime)} Starting EMERGENCY CHARGING pointing at "
-            f"RA={charging_ra:.2f}, Dec={charging_dec:.2f}, obsid={charging_ppt.obsid}"
+        self._log_or_print(
+            utime,
+            "CHARGING",
+            f"Starting EMERGENCY CHARGING pointing at RA={charging_ra:.2f}, Dec={charging_dec:.2f}, obsid={charging_ppt.obsid}",
         )
 
         self.current_charging_ppt = charging_ppt
@@ -146,8 +165,10 @@ class EmergencyCharging:
         Returns the created charging Pointing or None if not possible.
         """
         if current_ppt is not None and not getattr(current_ppt, "done", False):
-            print(
-                f"{unixtime2date(utime)} BATTERY ALERT: Terminating science observation for emergency charging"
+            self._log_or_print(
+                utime,
+                "ERROR",
+                "BATTERY ALERT: Terminating science observation for emergency charging",
             )
             current_ppt.end = utime
             current_ppt.done = True
@@ -204,18 +225,20 @@ class EmergencyCharging:
                     current_ra, current_dec, optimal_ra, optimal_dec
                 )
                 if slew > self.max_slew_deg:
-                    print(
-                        f"{unixtime2date(utime)} Optimal charging pointing requires "
-                        f"{slew:.1f}° slew (limit: {self.max_slew_deg:.1f}°), searching for closer alternative"
+                    self._log_or_print(
+                        utime,
+                        "CHARGING",
+                        f"Optimal charging pointing requires {slew:.1f}° slew (limit: {self.max_slew_deg:.1f}°), searching for closer alternative",
                     )
                 else:
                     return optimal_ra, optimal_dec
             else:
                 return optimal_ra, optimal_dec
 
-        print(
-            f"{unixtime2date(utime)} Emergency charging pointing violates constraints, "
-            f"searching for alternative"
+        self._log_or_print(
+            utime,
+            "CHARGING",
+            "Emergency charging pointing violates constraints, searching for alternative",
         )
 
         # Search strategy: Try multiple RA/Dec combinations and select the one
@@ -280,10 +303,10 @@ class EmergencyCharging:
                 best_dec = alt_dec
 
         if best_ra is not None:
-            print(
-                f"{unixtime2date(utime)} Found alternative charging pointing at "
-                f"RA={best_ra:.2f}, Dec={best_dec:.2f} with {best_illumination:.1%} "
-                f"illumination"
+            self._log_or_print(
+                utime,
+                "CHARGING",
+                f"Found alternative charging pointing at RA={best_ra:.2f}, Dec={best_dec:.2f} with {best_illumination:.1%} illumination",
             )
             return best_ra, best_dec
 
@@ -385,10 +408,10 @@ class EmergencyCharging:
 
             # If no slew limit, return first valid pointing
             if self.max_slew_deg is None:
-                print(
-                    f"{unixtime2date(utime)} Found side-mount charging pointing at "
-                    f"RA={candidate_ra:.2f}, Dec={candidate_dec:.2f} "
-                    f"(90° from Sun at RA={sun_ra:.2f}, Dec={sun_dec:.2f})"
+                self._log_or_print(
+                    utime,
+                    "CHARGING",
+                    f"Found side-mount charging pointing at RA={candidate_ra:.2f}, Dec={candidate_dec:.2f} (90° from Sun at RA={sun_ra:.2f}, Dec={sun_dec:.2f})",
                 )
                 return candidate_ra, candidate_dec
 
@@ -400,16 +423,17 @@ class EmergencyCharging:
         # Return the closest valid pointing within slew limit
         if best_candidate is not None:
             candidate_ra, candidate_dec = best_candidate
-            print(
-                f"{unixtime2date(utime)} Found side-mount charging pointing at "
-                f"RA={candidate_ra:.2f}, Dec={candidate_dec:.2f} "
-                f"(90° from Sun, {best_slew:.1f}° slew)"
+            self._log_or_print(
+                utime,
+                "CHARGING",
+                f"Found side-mount charging pointing at RA={candidate_ra:.2f}, Dec={candidate_dec:.2f} (90° from Sun, {best_slew:.1f}° slew)",
             )
             return best_candidate
 
-        print(
-            f"{unixtime2date(utime)} No valid side-mount charging pointing found "
-            f"(all perpendicular pointings violate constraints)"
+        self._log_or_print(
+            utime,
+            "ERROR",
+            "No valid side-mount charging pointing found (all perpendicular pointings violate constraints)",
         )
         return None, None
 
@@ -508,8 +532,10 @@ class EmergencyCharging:
 
         if not in_sunlight:
             # First time noticing eclipse: set suppression
-            print(
-                f"{unixtime2date(utime)} Battery alert in eclipse - suppressing charging until sunlight"
+            self._log_or_print(
+                utime,
+                "CHARGING",
+                "Battery alert in eclipse - suppressing charging until sunlight",
             )
             self._charging_suppressed_due_to_eclipse = True
             return False

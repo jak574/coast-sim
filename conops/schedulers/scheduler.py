@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 import rust_ephem
 
@@ -5,6 +7,9 @@ from ..common import dtutcfromtimestamp
 from ..config import Config, Constraint
 from ..simulation.saa import SAA
 from ..targets import Plan, PlanEntry, TargetList
+
+if TYPE_CHECKING:
+    from ..ditl.ditl_log import DITLLog
 
 
 class DumbScheduler:
@@ -14,7 +19,9 @@ class DumbScheduler:
     satisfy sun/anti-sun constraints and exposure time windows.
     """
 
-    def __init__(self, constraint: Constraint, days: int = 1) -> None:
+    def __init__(
+        self, constraint: Constraint, days: int = 1, log: "DITLLog | None" = None
+    ) -> None:
         if constraint is None:
             raise ValueError("Constraint must be provided to DumbScheduler")
 
@@ -34,6 +41,7 @@ class DumbScheduler:
         self.config: Config | None = None  # optional: can be set externally
         self.gimbled = False  # Default: not gimbled
         self.sidemount = False  # Default: not side-mounted
+        self.log = log  # Optional log for event recording
 
     def _init_saa(self) -> None:
         if self.saa is None:
@@ -119,9 +127,18 @@ class DumbScheduler:
                     break
 
             if not found:
-                print(
-                    f"WARNING: No target found at time index {i} (utime={ephem_utime[i]}); stopping scheduling"
-                )
+                if self.log is not None:
+                    self.log.log_event(
+                        utime=ephem_utime[i],
+                        event_type="SCHEDULER",
+                        description=f"WARNING: No target found at time index {i} (utime={ephem_utime[i]}); stopping scheduling",
+                        obsid=None,
+                        acs_mode=None,
+                    )
+                else:
+                    print(
+                        f"WARNING: No target found at time index {i} (utime={ephem_utime[i]}); stopping scheduling"
+                    )
                 break
 
             # Create and populate the plan entry
@@ -175,4 +192,15 @@ class DumbScheduler:
             # Move to next index for scheduling after this observation
             i = self.ephem.index(dtutcfromtimestamp(ppt.end))
 
-        print(f"Scheduled {len(self.plan)} targets")
+        if self.log is not None:
+            self.log.log_event(
+                utime=self.ephem.timestamp[0].timestamp()
+                if len(self.ephem.timestamp) > 0
+                else 0.0,
+                event_type="SCHEDULER",
+                description=f"Scheduled {len(self.plan)} targets",
+                obsid=None,
+                acs_mode=None,
+            )
+        else:
+            print(f"Scheduled {len(self.plan)} targets")

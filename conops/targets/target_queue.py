@@ -1,4 +1,4 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import rust_ephem
@@ -6,20 +6,25 @@ import rust_ephem
 from ..common import unixtime2date
 from . import Pointing
 
+if TYPE_CHECKING:
+    from ..ditl.ditl_log import DITLLog
+
 
 class Queue:
     """Target Queue class, contains a list of targets for Spacecraft to observe."""
 
     targets: list[Pointing]
-    ephem: rust_ephem.TLEEphemeris
+    ephem: rust_ephem.TLEEphemeris | None
     utime: float | None
     gs: Any
+    log: "DITLLog | None"
 
-    def __init__(self):
+    def __init__(self, log: "DITLLog | None" = None):
         self.targets = []
         self.ephem = None
         self.utime = None
         self.gs = None
+        self.log = log
 
     def __getitem__(self, number: int) -> Pointing:
         return self.targets[number]
@@ -68,15 +73,28 @@ class Queue:
         Returns:
             Next target to observe, or None if no suitable target found.
         """
+        assert self.ephem is not None, (
+            "Ephemeris must be set in TargetQueue before get()"
+        )
         self.utime = utime
         self.meritsort(ra, dec)
 
         # Select targets from queue
         targets = [t for t in self.targets if t.merit > 0 and not t.done]
 
-        print(
+        msg = (
             f"{unixtime2date(self.utime)} Searching {len(targets)} targets in queue..."
         )
+        if self.log is not None:
+            self.log.log_event(
+                utime=utime,
+                event_type="QUEUE",
+                description=msg,
+                obsid=None,
+                acs_mode=None,
+            )
+        else:
+            print(msg)
         # Check each candidate target
         for target in targets:
             target.slewtime = target.calc_slewtime(ra, dec)
