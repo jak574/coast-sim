@@ -8,13 +8,13 @@ class DumbQueueScheduler:
 
     def __init__(
         self,
-        queue: Queue | None = None,
+        queue: Queue,
         plan: Plan | None = None,
         year: int = 2021,
         day: int = 4,
         length: int = 1,
     ):
-        self.queue = queue if queue is not None else Queue()
+        self.queue = queue
         self.plan = plan if plan is not None else Plan()
         self.year = year
         self.day = day
