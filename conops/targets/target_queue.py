@@ -17,7 +17,9 @@ class Queue:
     gs: Any
     log: DITLLog | None
 
-    def __init__(self, ephem: rust_ephem.Ephemeris, log: DITLLog | None = None):
+    def __init__(
+        self, ephem: rust_ephem.Ephemeris | None = None, log: DITLLog | None = None
+    ):
         self.targets = []
         self.ephem = ephem
         self.utime = None
