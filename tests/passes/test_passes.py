@@ -16,11 +16,15 @@ from conops import (
 class TestPassInitialization:
     """Test Pass initialization."""
 
-    def test_pass_creation_minimal(self, mock_constraint, mock_acs_config, base_begin):
+    def test_pass_creation_minimal(
+        self, mock_config, mock_constraint, mock_acs_config, base_begin
+    ):
         """Test creating a Pass with minimal parameters."""
+        # Configure ACS and pass config via mock_config
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
+            ephem=None,
             station="SGS",
             begin=base_begin,
         )
@@ -30,12 +34,19 @@ class TestPassInitialization:
         assert p.obsid == 0xFFFF
 
     def test_pass_creation_full(
-        self, mock_constraint, mock_ephem, mock_acs_config, base_begin, default_length
+        self,
+        mock_config,
+        mock_constraint,
+        mock_ephem,
+        mock_acs_config,
+        base_begin,
+        default_length,
     ):
         """Test creating a Pass with all parameters."""
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=base_begin,
             length=default_length,
@@ -70,11 +81,14 @@ class TestPassProperties:
         """Test end property."""
         assert basic_pass.end == basic_pass.begin + basic_pass.length
 
-    def test_end_property_no_length(self, mock_constraint, mock_acs_config, base_begin):
+    def test_end_property_no_length(
+        self, mock_config, mock_constraint, mock_acs_config, base_begin
+    ):
         """Test end property raises when length is None."""
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
+            ephem=None,
             station="SGS",
             begin=base_begin,
         )
@@ -183,6 +197,7 @@ class TestPassTimeToSlew:
 
     def test_time_to_slew_within_ephem_step_buffer_returns_true(
         self,
+        mock_config,
         mock_constraint,
         create_ephem,
         acs_mock,
@@ -194,10 +209,11 @@ class TestPassTimeToSlew:
         end_dt = datetime(2025, 8, 15, 0, 15, 0, tzinfo=timezone.utc)
         ephem = create_ephem(begin_dt, end_dt, step_size=60)
 
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = acs_mock
         p = Pass(
-            constraint=mock_constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=acs_mock,
             station="SGS",
             begin=base_begin,
             length=600.0,
@@ -213,6 +229,7 @@ class TestPassTimeToSlew:
 
     def test_time_to_slew_outside_ephem_step_buffer_returns_false(
         self,
+        mock_config,
         mock_constraint,
         create_ephem,
         acs_mock,
@@ -229,10 +246,11 @@ class TestPassTimeToSlew:
         end_dt = datetime(2025, 8, 15, 0, 15, 0, tzinfo=timezone.utc)
         ephem = create_ephem(begin_dt, end_dt, step_size=60)
 
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = acs
         p = Pass(
-            constraint=mock_constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=acs,
             station="SGS",
             begin=base_begin,
             length=600.0,
@@ -246,7 +264,7 @@ class TestPassTimeToSlew:
         assert result is False
 
     def test_time_to_slew_raises_value_error_when_no_acs_config(
-        self, mock_constraint, create_ephem, base_begin
+        self, mock_config, mock_constraint, create_ephem, base_begin
     ):
         """time_to_slew should raise ValueError when no ACS config is provided."""
         # Use a small real ephemeris to satisfy pydantic validation
@@ -254,10 +272,11 @@ class TestPassTimeToSlew:
         end_dt = datetime(2025, 8, 15, 0, 15, 0, tzinfo=timezone.utc)
         ephem_obj = create_ephem(begin_dt, end_dt, step_size=60)
 
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = None
         p = Pass(
-            constraint=mock_constraint,
+            config=mock_config,
             ephem=ephem_obj,
-            acs_config=None,
             station="SGS",
             begin=base_begin,
             length=600.0,
@@ -271,13 +290,14 @@ class TestPassTimeToSlew:
             p.time_to_slew(1514764700.0, ra=0.0, dec=0.0)
 
     def test_time_to_slew_raises_assertion_if_no_ephemeris(
-        self, mock_constraint, mock_acs_config, base_begin
+        self, mock_config, mock_constraint, mock_acs_config, base_begin
     ):
         """time_to_slew should assert if ephemeris is missing."""
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
-            constraint=mock_constraint,
+            config=mock_config,
             ephem=None,
-            acs_config=mock_acs_config,
             station="SGS",
             begin=base_begin,
             length=600.0,
@@ -298,7 +318,7 @@ class TestPassTimes:
 
     def test_passtimes_initialization(self, mock_constraint, mock_config):
         """Test PassTimes initialization."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         assert pt.constraint is mock_constraint
         assert pt.ephem is mock_constraint.ephem
         assert pt.config is mock_config
@@ -311,7 +331,7 @@ class TestPassTimes:
     def test_passtimes_uses_default_ground_stations(self, mock_constraint, mock_config):
         """Test PassTimes uses default ground stations when none provided."""
         mock_config.ground_stations = None
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         assert isinstance(pt.ground_stations, GroundStationRegistry)
 
     def test_passtimes_uses_provided_ground_stations(
@@ -320,7 +340,7 @@ class TestPassTimes:
         """Test PassTimes uses provided ground stations."""
         custom_gs = GroundStationRegistry()
         mock_config.ground_stations = custom_gs
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         assert pt.ground_stations is custom_gs
 
     def test_passtimes_requires_ephemeris(self, mock_config):
@@ -328,11 +348,13 @@ class TestPassTimes:
         constraint = Mock()
         constraint.ephem = None
         with pytest.raises(AssertionError, match="Ephemeris must be set"):
-            PassTimes(constraint=constraint, config=mock_config)
+            # PassTimes reads constraint from config.constraint
+            mock_config.constraint = constraint
+            PassTimes(config=mock_config)
 
     def test_passtimes_getitem(self, mock_constraint, mock_config):
         """Test PassTimes __getitem__."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         p1 = Mock()
         p2 = Mock()
         pt.passes = [p1, p2]
@@ -341,13 +363,13 @@ class TestPassTimes:
 
     def test_passtimes_len(self, mock_constraint, mock_config):
         """Test PassTimes __len__."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         pt.passes = [Mock(), Mock(), Mock()]
         assert len(pt) == 3
 
     def test_next_pass_found(self, mock_constraint, mock_config):
         """Test next_pass returns next pass after given time."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         p1 = Mock()
         p1.begin = 1000.0
         p2 = Mock()
@@ -359,7 +381,7 @@ class TestPassTimes:
 
     def test_next_pass_none(self, mock_constraint, mock_config):
         """Test next_pass returns None when no future passes."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         p1 = Mock()
         p1.begin = 1000.0
         pt.passes = [p1]
@@ -367,7 +389,7 @@ class TestPassTimes:
 
     def test_request_passes(self, mock_constraint, mock_config):
         """Test request_passes returns passes at requested rate."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         # Create passes every ~4 hours
         for i in range(6):
             p = Mock()
@@ -380,7 +402,7 @@ class TestPassTimes:
 
     def test_request_passes_probability(self, mock_constraint, mock_config):
         """Test request_passes respects probability."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         for i in range(10):
             p = Mock()
             p.begin = i * 20000.0
@@ -395,7 +417,7 @@ class TestPassTimes:
         """Test PassTimes initialization requires ephemeris."""
         mock_constraint.ephem = None
         with pytest.raises(AssertionError, match="Ephemeris must be set"):
-            PassTimes(constraint=mock_constraint, config=mock_config)
+            PassTimes(config=mock_config)
 
     def test_get_sorts_passes_by_time(
         self, mock_constraint, mock_config, mock_ephemeris_100
@@ -404,26 +426,32 @@ class TestPassTimes:
         ephem = mock_ephemeris_100
         mock_constraint.ephem = ephem
 
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
 
         # Manually add passes out of order
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = Mock()
         p1 = Pass(
-            constraint=mock_constraint,
-            acs_config=Mock(),
+            config=mock_config,
+            ephem=None,
             station="A",
             begin=3000.0,
             length=100.0,
         )
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = Mock()
         p2 = Pass(
-            constraint=mock_constraint,
-            acs_config=Mock(),
+            config=mock_config,
+            ephem=None,
             station="B",
             begin=1000.0,
             length=100.0,
         )
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = Mock()
         p3 = Pass(
-            constraint=mock_constraint,
-            acs_config=Mock(),
+            config=mock_config,
+            ephem=None,
             station="C",
             begin=2000.0,
             length=100.0,
@@ -451,22 +479,26 @@ class TestPassEdgeCases:
         assert len(basic_pass.utime) == 0
 
     def test_pass_obsid_default_value(
-        self, mock_constraint, mock_acs_config, base_begin
+        self, mock_config, mock_constraint, mock_acs_config, base_begin
     ):
         """Test Pass obsid has correct default value."""
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
             station="SGS",
             begin=base_begin,
         )
         assert p.obsid == 0xFFFF
 
-    def test_pass_scheduling_fields(self, mock_constraint, mock_acs_config, base_begin):
+    def test_pass_scheduling_fields(
+        self, mock_config, mock_constraint, mock_acs_config, base_begin
+    ):
         """Test Pass scheduling fields have correct defaults."""
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
             station="SGS",
             begin=base_begin,
         )
@@ -490,10 +522,8 @@ class TestPassTimesGetIntegration:
         constraint.ephem = ephem
 
         # Create PassTimes
-        passtimes = PassTimes(
-            config=mock_config,
-            constraint=constraint,
-        )
+        mock_config.constraint = constraint
+        passtimes = PassTimes(config=mock_config)
 
         # Set minlen to be very high so no passes are created
         # This exercises the code without creating actual passes
@@ -522,10 +552,8 @@ class TestPassTimesGetIntegration:
         constraint.ephem = ephem
 
         # Create PassTimes
-        passtimes = PassTimes(
-            config=mock_config,
-            constraint=constraint,
-        )
+        mock_config.constraint = constraint
+        passtimes = PassTimes(config=mock_config)
 
         # Set reasonable parameters
         passtimes.minlen = 60.0  # 1 minute minimum
@@ -548,7 +576,7 @@ class TestPassTimesCurrent:
 
     def test_current_pass_returns_active_pass(self, mock_constraint, mock_config):
         """Should return the first pass whose in_pass returns True."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
 
         p1 = Mock()
         p1.in_pass.return_value = False
@@ -562,7 +590,7 @@ class TestPassTimesCurrent:
 
     def test_current_pass_none_when_no_active(self, mock_constraint, mock_config):
         """Should return None when no passes are active."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
 
         p1 = Mock()
         p1.in_pass.return_value = False
@@ -574,13 +602,13 @@ class TestPassTimesCurrent:
 
     def test_current_pass_empty_list_returns_none(self, mock_constraint, mock_config):
         """Should return None if no passes are present."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
         pt.passes = []
         assert pt.current_pass(1234.0) is None
 
     def test_current_pass_prefers_first_matching(self, mock_constraint, mock_config):
         """If multiple passes report active, the first in the list should be returned."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
 
         p1 = Mock()
         p1.in_pass.return_value = True
@@ -594,18 +622,20 @@ class TestPassTimesCurrent:
         self, mock_constraint, mock_config, mock_acs_config
     ):
         """Integration-style test using real Pass objects and time ranges."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
 
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p1 = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
             station="A",
             begin=1000.0,
             length=200.0,
         )
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p2 = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
             station="B",
             begin=1500.0,
             length=200.0,
@@ -624,11 +654,12 @@ class TestPassTimesCurrent:
         self, mock_constraint, mock_config, mock_acs_config
     ):
         """If a Pass has no length, in_pass() raises; current_pass should propagate AssertionError."""
-        pt = PassTimes(constraint=mock_constraint, config=mock_config)
+        pt = PassTimes(config=mock_config)
 
+        mock_config.constraint = mock_constraint
+        mock_config.spacecraft_bus.attitude_control = mock_acs_config
         bad_pass = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
             station="BAD",
             begin=2000.0,
             length=None,

@@ -1,7 +1,7 @@
 import numpy as np
 
 from ..common import unixtime2date
-from ..config import AttitudeControlSystem, Constraint
+from ..config import Config
 from .plan_entry import PlanEntry
 
 
@@ -16,39 +16,44 @@ class Pointing(PlanEntry):
 
     def __init__(
         self,
-        constraint: Constraint | None = None,
-        acs_config: AttitudeControlSystem | None = None,
+        config: Config | None = None,
+        ra: float = 0.0,
+        dec: float = 0.0,
+        obsid: int = 0,
+        name: str = "FakeTarget",
+        merit: float = 100.0,
+        exptime: int | None = None,
+        ss_min: int = 300,
+        ss_max: int = 86400,
     ):
-        PlanEntry.__init__(self, constraint=constraint, acs_config=acs_config)
-        assert self.constraint == constraint, "Constraint not properly set in Pointing"
-        self.obsstart = 0
-        self.exposure = 0
-        self.inview = False
+        # Handle both old and new parameter styles for backward compatibility
+        if config is None:
+            raise ValueError("Config must be provided to Pointing")
+
+        PlanEntry.__init__(self, config=config)
+        assert self.constraint == config.constraint, (
+            "Constraint not properly set in Pointing"
+        )
         self.done = False
         self.obstype = "AT"
-        self.coordinated = None
         self.isat = False
-        self.ra = 0.0
-        self.dec = 0.0
-        self.targetid = 0
-        self.name = "FakeTarget"
+        self.ra = ra
+        self.dec = dec
+        self.targetid = obsid
+        self.obsid = obsid
+        self.name = name
         # ``fom`` is maintained as a legacy alias for ``merit`` for
         # backwards compatibility (e.g. tests and older code). The
         # canonical field we use internally is ``merit`` which can be
         # recomputed each scheduling iteration by ``Queue.meritsort``.
-        self.fom = 100.0
-        self.merit = 100.0
-        self._exptime: int | None = None
-        self._exporig: int | None = None
-        self.gs = None
-        self.ssmin = 300
-        self.ssmax = 1e6
+        self.fom = merit
+        self.merit = merit
+        self._exptime: int | None = exptime
+        self._exporig: int | None = exptime
         self._done = False
-        self.saatime = 0
-
-    def is_visible(self, utime):
-        """Is a target visible at this time"""
-        return not self.constraint.inoccult(self.ra, self.dec, utime)
+        # Snapshot min/max size
+        self.ss_min = ss_min  # seconds
+        self.ss_max = ss_max  # seconds
 
     def in_sun(self, utime):
         """Is this target in Sun constraint?"""

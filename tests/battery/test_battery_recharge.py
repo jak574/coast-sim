@@ -221,46 +221,32 @@ class TestSolarPanel:
 class TestEmergencyCharging:
     """Test EmergencyCharging class functionality."""
 
-    def test_initialization_sets_constraint(
-        self, mock_constraint, mock_solar_panel, mock_acs_config
-    ):
+    def test_initialization_sets_constraint(self, mock_config):
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=555000,
         )
-        assert ec.constraint == mock_constraint
+        assert ec.constraint == mock_config.constraint
 
-    def test_initialization_sets_solar_panel(
-        self, mock_constraint, mock_solar_panel, mock_acs_config
-    ):
+    def test_initialization_sets_solar_panel(self, mock_config):
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=555000,
         )
-        assert ec.solar_panel == mock_solar_panel
+        assert ec.solar_panel == mock_config.solar_panel
 
-    def test_initialization_next_charging_obsid(
-        self, mock_constraint, mock_solar_panel, mock_acs_config
-    ):
+    def test_initialization_next_charging_obsid(self, mock_config):
+        # Ensure config has the expected subsystems
+        mock_config.solar_panel = mock_config.solar_panel
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=555000,
         )
         assert ec.next_charging_obsid == 555000
 
-    def test_initialization_current_charging_ppt_none(
-        self, mock_constraint, mock_solar_panel, mock_acs_config
-    ):
+    def test_initialization_current_charging_ppt_none(self, mock_config):
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=555000,
         )
         assert ec.current_charging_ppt is None
@@ -270,6 +256,9 @@ class TestEmergencyCharging:
     ):
         monkeypatch.setattr(
             emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
+        )
+        monkeypatch.setattr(
+            emergency_charging.constraint, "inoccult", lambda ra, dec, time: False
         )
         ppt = emergency_charging.create_charging_pointing(utime, mock_ephem)
         assert ppt is not None
@@ -348,7 +337,11 @@ class TestEmergencyCharging:
                 return 0.9
             return 0.5
 
-        emergency_charging.solar_panel.panel_illumination_fraction = mock_illumination
+        object.__setattr__(
+            emergency_charging.solar_panel,
+            "panel_illumination_fraction",
+            mock_illumination,
+        )
         monkeypatch.setattr(
             emergency_charging.constraint, "in_eclipse", lambda ra, dec, time: False
         )
@@ -637,28 +630,30 @@ class TestEmergencyCharging:
 
     def test_slew_limit_constraint_returns_ppt_and_within_slew(
         self,
-        mock_constraint,
-        mock_solar_panel,
+        mock_config,
         mock_ephem,
-        mock_acs_config,
         monkeypatch,
     ):
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
             max_slew_deg=60.0,
         )
-        mock_solar_panel.optimal_charging_pointing = Mock(return_value=(100.0, 0.0))
-        mock_constraint.inoccult = Mock(return_value=False)
+        object.__setattr__(
+            mock_config.solar_panel,
+            "optimal_charging_pointing",
+            Mock(return_value=(100.0, 0.0)),
+        )
+        mock_config.constraint.inoccult = Mock(return_value=False)
 
         def mock_illumination(time, ra, dec, ephem):
             if abs(ra) < 60 or ra > 300:
                 return 0.85
             return 0.5
 
-        mock_solar_panel.panel_illumination_fraction = mock_illumination
+        object.__setattr__(
+            mock_config.solar_panel, "panel_illumination_fraction", mock_illumination
+        )
         monkeypatch.setattr(ec.constraint, "in_eclipse", lambda ra, dec, time: False)
         utime = 1700000000.0
         ppt = ec.create_charging_pointing(utime, mock_ephem, lastra=0.0, lastdec=0.0)
@@ -666,13 +661,9 @@ class TestEmergencyCharging:
         slew = angular_separation(0.0, 0.0, ppt.ra, ppt.dec)
         assert slew <= 60.0
 
-    def test_slew_limit_sidemount_ra_dec_not_none(
-        self, mock_constraint, mock_solar_panel, mock_acs_config
-    ):
+    def test_slew_limit_sidemount_ra_dec_not_none(self, mock_config):
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
             max_slew_deg=45.0,
         )
@@ -687,13 +678,9 @@ class TestEmergencyCharging:
         assert ra is not None
         assert dec is not None
 
-    def test_slew_limit_sidemount_within_45deg_and_90deg_sep(
-        self, mock_constraint, mock_solar_panel, mock_acs_config
-    ):
+    def test_slew_limit_sidemount_within_45deg_and_90deg_sep(self, mock_config):
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
             max_slew_deg=45.0,
         )
@@ -744,12 +731,10 @@ class TestEmergencyCharging:
         self,
         sun_ra,
         sun_dec,
-        mock_constraint,
-        mock_solar_panel,
-        mock_acs_config,
+        mock_config,
     ):
         utime = 1700000000.0
-        mock_constraint.inoccult = Mock(return_value=False)
+        mock_config.constraint.inoccult = Mock(return_value=False)
 
         def mock_illumination(time, ra, dec, ephem):
             ra_rad = np.radians(ra)
@@ -777,11 +762,11 @@ class TestEmergencyCharging:
                 return 1.0
             return 0.5
 
-        mock_solar_panel.panel_illumination_fraction = mock_illumination
+        object.__setattr__(
+            mock_config.solar_panel, "panel_illumination_fraction", mock_illumination
+        )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
         )
         ra, dec = ec._find_valid_pointing_sidemount(sun_ra, sun_dec, utime)
@@ -790,15 +775,13 @@ class TestEmergencyCharging:
 
     def test_sidemount_pointing_has_full_illumination_value_is_one(
         self,
-        mock_constraint,
-        mock_solar_panel,
-        mock_acs_config,
+        mock_config,
     ):
         # pick a sample sun position and verify illumination is 1.0 for returned pointing
         sun_ra = 90.0
         sun_dec = 0.0
         utime = 1700000000.0
-        mock_constraint.inoccult = Mock(return_value=False)
+        mock_config.constraint.inoccult = Mock(return_value=False)
 
         def mock_illumination(time, ra, dec, ephem):
             ra_rad = np.radians(ra)
@@ -826,19 +809,21 @@ class TestEmergencyCharging:
                 return 1.0
             return 0.5
 
-        mock_solar_panel.panel_illumination_fraction = mock_illumination
+        object.__setattr__(
+            mock_config.solar_panel, "panel_illumination_fraction", mock_illumination
+        )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
         )
         ra, dec = ec._find_valid_pointing_sidemount(sun_ra, sun_dec, utime)
-        illum = mock_solar_panel.panel_illumination_fraction(utime, ra, dec, Mock())
+        illum = mock_config.solar_panel.panel_illumination_fraction(
+            utime, ra, dec, Mock()
+        )
         assert illum == 1.0
 
     def test_find_valid_pointing_prefers_max_illumination_return_ra_dec_and_illum(
-        self, mock_constraint, mock_solar_panel, mock_ephem, mock_acs_config
+        self, mock_config, mock_ephem
     ):
         optimal_ra = 10.0
         optimal_dec = 0.0
@@ -847,9 +832,11 @@ class TestEmergencyCharging:
         def mock_inoccult(ra, dec, utime_inner, hardonly=True):
             return abs(ra - optimal_ra) < 1e-6 and abs(dec - optimal_dec) < 1e-6
 
-        mock_constraint.inoccult = mock_inoccult
-        mock_solar_panel.optimal_charging_pointing = Mock(
-            return_value=(optimal_ra, optimal_dec)
+        mock_config.constraint.inoccult = mock_inoccult
+        object.__setattr__(
+            mock_config.solar_panel,
+            "optimal_charging_pointing",
+            Mock(return_value=(optimal_ra, optimal_dec)),
         )
         high_ra = (optimal_ra + 90.0) % 360.0
         high_dec = optimal_dec
@@ -861,11 +848,11 @@ class TestEmergencyCharging:
                 return 0.8
             return 0.6
 
-        mock_solar_panel.panel_illumination_fraction = mock_illumination
+        object.__setattr__(
+            mock_config.solar_panel, "panel_illumination_fraction", mock_illumination
+        )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
         )
         ra, dec = ec._find_valid_pointing(
@@ -879,18 +866,22 @@ class TestEmergencyCharging:
         assert ra == high_ra
         assert dec == high_dec
         assert (
-            mock_solar_panel.panel_illumination_fraction(utime, ra, dec, mock_ephem)
+            mock_config.solar_panel.panel_illumination_fraction(
+                utime, ra, dec, mock_ephem
+            )
             == 1.0
         )
 
     def test_find_valid_pointing_optimal_already_max_return_optimal(
-        self, mock_constraint, mock_solar_panel, mock_ephem, mock_acs_config
+        self, mock_config, mock_ephem
     ):
         utime = 1700000000.0
         optimal_ra, optimal_dec = 140.0, -10.0
-        mock_constraint.inoccult = Mock(return_value=False)
-        mock_solar_panel.optimal_charging_pointing = Mock(
-            return_value=(optimal_ra, optimal_dec)
+        mock_config.constraint.inoccult = Mock(return_value=False)
+        object.__setattr__(
+            mock_config.solar_panel,
+            "optimal_charging_pointing",
+            Mock(return_value=(optimal_ra, optimal_dec)),
         )
 
         def mock_illumination(time, ra, dec, ephem):
@@ -898,11 +889,11 @@ class TestEmergencyCharging:
                 return 1.0
             return 0.7
 
-        mock_solar_panel.panel_illumination_fraction = mock_illumination
+        object.__setattr__(
+            mock_config.solar_panel, "panel_illumination_fraction", mock_illumination
+        )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
         )
         ra, dec = ec._find_valid_pointing(
@@ -916,28 +907,28 @@ class TestEmergencyCharging:
         assert ra == optimal_ra
         assert dec == optimal_dec
         assert (
-            mock_solar_panel.panel_illumination_fraction(utime, ra, dec, mock_ephem)
+            mock_config.solar_panel.panel_illumination_fraction(
+                utime, ra, dec, mock_ephem
+            )
             == 1.0
         )
 
     def test_create_charging_pointing_sidemount_returns_valid_pointing(
         self,
-        mock_constraint,
-        mock_solar_panel,
+        mock_config,
         mock_ephem,
-        mock_acs_config,
         monkeypatch,
     ):
         utime = 1700000000.0
         optimal_ra, optimal_dec = 180.0, 0.0
-        mock_constraint.inoccult = Mock(return_value=False)
-        mock_solar_panel.optimal_charging_pointing = Mock(
-            return_value=(optimal_ra, optimal_dec)
+        mock_config.constraint.inoccult = Mock(return_value=False)
+        object.__setattr__(
+            mock_config.solar_panel,
+            "optimal_charging_pointing",
+            Mock(return_value=(optimal_ra, optimal_dec)),
         )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
             sidemount=True,
         )
@@ -947,22 +938,20 @@ class TestEmergencyCharging:
 
     def test_create_charging_pointing_sidemount_is_pointing_type(
         self,
-        mock_constraint,
-        mock_solar_panel,
+        mock_config,
         mock_ephem,
-        mock_acs_config,
         monkeypatch,
     ):
         utime = 1700000000.0
         optimal_ra, optimal_dec = 180.0, 0.0
-        mock_constraint.inoccult = Mock(return_value=False)
-        mock_solar_panel.optimal_charging_pointing = Mock(
-            return_value=(optimal_ra, optimal_dec)
+        mock_config.constraint.inoccult = Mock(return_value=False)
+        object.__setattr__(
+            mock_config.solar_panel,
+            "optimal_charging_pointing",
+            Mock(return_value=(optimal_ra, optimal_dec)),
         )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
             sidemount=True,
         )
@@ -972,22 +961,20 @@ class TestEmergencyCharging:
 
     def test_create_charging_pointing_sidemount_obsid_and_current(
         self,
-        mock_constraint,
-        mock_solar_panel,
+        mock_config,
         mock_ephem,
-        mock_acs_config,
         monkeypatch,
     ):
         utime = 1700000000.0
         optimal_ra, optimal_dec = 180.0, 0.0
-        mock_constraint.inoccult = Mock(return_value=False)
-        mock_solar_panel.optimal_charging_pointing = Mock(
-            return_value=(optimal_ra, optimal_dec)
+        mock_config.constraint.inoccult = Mock(return_value=False)
+        object.__setattr__(
+            mock_config.solar_panel,
+            "optimal_charging_pointing",
+            Mock(return_value=(optimal_ra, optimal_dec)),
         )
         ec = EmergencyCharging(
-            constraint=mock_constraint,
-            solar_panel=mock_solar_panel,
-            acs_config=mock_acs_config,
+            config=mock_config,
             starting_obsid=999000,
             sidemount=True,
         )

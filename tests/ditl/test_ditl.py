@@ -24,8 +24,8 @@ class TestDITLInit:
     def test_init_without_config_raises_assertion(self):
         """Test that DITL initialization without config raises assertion error."""
         with (
-            patch("conops.PassTimes"),
-            patch("conops.ACS"),
+            patch("conops.ditl.ditl_mixin.PassTimes"),
+            patch("conops.ditl.ditl_mixin.ACS"),
         ):
             with pytest.raises(AttributeError):
                 DITL(config=None)

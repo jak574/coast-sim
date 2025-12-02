@@ -1,5 +1,3 @@
-from unittest.mock import Mock
-
 import numpy as np
 import pytest
 
@@ -41,12 +39,12 @@ class MockTarget:
 
 
 class TestPlanEntryInit:
-    def test_init_with_constraint_and_acs(self, mock_constraint, mock_acs):
+    def test_init_with_constraint_and_acs(self, mock_config):
         """Test PlanEntry initialization with valid constraint and ACS."""
-        pe = PlanEntry(constraint=mock_constraint, acs_config=mock_acs)
-        assert pe.constraint is mock_constraint
-        assert pe.acs_config is mock_acs
-        assert pe.ephem is mock_constraint.ephem
+        pe = PlanEntry(config=mock_config)
+        assert pe.constraint is mock_config.constraint
+        assert pe.acs_config is mock_config.spacecraft_bus.attitude_control
+        assert pe.ephem is mock_config.constraint.ephem
         assert pe.name == ""
         assert pe.ra == 0.0
         assert pe.dec == 0.0
@@ -62,22 +60,16 @@ class TestPlanEntryInit:
         assert pe.slewpath is False
         assert pe.slewdist is False
 
-    def test_init_without_constraint_raises_assertion(self, mock_acs):
+    def test_init_without_config_raises_assertion(self):
         """Test that initialization without constraint raises AssertionError."""
-        with pytest.raises(AssertionError, match="Constraint must be set"):
-            PlanEntry(constraint=None, acs_config=mock_acs)
+        with pytest.raises(ValueError, match="Config must be provided to PlanEntry"):
+            PlanEntry(config=None)
 
-    def test_init_without_acs_raises_assertion(self, mock_constraint):
-        """Test that initialization without ACS raises AssertionError."""
-        with pytest.raises(AssertionError, match="ACS config must be set"):
-            PlanEntry(constraint=mock_constraint, acs_config=None)
-
-    def test_init_with_constraint_missing_ephem(self, mock_acs):
+    def test_init_with_constraint_missing_ephem(self, mock_config):
         """Test that initialization with constraint missing ephem raises AssertionError."""
-        bad_constraint = Mock()
-        bad_constraint.ephem = None
+        mock_config.constraint.ephem = None
         with pytest.raises(AssertionError, match="Ephemeris must be set"):
-            PlanEntry(constraint=bad_constraint, acs_config=mock_acs)
+            PlanEntry(config=mock_config)
 
 
 class TestPlanEntryCopy:

@@ -6,8 +6,20 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 from astropy.time import Time  # type: ignore[import-untyped]
+from pydantic import ConfigDict
 
-from conops import SAA, Constraint, DumbScheduler
+from conops import SAA, DumbScheduler
+from conops.config import (
+    AttitudeControlSystem,
+    Battery,
+    Config,
+    GroundStationRegistry,
+    Payload,
+    SolarPanel,
+    SolarPanelSet,
+    SpacecraftBus,
+)
+from conops.config.constraint import Constraint as RealConstraint
 
 
 class SimpleTarget:
@@ -85,31 +97,40 @@ def mock_ephemeris():
     return ephem
 
 
+class MockConstraint(RealConstraint):
+    """Test-friendly Constraint subclass that returns array-like results for
+    iterable utime values and bool for scalar utime, while remaining a valid
+    pydantic Constraint instance for Config validation.
+    """
+
+    def __init__(self, ephem):
+        # Initialize Constraint with defaults
+        super().__init__()
+        # Set the ephemeris (other tests rely on this attribute)
+        self.ephem = ephem
+
+    # Allow assigning methods/attributes at runtime in tests (monkeypatching)
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+    def inoccult(self, ra, dec, utime, hardonly=True):
+        # If utime is an iterable (list/np.ndarray or something with __len__),
+        # return a numpy boolean array matching its length to mimic the real
+        # Constraint behavior.
+        if isinstance(utime, (list, np.ndarray)) or hasattr(utime, "__len__"):
+            try:
+                length = len(utime)
+            except Exception:
+                # fallback if len() raises for some unusual iterable
+                return np.zeros(0, dtype=bool)
+            return np.zeros(length, dtype=bool)
+        # Otherwise, treat as a scalar time and return a single boolean
+        return False
+
+
 @pytest.fixture
 def mock_constraint(mock_ephemeris):
     """Create a mock constraint object."""
-    constraint = Mock(spec=Constraint)
-    constraint.ephem = mock_ephemeris
-    constraint.sun_constraint = Mock()
-    constraint.sun_constraint.min_angle = 50.0
-    constraint.anti_sun_constraint = Mock()
-    constraint.anti_sun_constraint.max_angle = 180.0
-    constraint.earth_constraint = Mock()
-    constraint.earth_constraint.min_angle = 20.0
-    constraint.moon_constraint = Mock()
-    constraint.moon_constraint.min_angle = 20.0
-
-    # Mock inoccult to always return False (no occultation)
-    def mock_inoccult(ra, dec, utime, hardonly=True):
-        if isinstance(utime, (list, np.ndarray)):
-            return np.zeros(len(utime), dtype=bool)
-        elif hasattr(utime, "__len__"):
-            return np.zeros(len(utime), dtype=bool)
-        else:
-            return np.array([False], dtype=bool)
-
-    constraint.inoccult = mock_inoccult
-    return constraint
+    return MockConstraint(mock_ephemeris)
 
 
 @pytest.fixture
@@ -124,20 +145,46 @@ def mock_saa():
 
 
 @pytest.fixture
-def mock_config():
+def mock_config(mock_ephemeris, mock_constraint):
     """Create a mock spacecraft config."""
-    config = Mock()
-    config.spacecraft_bus = Mock()
-    config.spacecraft_bus.attitude_control = Mock()
+    # Create minimal required components
+    spacecraft_bus = SpacecraftBus(
+        attitude_control=AttitudeControlSystem(),
+        communications=None,  # Will be set in tests that need it
+    )
+
+    # Create minimal payload, battery, solar_panel
+    payload = Payload(instruments=[])
+    battery = Battery(capacity_wh=1000, max_depth_of_discharge=0.8)
+    solar_panel = SolarPanelSet(panels=[SolarPanel(sidemount=False)])
+
+    # Use the mock_constraint fixture so inoccult returns arrays when
+    # utime is an iterable. Assign the ephemeris that was created for
+    # the test so other components can rely on it.
+    constraint = mock_constraint
+    constraint.ephem = mock_ephemeris
+
+    config = Config(
+        spacecraft_bus=spacecraft_bus,
+        solar_panel=solar_panel,
+        payload=payload,
+        battery=battery,
+        constraint=constraint,
+        ground_stations=GroundStationRegistry.default(),
+    )
     return config
 
 
 @pytest.fixture
-def scheduler(mock_constraint, mock_saa, mock_config):
+def scheduler(mock_config, mock_saa):
     """Create a DumbScheduler instance with mocked dependencies."""
-    scheduler = DumbScheduler(constraint=mock_constraint, days=1)
+    scheduler = DumbScheduler(config=mock_config, days=1)
     scheduler.saa = mock_saa
-    scheduler.config = mock_config
+    scheduler.config = mock_config  # Set the config for PlanEntry creation
+    # Ensure the scheduler uses the mock_constraint that returns arrays
+    # from inoccult so the scheduling logic can iterate over the
+    # result without encountering scalar returns.
+    scheduler.constraint = mock_config.constraint
     return scheduler
 
 

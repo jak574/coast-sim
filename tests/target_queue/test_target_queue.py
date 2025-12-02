@@ -4,29 +4,29 @@ from conops import Queue
 
 
 class TestQueueInitAndAppend:
-    def test_queue_init_targets_empty(self):
-        queue = Queue()
+    def test_queue_init_targets_empty(self, mock_config):
+        queue = Queue(config=mock_config)
         assert queue.targets == []
 
-    def test_queue_init_ephem_none(self):
-        queue = Queue()
+    def test_queue_init_ephem_none(self, mock_config):
+        queue = Queue(config=mock_config)
         assert queue.ephem is None
 
-    def test_queue_init_utime_none(self):
-        queue = Queue()
+    def test_queue_init_utime_none(self, mock_config):
+        queue = Queue(config=mock_config)
         assert queue.utime is None
 
-    def test_queue_init_gs_none(self):
-        queue = Queue()
+    def test_queue_init_gs_none(self, mock_config):
+        queue = Queue(config=mock_config)
         assert queue.gs is None
 
-    def test_queue_append_len(self, mock_target):
-        queue = Queue()
+    def test_queue_append_len(self, mock_target, mock_config):
+        queue = Queue(config=mock_config)
         queue.append(mock_target)
         assert len(queue.targets) == 1
 
-    def test_queue_append_target_equals(self, mock_target):
-        queue = Queue()
+    def test_queue_append_target_equals(self, mock_target, mock_config):
+        queue = Queue(config=mock_config)
         queue.append(mock_target)
         assert queue.targets[0] == mock_target
 
@@ -134,7 +134,7 @@ class TestGetTarget:
         utime = 1762924800.0
         with patch.object(queue_instance, "meritsort"):
             target = queue_instance.get(ra=0, dec=0, utime=utime)
-        expected_end = int(utime + target.slewtime + target.ssmax)
+        expected_end = int(utime + target.slewtime + target.ss_max)
         assert target.end == expected_end
 
     def test_get_target_none_available(self, queue_instance):
@@ -157,7 +157,7 @@ class TestGetTarget:
         with patch.object(queue_instance, "meritsort"):
             target = queue_instance.get(ra=0, dec=0, utime=utime)
 
-        endtime = utime + target.slewtime + target.ssmin
+        endtime = utime + target.slewtime + target.ss_min
         expected_endtime_check = queue_instance.ephem.timestamp[-1].timestamp()
         assert endtime > expected_endtime_check
 

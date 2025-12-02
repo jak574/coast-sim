@@ -98,8 +98,13 @@ def test_process_data_management_generates_and_downlinks(mock_config):
     pass_obj = Mock()
     pass_obj.in_pass = Mock(return_value=True)
     pass_obj.station = "GS1"
-    pass_obj.comms_config = Mock()
-    pass_obj.comms_config.get_downlink_rate = Mock(return_value=50.0)  # Mbps
+    # Pass API uses `config.spacecraft_bus.communications` for comms; create that structure
+    pass_obj.config = Mock()
+    pass_obj.config.spacecraft_bus = Mock()
+    pass_obj.config.spacecraft_bus.communications = Mock()
+    pass_obj.config.spacecraft_bus.communications.get_downlink_rate = Mock(
+        return_value=50.0
+    )  # Mbps
     mixin.acs.passrequests.passes = [pass_obj]
     # ground station
     station = Mock()
@@ -123,11 +128,15 @@ def test_get_effective_data_rate_branches(mock_config):
 
     # No comms_config -> use station overall max
     station.get_overall_max_downlink = Mock(return_value=10.0)
-    current_pass.comms_config = None
+    current_pass.config = Mock()
+    current_pass.config.spacecraft_bus = Mock()
+    current_pass.config.spacecraft_bus.communications = None
     assert mixin._get_effective_data_rate(station, current_pass) == 10.0
 
     # No bands on station -> None
-    current_pass.comms_config = Mock()
+    current_pass.config = Mock()
+    current_pass.config.spacecraft_bus = Mock()
+    current_pass.config.spacecraft_bus.communications = Mock()
     station.bands = None
     station.supported_bands = Mock(return_value=[])
     assert mixin._get_effective_data_rate(station, current_pass) is None
@@ -138,7 +147,7 @@ def test_get_effective_data_rate_branches(mock_config):
     station.get_downlink_rate = Mock(
         side_effect=lambda b: {"S": 5.0, "X": 50.0, "Ka": 80.0}[b]
     )
-    current_pass.comms_config.get_downlink_rate = Mock(
+    current_pass.config.spacecraft_bus.communications.get_downlink_rate = Mock(
         side_effect=lambda b: {"S": 10.0, "X": 40.0, "Ka": 0.0}[b]
     )
     # Effective per band: S=min(5,10)=5, X=min(50,40)=40, Ka excluded (0)

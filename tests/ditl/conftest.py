@@ -320,7 +320,10 @@ def ditl_with_pass_setup(ditl_instance, mock_config):
     mock_pass = Mock()
     mock_pass.in_pass.return_value = True
     mock_pass.station = "station1"
-    mock_pass.comms_config = None  # No spacecraft comms config
+    # No spacecraft comms config: set the pass config attribute like the real Pass
+    mock_pass.config = Mock()
+    mock_pass.config.spacecraft_bus = Mock()
+    mock_pass.config.spacecraft_bus.communications = None
     ditl.acs = Mock()
     ditl.acs.passrequests = Mock()
     ditl.acs.passrequests.passes = [mock_pass]

@@ -1,4 +1,4 @@
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -47,9 +47,26 @@ class QueueDITL(DITLMixin, DITLStats):
         if hasattr(self, "log") and self.log is not None:
             self._queue.log = self.log
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        ephem: rust_ephem.Ephemeris | None = None,
+        begin: datetime | None = None,
+        end: datetime | None = None,
+        queue: Queue | None = None,
+    ) -> None:
         DITLMixin.__init__(self, config=config)
         # Subsystems are initialized by the mixin's _init_subsystems()
+
+        # Override begin/end if provided
+        if begin is not None:
+            self.begin = begin
+        if end is not None:
+            self.end = end
+
+        # Set ephemeris if provided
+        if ephem is not None:
+            self.ephem = ephem
 
         # Current target (already set in mixin but repeated for clarity)
         self.ppt = None
@@ -81,8 +98,15 @@ class QueueDITL(DITLMixin, DITLStats):
         # Event log
         self.log = DITLLog()
 
-        # Target Queue (pass log for silent operation)
-        self.queue = Queue(log=self.log, ephem=self.ephem)
+        # Target Queue (use provided queue or create default)
+        if queue is not None:
+            self.queue = queue
+        else:
+            self.queue = Queue(
+                config=self.config,
+                log=self.log,
+                ephem=self.ephem,
+            )
 
         # Wire log into ACS so it can log events (if ACS exists)
         if hasattr(self, "acs"):
@@ -91,9 +115,7 @@ class QueueDITL(DITLMixin, DITLStats):
         # Initialize emergency charging manager (will be fully set up after ACS is available)
         self.charging_ppt = None
         self.emergency_charging = EmergencyCharging(
-            constraint=self.constraint,
-            solar_panel=self.config.solar_panel,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=self.config,
             starting_obsid=999000,
             log=self.log,
         )
@@ -439,8 +461,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
                 # Create slew object for the pass
                 slew = Slew(
-                    constraint=self.constraint,
-                    acs_config=self.config.spacecraft_bus.attitude_control,
+                    config=self.config,
                 )
 
                 slew.startra = ra
@@ -603,8 +624,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
             # Create and configure a Slew object
             slew = Slew(
-                constraint=self.constraint,
-                acs_config=self.config.spacecraft_bus.attitude_control,
+                config=self.config,
             )
             slew.ephem = self.acs.ephem
             slew.slewrequest = utime
@@ -670,7 +690,7 @@ class QueueDITL(DITLMixin, DITLStats):
             # Update PPT timing based on slew
             self.ppt.begin = int(execution_time)
             # Update PPT end time to ensure it has enough time for slew + max observation
-            self.ppt.end = int(execution_time + slew.slewtime + self.ppt.ssmax)
+            self.ppt.end = int(execution_time + slew.slewtime + self.ppt.ss_max)
 
             # Enqueue the slew command
             command = ACSCommand(

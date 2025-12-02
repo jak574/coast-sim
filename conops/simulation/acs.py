@@ -11,7 +11,6 @@ from ..common import (
 )
 from ..config import Config
 from ..config.constants import DTOR
-from ..config.constraint import Constraint
 from ..simulation.passes import PassTimes
 from ..targets import Pointing
 from .acs_command import ACSCommand
@@ -46,9 +45,7 @@ class ACS:
     last_slew: Slew | None
     in_eclipse: bool
 
-    def __init__(
-        self, constraint: Constraint, config: Config, log: "DITLLog | None" = None
-    ) -> None:
+    def __init__(self, config: Config, log: "DITLLog | None" = None) -> None:
         """Initialize the Attitude Control System.
 
         Args:
@@ -56,8 +53,8 @@ class ACS:
             config: Configuration object.
             log: Optional DITLLog for event logging. If None, prints to stdout.
         """
-        assert constraint is not None, "Constraint must be provided to ACS"
-        self.constraint = constraint
+        assert config.constraint is not None, "Constraint must be provided to ACS"
+        self.constraint = config.constraint
         self.config = config
         self.log = log
 
@@ -73,8 +70,7 @@ class ACS:
         # happen in our simulation, but defines a realistic boundary
         # condition for our simulation.
         self.last_slew = Slew(
-            constraint=self.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=config,
         )
         self.last_slew.endra = self.ra
         self.last_slew.enddec = self.dec
@@ -94,7 +90,7 @@ class ACS:
         self.current_slew = None
         self.last_ppt = None
 
-        self.passrequests = PassTimes(constraint=self.constraint, config=config)
+        self.passrequests = PassTimes(config=config)
         self.current_pass: Pass | None = None
         self.solar_panel = config.solar_panel
         self.slew_dists: list[float] = []
@@ -300,8 +296,7 @@ class ACS:
         """
         # Create slew object
         slew = Slew(
-            constraint=self.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=self.config,
         )
         slew.ephem = self.ephem
         slew.slewrequest = utime
@@ -353,12 +348,11 @@ class ACS:
     def _create_target_request(self, slew: Slew, utime: float) -> Pointing:
         """Create and configure a target observation request for visibility checking."""
         target = Pointing(
-            constraint=self.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=self.config,
+            ra=slew.endra,
+            dec=slew.enddec,
+            obsid=slew.obsid,
         )
-        target.ra = slew.endra
-        target.dec = slew.enddec
-        target.obsid = slew.obsid
         target.isat = slew.obstype != "PPT"
 
         year, day = unixtime2yearday(utime)

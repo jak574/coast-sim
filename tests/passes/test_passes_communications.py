@@ -15,19 +15,18 @@ from conops.config import (
 class TestPassCommunications:
     """Test Pass with CommunicationsSystem integration."""
 
-    def test_pass_with_no_comms_config(self, mock_constraint, mock_acs_config):
+    def test_pass_with_no_comms_config(self, mock_config, mock_ephem):
         """Test Pass without communications configuration."""
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=None,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
         )
-        assert p.comms_config is None
+        assert p.config.spacecraft_bus.communications is None
 
-    def test_pass_with_comms_config(self, mock_constraint, mock_acs_config):
+    def test_pass_with_comms_config(self, mock_config, mock_ephem):
         """Test Pass with communications configuration."""
         comms = CommunicationsSystem(
             name="S-band",
@@ -35,16 +34,16 @@ class TestPassCommunications:
                 BandCapability(band="S", uplink_rate_mbps=1.0, downlink_rate_mbps=5.0)
             ],
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
         )
-        assert p.comms_config is comms
-        assert p.comms_config.name == "S-band"
+        assert p.config.spacecraft_bus.communications is comms
+        assert p.config.spacecraft_bus.communications.name == "S-band"
 
 
 class TestPassPointingError:
@@ -86,7 +85,7 @@ class TestPassCanCommunicate:
         assert basic_pass.can_communicate(0.0, 0.0)
         assert basic_pass.can_communicate(90.0, 0.0)
 
-    def test_can_communicate_with_fixed_antenna(self, mock_constraint, mock_acs_config):
+    def test_can_communicate_with_fixed_antenna(self, mock_config, mock_ephem):
         """Test communication with fixed antenna and pointing accuracy."""
         comms = CommunicationsSystem(
             name="Fixed S-band",
@@ -94,10 +93,10 @@ class TestPassCanCommunicate:
             antenna_pointing=AntennaPointing(antenna_type=AntennaType.FIXED),
             pointing_accuracy_deg=5.0,
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
@@ -112,17 +111,17 @@ class TestPassCanCommunicate:
         # Outside pointing accuracy
         assert not p.can_communicate(50.0, 50.0)
 
-    def test_can_communicate_with_omni_antenna(self, mock_constraint, mock_acs_config):
+    def test_can_communicate_with_omni_antenna(self, mock_config, mock_ephem):
         """Test communication with omnidirectional antenna."""
         comms = CommunicationsSystem(
             name="Omni S-band",
             band_capabilities=[BandCapability(band="S", downlink_rate_mbps=1.0)],
             antenna_pointing=AntennaPointing(antenna_type=AntennaType.OMNI),
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
@@ -145,7 +144,7 @@ class TestPassDataRates:
         assert basic_pass.get_data_rate("S", "downlink") == 0.0
         assert basic_pass.get_data_rate("X", "uplink") == 0.0
 
-    def test_get_downlink_rate(self, mock_constraint, mock_acs_config):
+    def test_get_downlink_rate(self, mock_config, mock_ephem):
         """Test getting downlink rate."""
         comms = CommunicationsSystem(
             band_capabilities=[
@@ -154,10 +153,10 @@ class TestPassDataRates:
                 )
             ]
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
@@ -166,7 +165,7 @@ class TestPassDataRates:
         assert p.get_data_rate("X", "downlink") == 100.0
         assert p.get_data_rate("S", "downlink") == 0.0  # Band not supported
 
-    def test_get_uplink_rate(self, mock_constraint, mock_acs_config):
+    def test_get_uplink_rate(self, mock_config, mock_ephem):
         """Test getting uplink rate."""
         comms = CommunicationsSystem(
             band_capabilities=[
@@ -175,10 +174,10 @@ class TestPassDataRates:
                 )
             ]
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
@@ -187,15 +186,15 @@ class TestPassDataRates:
         assert p.get_data_rate("X", "uplink") == 10.0
         assert p.get_data_rate("S", "uplink") == 0.0  # Band not supported
 
-    def test_get_data_rate_invalid_direction(self, mock_constraint, mock_acs_config):
+    def test_get_data_rate_invalid_direction(self, mock_config, mock_ephem):
         """Test data rate with invalid direction."""
         comms = CommunicationsSystem(
             band_capabilities=[BandCapability(band="S", downlink_rate_mbps=5.0)]
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=480.0,
@@ -211,15 +210,15 @@ class TestPassDataVolume:
         """Test data volume calculation with no comms config."""
         assert basic_pass.calculate_data_volume("S") == 0.0
 
-    def test_calculate_data_volume_no_length(self, mock_constraint, mock_acs_config):
+    def test_calculate_data_volume_no_length(self, mock_config, mock_ephem):
         """Test data volume calculation when pass has no length."""
         comms = CommunicationsSystem(
             band_capabilities=[BandCapability(band="S", downlink_rate_mbps=5.0)]
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=None,
@@ -227,17 +226,17 @@ class TestPassDataVolume:
 
         assert p.calculate_data_volume("S") == 0.0
 
-    def test_calculate_downlink_volume(self, mock_constraint, mock_acs_config):
+    def test_calculate_downlink_volume(self, mock_config, mock_ephem):
         """Test calculating downlink data volume."""
         comms = CommunicationsSystem(
             band_capabilities=[
                 BandCapability(band="X", downlink_rate_mbps=100.0)  # 100 Mbps
             ]
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=600.0,  # 10 minutes = 600 seconds
@@ -247,15 +246,15 @@ class TestPassDataVolume:
         volume = p.calculate_data_volume("X", "downlink")
         assert volume == 60000.0
 
-    def test_calculate_uplink_volume(self, mock_constraint, mock_acs_config):
+    def test_calculate_uplink_volume(self, mock_config, mock_ephem):
         """Test calculating uplink data volume."""
         comms = CommunicationsSystem(
             band_capabilities=[BandCapability(band="S", uplink_rate_mbps=2.0)]  # 2 Mbps
         )
+        mock_config.spacecraft_bus.communications = comms
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=300.0,  # 5 minutes = 300 seconds
@@ -269,9 +268,7 @@ class TestPassDataVolume:
 class TestPassCommunicationsIntegration:
     """Integration tests for Pass with CommunicationsSystem."""
 
-    def test_complete_pass_with_multi_band_comms(
-        self, mock_constraint, mock_acs_config
-    ):
+    def test_complete_pass_with_multi_band_comms(self, mock_config, mock_ephem):
         """Test Pass with multi-band communications system."""
         comms = CommunicationsSystem(
             name="Dual S/X",
@@ -287,18 +284,18 @@ class TestPassCommunicationsIntegration:
             polarization=Polarization.DUAL,
             pointing_accuracy_deg=5.0,
         )
+        mock_config.spacecraft_bus.communications = comms
 
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
             length=600.0,  # 10 minute pass
         )
 
         # Verify configuration
-        assert p.comms_config.name == "Dual S/X"
+        assert p.config.spacecraft_bus.communications.name == "Dual S/X"
 
         # Check data rates
         assert p.get_data_rate("S", "downlink") == 10.0
@@ -313,7 +310,7 @@ class TestPassCommunicationsIntegration:
         assert s_volume == 6000.0  # 10 Mbps * 600s
         assert x_volume == 90000.0  # 150 Mbps * 600s
 
-    def test_pass_with_high_rate_ka_band(self, mock_constraint, mock_acs_config):
+    def test_pass_with_high_rate_ka_band(self, mock_config, mock_ephem):
         """Test Pass with high-rate Ka-band system."""
         comms = CommunicationsSystem(
             name="Ka-band HGA",
@@ -328,11 +325,11 @@ class TestPassCommunicationsIntegration:
             polarization=Polarization.CIRCULAR_RIGHT,
             pointing_accuracy_deg=0.5,  # Very tight for Ka-band
         )
+        mock_config.spacecraft_bus.communications = comms
 
         p = Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
-            comms_config=comms,
+            config=mock_config,
+            ephem=mock_ephem,
             station="DSN",
             begin=1514764800.0,
             length=1800.0,  # 30 minute pass

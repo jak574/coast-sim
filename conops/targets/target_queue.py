@@ -4,6 +4,7 @@ import numpy as np
 import rust_ephem
 
 from ..common import unixtime2date
+from ..config import AttitudeControlSystem, Config, Constraint
 from ..ditl.ditl_log import DITLLog
 from . import Pointing
 
@@ -16,10 +17,23 @@ class Queue:
     utime: float | None
     gs: Any
     log: DITLLog | None
+    constraint: Constraint | None
+    acs_config: AttitudeControlSystem | None
+    config: Config | None
 
     def __init__(
-        self, ephem: rust_ephem.Ephemeris | None = None, log: DITLLog | None = None
+        self,
+        config: Config | None = None,
+        ephem: rust_ephem.Ephemeris | None = None,
+        log: DITLLog | None = None,
     ):
+        # Extract config parameters from Config object
+        if config is None:
+            raise ValueError("Config must be provided to TargetQueue")
+        self.config = config
+        self.constraint = config.constraint
+        self.acs_config = config.spacecraft_bus.attitude_control
+
         self.targets = []
         self.ephem = ephem
         self.utime = None
@@ -34,6 +48,46 @@ class Queue:
 
     def append(self, target: Pointing) -> None:
         self.targets.append(target)
+
+    def add(
+        self,
+        ra: float = 0.0,
+        dec: float = 0.0,
+        obsid: int = 0,
+        name: str = "FakeTarget",
+        merit: float = 100.0,
+        exptime: int | None = None,
+        ss_min: int = 300,
+        ss_max: int = 86400,
+    ) -> None:
+        """Add a pointing target to the queue.
+
+        Creates a new Pointing object with the specified parameters and adds it to the queue.
+
+        Args:
+            ra: Right ascension in degrees
+            dec: Declination in degrees
+            obsid: Observation ID
+            name: Target name
+            merit: Merit value for scheduling priority
+            exptime: Exposure time in seconds
+            ss_min: Minimum snapshot size in seconds
+            ss_max: Maximum snapshot size in seconds
+        """
+
+        pointing = Pointing(
+            config=self.config,
+            ra=ra,
+            dec=dec,
+            obsid=obsid,
+            name=name,
+            merit=merit,
+            exptime=exptime,
+            ss_min=ss_min,
+            ss_max=ss_max,
+        )
+        pointing.visibility()
+        self.targets.append(pointing)
 
     def meritsort(self, ra: float, dec: float) -> None:
         """Sort target queue by merit based on visibility, type, and trigger recency."""
@@ -100,7 +154,7 @@ class Queue:
             target.slewtime = target.calc_slewtime(ra, dec)
 
             # Calculate observation window
-            endtime = utime + target.slewtime + target.ssmin
+            endtime = utime + target.slewtime + target.ss_min
 
             # Use timestamp for the end-of-ephemeris bound
             last_unix = self.ephem.timestamp[-1].timestamp()
@@ -112,7 +166,7 @@ class Queue:
             # Check if target is visible for full observation
             if target.visible(utime, endtime):
                 target.begin = int(utime)
-                target.end = int(utime + target.slewtime + target.ssmax)
+                target.end = int(utime + target.slewtime + target.ss_max)
                 return target
 
         return None

@@ -1,6 +1,7 @@
 """Test fixtures for pointing subsystem tests."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -66,8 +67,17 @@ def constraint():
 
 
 @pytest.fixture
-def pointing(constraint, acs_config):
-    return Pointing(constraint=constraint, acs_config=acs_config)
+def mock_config(constraint):
+    """Create a mock config."""
+    config = Mock()
+    config.constraint = constraint
+    config.constraint.ephem = Mock()
+    return config
+
+
+@pytest.fixture
+def pointing(mock_config):
+    return Pointing(config=mock_config)
 
 
 @pytest.fixture

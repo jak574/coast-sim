@@ -55,10 +55,8 @@ class DITLMixin:
         self.uend = 0.0  # later
         self.plan = Plan()
         self.saa = None
-        self.passes = PassTimes(constraint=self.config.constraint, config=config)
-        self.executed_passes = PassTimes(
-            constraint=self.config.constraint, config=config
-        )
+        self.passes = PassTimes(config=config)
+        self.executed_passes = PassTimes(config=config)
 
         # Set up event based ACS
         assert self.config.constraint.ephem is not None, (
@@ -66,7 +64,7 @@ class DITLMixin:
         )
         # Note: log will be set by subclass (DITL/QueueDITL) before use
         # For now, create ACS without log (will be set later)
-        self.acs = ACS(constraint=self.config.constraint, config=self.config, log=None)
+        self.acs = ACS(config=self.config, log=None)
 
         # Current target
         self.ppt = None
@@ -175,7 +173,7 @@ class DITLMixin:
             Effective data rate in Mbps, or None if no compatible bands/rates
         """
         # If pass has no comms config, use GS overall maximum across bands
-        if current_pass.comms_config is None:
+        if current_pass.config.spacecraft_bus.communications is None:
             return station.get_overall_max_downlink()
 
         # If GS has no per-band capabilities, no defined rate
@@ -188,7 +186,12 @@ class DITLMixin:
         best_effective = 0.0
         for band in gs_bands:
             gs_rate = station.get_downlink_rate(band) or 0.0
-            sc_rate = current_pass.comms_config.get_downlink_rate(band) or 0.0
+            sc_rate = (
+                current_pass.config.spacecraft_bus.communications.get_downlink_rate(
+                    band
+                )
+                or 0.0
+            )
             if gs_rate > 0.0 and sc_rate > 0.0:
                 effective = min(gs_rate, sc_rate)
                 if effective > best_effective:

@@ -8,6 +8,14 @@ import pytest
 from rust_ephem import TLEEphemeris
 
 from conops import Config, Constraint, Pass
+from conops.config import (
+    AttitudeControlSystem,
+    Battery,
+    GroundStationRegistry,
+    Payload,
+    SolarPanelSet,
+    SpacecraftBus,
+)
 
 
 class MockEphemeris:
@@ -45,9 +53,17 @@ class MockEphemeris:
 
 
 @pytest.fixture
-def mock_ephem():
-    """Create a mock ephemeris."""
-    return MockEphemeris()
+def mock_ephem(create_ephem):
+    """Create a simple real TLE ephemeris for tests.
+
+    Tests previously used a MockEphemeris that fails Pydantic instance checks; use a
+    short TLEEphemeris instead so model validation passes and tests can rely on
+    actual ephemeris attributes like .timestamp, .gcrs_pv, etc.
+    """
+    # Use a short period ephemeris (15 minutes) for speed
+    begin = datetime(2025, 8, 15, 0, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2025, 8, 15, 0, 15, 0, tzinfo=timezone.utc)
+    return create_ephem(begin, end, step_size=60)
 
 
 @pytest.fixture
@@ -68,24 +84,37 @@ def mock_acs_config():
 
 
 @pytest.fixture
-def mock_config(mock_acs_config):
-    """Create a mock Config object."""
-    config = Mock(spec=Config)
-    config.spacecraft_bus = Mock()
-    config.spacecraft_bus.attitude_control = mock_acs_config
-    config.spacecraft_bus.communications = (
-        None  # No comms by default for backward compatibility
+def mock_config(mock_constraint, mock_acs_config):
+    """Create a Config object for testing."""
+    # Create minimal required components
+    spacecraft_bus = SpacecraftBus(
+        attitude_control=AttitudeControlSystem(),
+        communications=None,  # Will be set in tests that need it
     )
-    config.ground_stations = None  # Will use default
+
+    # Create minimal payload, battery, solar_panel
+    payload = Payload(instruments=[])
+    battery = Battery(capacity_wh=1000, max_depth_of_discharge=0.8)
+    solar_panel = SolarPanelSet(panels=[])
+
+    config = Config(
+        spacecraft_bus=spacecraft_bus,
+        solar_panel=solar_panel,
+        payload=payload,
+        battery=battery,
+        constraint=mock_constraint,
+        ground_stations=GroundStationRegistry.default(),
+    )
     return config
 
 
 @pytest.fixture
-def basic_pass_mock(mock_constraint, mock_ephem, mock_acs_config):
+def basic_pass_mock(mock_config, create_ephem):
     """Create a basic Pass instance."""
+    ephem = create_ephem(1514764800.0, 1514764800.0 + 480.0)
     p = Pass(
-        constraint=mock_constraint,
-        acs_config=mock_acs_config,
+        config=mock_config,
+        ephem=ephem,
         station="SGS",
         begin=1514764800.0,
         length=480.0,
@@ -94,8 +123,6 @@ def basic_pass_mock(mock_constraint, mock_ephem, mock_acs_config):
         gsendra=15.0,
         gsenddec=25.0,
     )
-    # Ensure ephem is set (from constraint)
-    p.ephem = mock_constraint.ephem
     return p
 
 
@@ -152,6 +179,11 @@ def tle_path():
 @pytest.fixture
 def create_ephem(tle_path):
     def _create(begin, end, step_size=60):
+        # Convert unix timestamp floats to timezone-aware datetimes if needed
+        if isinstance(begin, (int, float)):
+            begin = datetime.fromtimestamp(begin, tz=timezone.utc)
+        if isinstance(end, (int, float)):
+            end = datetime.fromtimestamp(end, tz=timezone.utc)
         return TLEEphemeris(tle=tle_path, begin=begin, end=end, step_size=step_size)
 
     return _create
@@ -166,15 +198,16 @@ def acs_mock():
 
 
 @pytest.fixture
-def basic_pass_factory(mock_constraint, mock_acs_config):
+def basic_pass_factory(mock_config, create_ephem):
     def _create(
         station="SGS",
         begin=1514764800.0,
         length=480.0,
     ):
+        ephem = create_ephem(begin, begin + length)
         return Pass(
-            constraint=mock_constraint,
-            acs_config=mock_acs_config,
+            config=mock_config,
+            ephem=ephem,
             station=station,
             begin=begin,
             length=length,
