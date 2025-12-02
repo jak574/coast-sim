@@ -36,7 +36,12 @@ class DITLLogStore(BaseModel):
     def __enter__(self) -> DITLLogStore:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type | None,
+        exc_val: BaseException | None,
+        exc_tb: object | None,
+    ) -> None:
         self.close()
 
     def _create_schema(self) -> None:
