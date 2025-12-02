@@ -2,7 +2,6 @@
 
 from unittest.mock import Mock, patch
 
-import numpy as np
 import pytest
 
 from conops import ACSCommandType, ACSMode, Pass, QueueDITL
@@ -58,30 +57,6 @@ class TestQueueDITLInitialization:
             assert ditl.battery is mock_config.battery
             assert ditl.spacecraft_bus is mock_config.spacecraft_bus
             assert ditl.payload is mock_config.payload
-
-
-class TestTimeindex:
-    """Test timeindex method."""
-
-    def test_timeindex_150(self, queue_ditl):
-        queue_ditl.utime = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
-        assert queue_ditl.timeindex(150.0) == 0
-
-    def test_timeindex_250(self, queue_ditl):
-        queue_ditl.utime = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
-        assert queue_ditl.timeindex(250.0) == 1
-
-    def test_timeindex_350(self, queue_ditl):
-        queue_ditl.utime = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
-        assert queue_ditl.timeindex(350.0) == 2
-
-    def test_timeindex_exact_last(self, queue_ditl):
-        queue_ditl.utime = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
-        assert queue_ditl.timeindex(500.0) == 4
-
-    def test_timeindex_exact_match(self, queue_ditl):
-        queue_ditl.utime = np.array([100.0, 200.0, 300.0])
-        assert queue_ditl.timeindex(200.0) == 1
 
 
 class TestSetupSimulationTiming:

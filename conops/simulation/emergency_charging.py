@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import rust_ephem
 
+from conops.config.battery import Battery
+
 if TYPE_CHECKING:
     from ..ditl.ditl_log import DITLLog
 
@@ -489,7 +491,7 @@ class EmergencyCharging:
         return self.current_charging_ppt is not None
 
     def check_termination(
-        self, utime: float, battery, ephem: rust_ephem.Ephemeris
+        self, utime: float, battery: Battery, ephem: rust_ephem.Ephemeris
     ) -> str | None:
         """Evaluate whether the current emergency charging pointing should terminate.
 

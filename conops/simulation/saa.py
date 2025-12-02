@@ -1,11 +1,14 @@
 import numpy as np
+import rust_ephem
 from shapely import Point, Polygon
 
 from ..common import dtutcfromtimestamp
 
 
 class SAA:
-    def __init__(self, year=None, day=None):
+    ephem: rust_ephem.Ephemeris | None
+
+    def __init__(self, year: int | None = None, day: int | None = None) -> None:
         self.year = year
         self.day = day
         self.lat = False
@@ -239,7 +242,7 @@ class SAA:
         )
         self.saapoly = Polygon(points)
 
-    def insaa_calc(self, utime):
+    def insaa_calc(self, utime: float) -> bool:
         """For a given time, are we inside the BAT SAA polygon"""
         i = self.ephem.index(dtutcfromtimestamp(utime))
         self.long = self.ephem.long[i]
@@ -247,7 +250,7 @@ class SAA:
 
         return self.saapoly.contains(Point(self.long, self.lat))
 
-    def calc(self):
+    def calc(self) -> None:
         """
         Calculate the SAA times based on the ephemeris data.
         This method determines the time intervals when the BAT is inside the SAA
@@ -275,12 +278,12 @@ class SAA:
         self.saatimes = np.array(self.saatimes)
         self.calculated = True
 
-    def get_saa_times(self):
+    def get_saa_times(self) -> np.ndarray:
         if not self.calculated:
             self.calc()
         return self.saatimes
 
-    def insaa(self, utime):
+    def insaa(self, utime: float) -> int:
         """
         Check if the given UTC time is within an SAA interval.
 
@@ -298,7 +301,7 @@ class SAA:
                 return 1
         return 0
 
-    def get_next_saa_time(self, utime):
+    def get_next_saa_time(self, utime: float) -> tuple[float, float] | None:
         """
         Get the next SAA time interval after the given utime.
         Returns:

@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -55,17 +57,17 @@ class OnboardRecorder(BaseModel):
 
     @field_validator("current_volume_gb")
     @classmethod
-    def validate_current_volume(cls, v: float, info) -> float:
+    def validate_current_volume(cls, v: float, info: Any) -> float:
         """Ensure current volume doesn't exceed capacity."""
         # Access capacity from ValidationInfo if available
-        capacity = info.data.get("capacity_gb", 32.0)
+        capacity: float = info.data.get("capacity_gb", 32.0)
         if v > capacity:
             return capacity
         return v
 
     @field_validator("red_threshold")
     @classmethod
-    def validate_thresholds(cls, v: float, info) -> float:
+    def validate_thresholds(cls, v: float, info: Any) -> float:
         """Ensure red threshold is greater than or equal to yellow threshold."""
         yellow = info.data.get("yellow_threshold", 0.7)
         if v < yellow:

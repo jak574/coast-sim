@@ -37,7 +37,7 @@ class BandCapability(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _apply_standard_band_defaults(cls, data):
+    def _apply_standard_band_defaults(cls, data: dict) -> dict:
         """Fill in standard per-band defaults when rates are not provided.
 
         Only applies when `uplink_rate_mbps` and/or `downlink_rate_mbps` are

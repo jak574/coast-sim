@@ -1,3 +1,5 @@
+from typing import Literal
+
 import numpy as np
 
 from ..common import unixtime2date
@@ -31,9 +33,7 @@ class Pointing(PlanEntry):
             raise ValueError("Config must be provided to Pointing")
 
         PlanEntry.__init__(self, config=config)
-        assert self.constraint == config.constraint, (
-            "Constraint not properly set in Pointing"
-        )
+        assert config.constraint is not None, "Constraint not properly set in Pointing"
         self.done = False
         self.obstype = "AT"
         self.isat = False
@@ -55,23 +55,23 @@ class Pointing(PlanEntry):
         self.ss_min = ss_min  # seconds
         self.ss_max = ss_max  # seconds
 
-    def in_sun(self, utime):
+    def in_sun(self, utime: float) -> bool:
         """Is this target in Sun constraint?"""
-        return self.constraint.in_sun(self.ra, self.dec, utime)
+        return self.config.constraint.in_sun(self.ra, self.dec, utime)
 
-    def in_earth(self, utime):
+    def in_earth(self, utime: float) -> bool:
         """Is this target in Earth constraint?"""
-        return self.constraint.in_earth(self.ra, self.dec, utime)
+        return self.config.constraint.in_earth(self.ra, self.dec, utime)
 
-    def in_moon(self, utime):
+    def in_moon(self, utime: float) -> bool:
         """Is this target in Moon constraint?"""
-        return self.constraint.in_moon(self.ra, self.dec, utime)
+        return self.config.constraint.in_moon(self.ra, self.dec, utime)
 
-    def in_panel(self, utime):
+    def in_panel(self, utime: float) -> bool:
         """Is this target in Panel constraint?"""
-        return self.constraint.in_panel(self.ra, self.dec, utime)
+        return self.config.constraint.in_panel(self.ra, self.dec, utime)
 
-    def next_vis(self, utime):
+    def next_vis(self, utime: float) -> float | Literal[False]:
         """When is this target visible next?"""
         # Are we currently in a visibility window, if yes, return back the current time
         if self.visible(utime, utime):
@@ -87,7 +87,7 @@ class Pointing(PlanEntry):
         except Exception:
             return False
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{unixtime2date(self.begin)} {self.name} ({self.targetid}) RA={self.ra:.4f}, Dec={self.dec:4f}, Roll={self.roll:.1f}, Merit={self.merit}"
 
     @property
@@ -95,22 +95,22 @@ class Pointing(PlanEntry):
         return self._exptime
 
     @exptime.setter
-    def exptime(self, t: int):
+    def exptime(self, t: int) -> None:
         if self._exptime is None:
             self._exporig = t
         self._exptime = t
 
     @property
-    def done(self):
+    def done(self) -> bool:
         if self.exptime is not None and self.exptime <= 0:
             self._done = True
         return self._done
 
     @done.setter
-    def done(self, v):
+    def done(self, v) -> None:
         self._done = v
 
-    def reset(self):
+    def reset(self) -> None:
         if self._exporig is not None:
             self._exptime = self._exporig
         self.done = False

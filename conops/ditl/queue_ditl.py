@@ -109,9 +109,6 @@ class QueueDITL(DITLMixin, DITLStats):
             log=self.log,
         )
 
-    def timeindex(self, utime: float) -> int:
-        return np.where(self.utime <= utime)[0][-1]  # type: ignore[operator]
-
     def get_acs_queue_status(self) -> dict[str, Any]:
         """
         Get the current status of the ACS command queue.

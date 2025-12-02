@@ -1,4 +1,4 @@
-from typing import Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import rust_ephem
@@ -6,13 +6,17 @@ import rust_ephem
 from ..common import roll_over_angle, unixtime2date
 from ..config import AttitudeControlSystem, Constraint, MissionConfig
 
+if TYPE_CHECKING:
+    from ..targets.pointing import Pointing
+
 
 class Slew:
     """Class defines a Spacecraft Slew. Calculates slew time and slew
     path (currently great circle only from simplicity)"""
 
-    ephem: rust_ephem.Ephemeris | None
-    constraint: Constraint | None
+    ephem: rust_ephem.Ephemeris
+    constraint: Constraint
+    config: MissionConfig
     slewstart: float
     slewend: float
     startra: float
@@ -20,33 +24,29 @@ class Slew:
     endra: float
     enddec: float
     slewtime: float
-    slewpath: np.ndarray
+    slewpath: list[list[float]]
+    slewsecs: list[float]
     slewdist: float
     obstype: str
     obsid: int
     mode: int
     slewrequest: float
-    at: Any  # FIXME: should be Pointing | None but this causes circular import
-    acs_config: AttitudeControlSystem | None
+    at: "Pointing | None"  # In quotes to avoid circular import
+    acs_config: AttitudeControlSystem
 
     def __init__(
         self,
         config: MissionConfig | None = None,
-        constraint: Constraint | None = None,
-        acs_config: AttitudeControlSystem | None = None,
     ):
         # Handle both old and new parameter styles for backward compatibility
-        if config is not None:
-            self.constraint = config.constraint
-            self.acs_config = config.spacecraft_bus.attitude_control
-        else:
-            # Legacy parameters
-            self.constraint = constraint
-            self.acs_config = acs_config
+        assert config is not None, "MissionConfig must be passed for Slew"
+        self.constraint = config.constraint
+        self.acs_config = config.spacecraft_bus.attitude_control
 
         assert self.constraint is not None, "Constraint must be set for Slew class"
+        assert self.constraint.ephem is not None, "Ephemeris must be set for Slew class"
+
         self.ephem = self.constraint.ephem
-        assert self.ephem is not None, "Ephemeris must be set for Slew class"
 
         # Store ACS configuration if provided
         assert self.acs_config is not None, "ACS config must be set for Slew class"
@@ -59,29 +59,29 @@ class Slew:
         self.endra = 0
         self.enddec = 0
         self.slewtime = 0
-        self.slewpath = np.array([])
-        self.slewsecs = np.array([])
+        self.slewpath = []
+        self.slewsecs = []
         self.slewdist = 0
 
         self.obstype = "PPT"
         self.obsid = 0
         self.mode = 0
-        self.at = False  # What's the target associated with this slew?
+        self.at = None  # What's the target associated with this slew?
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Slew from {self.startra:.3f},{self.startdec:.3f} to {self.endra},{self.enddec} @ {unixtime2date(self.slewstart)}"
 
-    def is_slewing(self, utime):
+    def is_slewing(self, utime: float) -> bool:
         """For a given utime, are we slewing?"""
         if utime >= self.slewend or utime < self.slewstart:
             return False
         else:
             return True
 
-    def ra_dec(self, utime):
+    def ra_dec(self, utime: float) -> tuple[float, float]:
         return self.slew_ra_dec(utime)
 
-    def slew_ra_dec(self, utime):
+    def slew_ra_dec(self, utime: float) -> tuple[float, float]:
         """Return RA/Dec at time using bang-bang slew profile when configured.
 
         If an AttitudeControlSystem config is present, advance along the
@@ -100,18 +100,11 @@ class Slew:
             and len(self.slewpath) == 2
             and len(self.slewpath[0]) > 0
         )
-        has_slewsecs = hasattr(self, "slewsecs") and len(self.slewsecs) > 0
 
         if not self.acs_config or not has_path or self.slewdist <= 0:
-            # Legacy linear interpolation path
-            if has_path and has_slewsecs:
-                ras = roll_over_angle(self.slewpath[0])
-                ra = np.interp(t, self.slewsecs, ras) % 360
-                dec = np.interp(t, self.slewsecs, self.slewpath[1])
-            else:
-                # No valid path, return start position
-                ra = self.startra
-                dec = self.startdec
+            # No valid path, return start position
+            ra = self.startra
+            dec = self.startdec
             return ra, dec
 
         total_dist = float(self.slewdist)
@@ -136,7 +129,7 @@ class Slew:
         dec = np.interp(idx, x, dec_path)
         return ra, dec
 
-    def calc_slewtime(self):
+    def calc_slewtime(self) -> float:
         """Calculate time to slew between 2 coordinates, given in degrees.
 
         Uses the AttitudeControlSystem configuration for accurate slew time
@@ -158,7 +151,7 @@ class Slew:
         self.slewend = self.slewstart + self.slewtime
         return self.slewtime
 
-    def predict_slew(self):
+    def predict_slew(self) -> None:
         """Calculate great circle slew distance and path using ACS configuration."""
         self.slewdist, self.slewpath = self.acs_config.predict_slew(
             self.startra, self.startdec, self.endra, self.enddec, steps=20

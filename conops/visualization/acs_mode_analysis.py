@@ -12,7 +12,11 @@ if TYPE_CHECKING:
     from ..ditl.ditl_mixin import DITLMixin
 
 
-def plot_acs_mode_distribution(ditl: "DITLMixin", figsize=(10, 8), config=None):
+def plot_acs_mode_distribution(
+    ditl: "DITLMixin",
+    figsize: tuple[float, float] = (10, 8),
+    config: VisualizationConfig | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
     """Plot a pie chart showing the distribution of time spent in each ACS mode.
 
     Creates a pie chart displaying the percentage of time spent in different

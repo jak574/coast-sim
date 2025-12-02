@@ -9,7 +9,7 @@ os.environ["TZ"] = "UTC"
 time.tzset()
 
 
-def givename(ra, dec, stem=""):
+def givename(ra: float, dec: float, stem: str = "") -> str:
     # Convert RA/Dec (in degrees) into generic "JHHMM.m+/-DDMM" format
     rapart = "J%02d%04.1f" % (np.floor(ra / 15), 60 * ((ra / 15) - np.floor(ra / 15)))
     decpart = "%02d%02d" % (
@@ -28,13 +28,13 @@ def givename(ra, dec, stem=""):
     return name
 
 
-def unixtime2date(utime):
+def unixtime2date(utime: float) -> str:
     """Converts Unix time to date string of format YYYY-DDD-HH:MM:SS"""
     dt = datetime.fromtimestamp(utime, tz=timezone.utc)
     return f"{dt.year:04d}-{dt.timetuple().tm_yday:03d}-{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
 
 
-def ics_date_conv(date):
+def ics_date_conv(date: str) -> float:
     """Convert the date format used in the ICS to standard UNIX time"""
     x = date.replace("/", " ").replace("-", " ").replace(":", " ").split()
     base = time.mktime((int(x[0]), 1, 0, 0, 0, 0, 0, 0, 0))
@@ -43,7 +43,7 @@ def ics_date_conv(date):
     )
 
 
-def unixtime2yearday(utime):
+def unixtime2yearday(utime: float) -> tuple[int, int]:
     """Converts Unix time to year and day of year"""
     dt = datetime.fromtimestamp(utime, tz=timezone.utc)
     return dt.year, dt.timetuple().tm_yday

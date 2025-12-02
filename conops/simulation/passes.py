@@ -339,7 +339,7 @@ class PassTimes:
         # Use binary search instead of np.where for finding start index
         # Prefer adapter datetimes if available, otherwise use Time.unix
         timestamp_unix = np.array([dt.timestamp() for dt in self.ephem.timestamp])
-        startindex = np.searchsorted(timestamp_unix, ustart)
+        startindex = int(np.searchsorted(timestamp_unix, ustart))
 
         # Calculate end index
         num_steps = int(86400 * length / self.ephem.step_size)
@@ -351,7 +351,7 @@ class PassTimes:
         end_time = timestamps[-1]
 
         # Process each ground station
-        for station in self.ground_stations:
+        for station in self.ground_stations.stations:
             # Create GroundEphemeris for this station (vectorized ground station ephemeris)
 
             gs_ephem = rust_ephem.GroundEphemeris(

@@ -1,9 +1,12 @@
 import matplotlib.pyplot as plt
 import rust_ephem
 
+from conops.common.enums import ACSMode
+from conops.config.groundstation import GroundStation
+
 from ..config import MissionConfig
 from ..simulation.acs import ACS
-from ..simulation.passes import PassTimes
+from ..simulation.passes import Pass, PassTimes
 from ..targets import Plan, PlanEntry
 
 
@@ -20,8 +23,8 @@ class DITLMixin:
     charge_state: list[int]
     obsid: list[int]
     plan: Plan
-    utime: list
-    ephem: rust_ephem.Ephemeris | None
+    utime: list[float]
+    ephem: rust_ephem.Ephemeris
     # Subsystem power tracking
     power_bus: list[float]
     power_payload: list[float]
@@ -53,7 +56,6 @@ class DITLMixin:
         self.utime = []
         self.mode = []
         self.obsid = []
-        self.ephem = ephem
         # Defining when the model is run
         self.step_size = 60  # seconds
         self.ustart = 0.0  # Calculate these
@@ -97,7 +99,7 @@ class DITLMixin:
         plot_ditl_telemetry(self, config=getattr(self.config, "visualization", None))
         plt.show()
 
-    def _find_current_pass(self, utime: float):
+    def _find_current_pass(self, utime: float) -> Pass | None:
         """Find the current pass at the given time.
 
         Args:
@@ -123,7 +125,7 @@ class DITLMixin:
         return None
 
     def _process_data_management(
-        self, utime: float, mode, step_size: int
+        self, utime: float, mode: ACSMode, step_size: int
     ) -> tuple[float, float]:
         """Process data generation and downlink for a single timestep.
 
@@ -152,9 +154,7 @@ class DITLMixin:
                 station = self.config.ground_stations.get(current_pass.station)
 
                 # Determine actual data rate based on both ground station and spacecraft capabilities
-                effective_rate_mbps = self._get_effective_data_rate(
-                    station, current_pass
-                )
+                effective_rate_mbps = self._get_effective_data_rate(station)
 
                 if effective_rate_mbps is not None and effective_rate_mbps > 0:
                     # Convert Mbps to Gb per step: Mbps * seconds / 1000 / 8 = Gb
@@ -164,7 +164,7 @@ class DITLMixin:
 
         return data_generated, data_downlinked
 
-    def _get_effective_data_rate(self, station, current_pass) -> float | None:
+    def _get_effective_data_rate(self, station: GroundStation) -> float | None:
         """Calculate effective downlink data rate based on ground station and spacecraft capabilities.
 
         The effective rate is, per band, min(GS downlink rate, SC downlink rate);
@@ -178,7 +178,7 @@ class DITLMixin:
             Effective data rate in Mbps, or None if no compatible bands/rates
         """
         # If pass has no comms config, use GS overall maximum across bands
-        if current_pass.config.spacecraft_bus.communications is None:
+        if self.config.spacecraft_bus.communications is None:
             return station.get_overall_max_downlink()
 
         # If GS has no per-band capabilities, no defined rate
@@ -192,10 +192,7 @@ class DITLMixin:
         for band in gs_bands:
             gs_rate = station.get_downlink_rate(band) or 0.0
             sc_rate = (
-                current_pass.config.spacecraft_bus.communications.get_downlink_rate(
-                    band
-                )
-                or 0.0
+                self.config.spacecraft_bus.communications.get_downlink_rate(band) or 0.0
             )
             if gs_rate > 0.0 and sc_rate > 0.0:
                 effective = min(gs_rate, sc_rate)

@@ -5,15 +5,18 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties
 
+from conops.ditl.ditl import DITL
+from conops.ditl.queue_ditl import QueueDITL
+
 from ..config.visualization import VisualizationConfig
 
 
 def plot_data_management_telemetry(
-    ditl,
-    figsize=(12, 10),
-    show_summary=True,
-    config=None,
-):
+    ditl: QueueDITL | DITL,
+    figsize: tuple[float, float] = (12, 10),
+    show_summary: bool = True,
+    config: VisualizationConfig | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
     """Plot comprehensive data management telemetry from a DITL simulation.
 
     Creates a multi-panel figure showing:

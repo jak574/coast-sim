@@ -5,18 +5,25 @@ of the sky with scheduled observations and constraint regions.
 """
 
 import os
+from typing import TYPE_CHECKING, Any, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 from matplotlib.font_manager import FontProperties
 from matplotlib.widgets import Button, Slider
-from rust_ephem import Constraint
+from rust_ephem import ConstraintConfig
 
 from ..common import dtutcfromtimestamp
 from ..config.visualization import VisualizationConfig
 
+if TYPE_CHECKING:
+    from ..ditl import DITL, QueueDITL
 
-def _get_visualization_config(ditl, config=None):
+
+def _get_visualization_config(
+    ditl: "DITL | QueueDITL", config: VisualizationConfig | None = None
+) -> VisualizationConfig:
     """Get visualization configuration, with fallback to defaults.
 
     Parameters
@@ -44,14 +51,14 @@ def _get_visualization_config(ditl, config=None):
 
 
 def plot_sky_pointing(
-    ditl,
-    figsize=(14, 8),
-    n_grid_points=100,
-    show_controls=True,
-    time_step_seconds=None,
-    constraint_alpha=0.3,
-    config=None,
-):
+    ditl: "DITL | QueueDITL",
+    figsize: tuple[float, float] = (14, 8),
+    n_grid_points: int = 100,
+    show_controls: bool = True,
+    time_step_seconds: float | None = None,
+    constraint_alpha: float = 0.3,
+    config: VisualizationConfig | None = None,
+) -> tuple[plt.Figure, plt.Axes, Optional["SkyPointingController"]]:
     """Plot spacecraft pointing on a mollweide sky map with constraints.
 
     Creates an interactive visualization showing:
@@ -153,14 +160,14 @@ class SkyPointingController:
 
     def __init__(
         self,
-        ditl,
-        fig,
-        ax,
-        n_grid_points=100,
-        time_step_seconds=60,
-        constraint_alpha=0.3,
-        config=None,
-    ):
+        ditl: "DITL | QueueDITL",
+        fig: plt.Figure,
+        ax: plt.Axes,
+        n_grid_points: int = 100,
+        time_step_seconds: float = 60,
+        constraint_alpha: float = 0.3,
+        config: VisualizationConfig | None = None,
+    ) -> None:
         """Initialize the controller.
 
         Parameters
@@ -180,38 +187,38 @@ class SkyPointingController:
         config : VisualizationConfig, optional
             Visualization configuration settings.
         """
-        self.ditl = ditl
-        self.fig = fig
-        self.ax = ax
-        self.n_grid_points = n_grid_points
-        self.time_step_seconds = time_step_seconds
-        self.constraint_alpha = constraint_alpha
-        self.config = config
+        self.ditl: "DITL | QueueDITL" = ditl
+        self.fig: plt.Figure = fig
+        self.ax: plt.Axes = ax
+        self.n_grid_points: int = n_grid_points
+        self.time_step_seconds: float = time_step_seconds
+        self.constraint_alpha: float = constraint_alpha
+        self.config: VisualizationConfig | None = config
 
         # State
-        self.current_time_idx = 0
-        self.playing = False
-        self.timer = None
+        self.current_time_idx: int = 0
+        self.playing: bool = False
+        self.timer: Any | None = None
 
         # Plot elements (will be created in update_plot)
-        self.constraint_patches = {}
-        self.current_pointing_marker = None
-        self.scheduled_obs_scatter = None
-        self.title_text = None
+        self.constraint_patches: dict[str, Any] = {}
+        self.current_pointing_marker: Any | None = None
+        self.scheduled_obs_scatter: Any | None = None
+        self.title_text: Any | None = None
 
         # Control widgets
-        self.slider = None
-        self.play_button = None
-        self.prev_button = None
-        self.next_button = None
+        self.slider: Slider
+        self.play_button: Button
+        self.prev_button: Button
+        self.next_button: Button
 
-    def add_controls(self):
+    def add_controls(self) -> None:
         """Add interactive control widgets to the figure."""
         # Create axes for controls
-        ax_slider = plt.axes([0.2, 0.15, 0.6, 0.03])
-        ax_play = plt.axes([0.42, 0.05, 0.08, 0.04])
-        ax_prev = plt.axes([0.32, 0.05, 0.08, 0.04])
-        ax_next = plt.axes([0.52, 0.05, 0.08, 0.04])
+        ax_slider = plt.axes((0.2, 0.15, 0.6, 0.03))
+        ax_play = plt.axes((0.42, 0.05, 0.08, 0.04))
+        ax_prev = plt.axes((0.32, 0.05, 0.08, 0.04))
+        ax_next = plt.axes((0.52, 0.05, 0.08, 0.04))
 
         # Time slider
         self.slider = Slider(
@@ -235,35 +242,35 @@ class SkyPointingController:
         self.next_button = Button(ax_next, "Next >")
         self.next_button.on_clicked(self.on_next_clicked)
 
-    def on_slider_change(self, val):
+    def on_slider_change(self, val: float) -> None:
         """Handle slider value change."""
         idx = int(val)
         if idx != self.current_time_idx:
             self.current_time_idx = idx
             self.update_plot(self.ditl.utime[idx])
 
-    def on_play_clicked(self, event):
+    def on_play_clicked(self, event: Any) -> None:
         """Handle play button click."""
         if self.playing:
             self.stop_animation()
         else:
             self.start_animation()
 
-    def on_prev_clicked(self, event):
+    def on_prev_clicked(self, event: Any) -> None:
         """Handle previous button click."""
         if self.current_time_idx > 0:
             self.current_time_idx -= 1
             self.slider.set_val(self.current_time_idx)
             self.update_plot(self.ditl.utime[self.current_time_idx])
 
-    def on_next_clicked(self, event):
+    def on_next_clicked(self, event: Any) -> None:
         """Handle next button click."""
         if self.current_time_idx < len(self.ditl.utime) - 1:
             self.current_time_idx += 1
             self.slider.set_val(self.current_time_idx)
             self.update_plot(self.ditl.utime[self.current_time_idx])
 
-    def start_animation(self):
+    def start_animation(self) -> None:
         """Start playing through time steps."""
         self.playing = True
         self.play_button.label.set_text("Pause")
@@ -272,7 +279,7 @@ class SkyPointingController:
         self.timer.add_callback(self.animation_step)
         self.timer.start()
 
-    def stop_animation(self):
+    def stop_animation(self) -> None:
         """Stop playing animation."""
         self.playing = False
         if self.play_button is not None:
@@ -281,7 +288,7 @@ class SkyPointingController:
             self.timer.stop()
             self.timer = None
 
-    def animation_step(self):
+    def animation_step(self) -> None:
         """Advance to next time step during animation."""
         if self.current_time_idx < len(self.ditl.utime) - 1:
             self.current_time_idx += 1
@@ -291,7 +298,7 @@ class SkyPointingController:
             # Reached the end
             self.stop_animation()
 
-    def update_plot(self, utime):
+    def update_plot(self, utime: float) -> None:
         """Update the plot for a given time.
 
         Parameters
@@ -325,9 +332,9 @@ class SkyPointingController:
         # Redraw
         self.fig.canvas.draw_idle()
 
-    def _find_time_index(self, utime):
+    def _find_time_index(self, utime: float) -> int:
         """Find the index in utime array closest to the given time."""
-        idx = np.argmin(np.abs(np.array(self.ditl.utime) - utime))
+        idx = int(np.argmin(np.abs(np.array(self.ditl.utime) - utime)))
         # Ensure index is within bounds for all arrays
         max_idx = (
             min(
@@ -340,17 +347,17 @@ class SkyPointingController:
         )
         return min(idx, max_idx)
 
-    def _plot_scheduled_observations(self):
+    def _plot_scheduled_observations(self) -> None:
         """Plot all scheduled observations as markers."""
         if len(self.ditl.plan) == 0:
             return
 
         # Cache the observation data since it doesn't change between frames
         if not hasattr(self, "_cached_observations"):
-            ras = []
-            decs = []
-            colors = []
-            sizes = []
+            ras: list[float] = []
+            decs: list[float] = []
+            colors: list[str] = []
+            sizes: list[int] = []
 
             for ppt in self.ditl.plan:
                 ra = ppt.ra
@@ -381,7 +388,7 @@ class SkyPointingController:
                     colors.append("lightblue")
                     sizes.append(40)
 
-            self._cached_observations = {
+            self._cached_observations: dict[str, list] = {
                 "ras": ras,
                 "decs": decs,
                 "colors": colors,
@@ -402,7 +409,7 @@ class SkyPointingController:
             rasterized=True,  # Rasterize for faster rendering
         )
 
-    def _precompute_constraints(self, time_indices=None):
+    def _precompute_constraints(self, time_indices: np.ndarray | None = None) -> None:
         """Pre-compute constraint masks for all time steps using in_constraint_batch.
 
         This evaluates all constraints for the entire DITL in a single batch operation
@@ -429,7 +436,7 @@ class SkyPointingController:
         )
 
         # Pre-compute all constraint types
-        constraint_cache = {}
+        constraint_cache: dict[str, Any] = {}
 
         constraint_types = [
             ("sun", self.ditl.config.constraint.sun_constraint),
@@ -438,20 +445,23 @@ class SkyPointingController:
             ("anti_sun", self.ditl.config.constraint.anti_sun_constraint),
             ("panel", self.ditl.config.constraint.panel_constraint),
         ]
+        assert self.ditl.ephem is not None, (
+            "Ephemeris must be set for constraint calculations."
+        )
 
         for name, constraint_func in constraint_types:
             # Batch evaluation with datetime array
             result = constraint_func.in_constraint_batch(
                 ephemeris=self.ditl.ephem,
-                target_ras=ra_flat,
-                target_decs=dec_flat,
+                target_ras=list(ra_flat),
+                target_decs=list(dec_flat),
                 times=times,  # Pass entire array of datetime objects
             )
             # Result shape is (n_points, n_times) from rust_ephem
             constraint_cache[name] = result
 
         # Store cache
-        self._constraint_cache = {
+        self._constraint_cache: dict[str, npt.NDArray | dict] = {
             "ra_grid": ra_flat,
             "dec_grid": dec_flat,
             "time_indices": time_indices,
@@ -462,7 +472,7 @@ class SkyPointingController:
             f"Constraint pre-computation complete. Cached {len(constraint_types)} constraint types."
         )
 
-    def _plot_constraint_regions(self, utime):
+    def _plot_constraint_regions(self, utime: float) -> None:
         """Plot constraint regions for Sun, Moon, and Earth.
 
         Parameters
@@ -470,8 +480,10 @@ class SkyPointingController:
         utime : float
             Unix timestamp for constraint calculation.
         """
+
         dt = dtutcfromtimestamp(utime)
         ephem = self.ditl.constraint.ephem
+        assert ephem is not None, "Ephemeris must be set for constraint calculations."
         idx = ephem.index(dt)
 
         # Get celestial body positions
@@ -531,7 +543,7 @@ class SkyPointingController:
                 body_dec,
             )
 
-    def _plot_earth_disk(self, utime):
+    def _plot_earth_disk(self, utime: float) -> None:
         """Plot the physical extent of Earth as seen from the spacecraft.
 
         Parameters
@@ -539,8 +551,9 @@ class SkyPointingController:
         utime : float
             Unix timestamp for Earth position calculation.
         """
+
         dt = dtutcfromtimestamp(utime)
-        ephem = self.ditl.constraint.ephem
+        ephem = self.ditl.ephem
         idx = ephem.index(dt)
 
         # Get Earth position and angular radius
@@ -551,7 +564,7 @@ class SkyPointingController:
         # Get sky grid points (use cached if available)
         if hasattr(self, "_constraint_cache"):
             ra_flat = self._constraint_cache["ra_grid"]
-            dec_flat = self._constraint_cache["dec_grid"]
+            dec_flat: npt.NDArray[np.float64] = self._constraint_cache["dec_grid"]
         else:
             ra_flat, dec_flat = self._create_sky_grid(self.n_grid_points)
 
@@ -577,7 +590,9 @@ class SkyPointingController:
                 ra_vals, dec_vals, "darkblue", alpha=0.8, label="Earth Disk", zorder=2.5
             )
 
-    def _create_sky_grid(self, n_points):
+    def _create_sky_grid(
+        self, n_points: int
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """Create a grid of RA/Dec points optimized for Mollweide projection.
 
         Parameters
@@ -609,7 +624,7 @@ class SkyPointingController:
 
         return ra_flat, dec_flat
 
-    def _convert_ra_for_plotting(self, ra_vals):
+    def _convert_ra_for_plotting(self, ra_vals: np.ndarray) -> np.ndarray:
         """Convert RA coordinates for Mollweide projection plotting.
 
         Parameters
@@ -626,15 +641,15 @@ class SkyPointingController:
 
     def _plot_points_on_sky(
         self,
-        ra_vals,
-        dec_vals,
-        color,
-        alpha=0.3,
-        size=20,
-        marker="s",
-        label=None,
-        zorder=1,
-    ):
+        ra_vals: np.ndarray,
+        dec_vals: np.ndarray,
+        color: str,
+        alpha: float = 0.3,
+        size: int = 20,
+        marker: str = "s",
+        label: str | None = None,
+        zorder: float = 1,
+    ) -> None:
         """Plot points on the sky map.
 
         Parameters
@@ -674,11 +689,11 @@ class SkyPointingController:
     def _plot_single_constraint(
         self,
         name: str,
-        constraint_func: Constraint,
+        constraint_func: ConstraintConfig,
         color: str,
         utime: float,
-        body_ra: float,
-        body_dec: float,
+        body_ra: float | None,
+        body_dec: float | None,
     ) -> None:
         """Plot a single constraint region.
 
@@ -813,7 +828,7 @@ class SkyPointingController:
                 zorder=3,
             )
 
-    def _plot_current_pointing(self, ra, dec, mode):
+    def _plot_current_pointing(self, ra: float, dec: float, mode: Any) -> None:
         """Plot the current spacecraft pointing direction.
 
         Parameters
@@ -868,7 +883,7 @@ class SkyPointingController:
         )
         self.ax.add_patch(circle)
 
-    def _setup_plot_appearance(self, utime):
+    def _setup_plot_appearance(self, utime: float) -> None:
         """Set up plot labels, grid, and appearance.
 
         Parameters
@@ -971,8 +986,13 @@ class SkyPointingController:
 
 
 def save_sky_pointing_frames(
-    ditl, output_dir, figsize=(14, 8), n_grid_points=50, frame_interval=1, config=None
-):
+    ditl: "DITL | QueueDITL",
+    output_dir: str,
+    figsize: tuple[float, float] = (14, 8),
+    n_grid_points: int = 50,
+    frame_interval: int = 1,
+    config: VisualizationConfig | None = None,
+) -> list[str]:
     """Save individual frames of the sky pointing visualization.
 
     Useful for creating animations or reviewing specific time steps.
@@ -1018,7 +1038,7 @@ def save_sky_pointing_frames(
         config=config,
     )
 
-    saved_files = []
+    saved_files: list[str] = []
     for idx in range(0, len(ditl.utime), frame_interval):
         utime = ditl.utime[idx]
         controller.update_plot(utime)
@@ -1037,18 +1057,18 @@ def save_sky_pointing_frames(
 
 
 def save_sky_pointing_movie(
-    ditl,
-    output_file,
-    fps=10,
-    figsize=(14, 8),
-    n_grid_points=50,
-    frame_interval=1,
-    dpi=100,
-    codec="h264",
-    bitrate=1800,
-    config=None,
-    show_progress=True,
-):
+    ditl: "DITL | QueueDITL",
+    output_file: str,
+    fps: float = 10,
+    figsize: tuple[float, float] = (14, 8),
+    n_grid_points: int = 50,
+    frame_interval: int = 1,
+    dpi: int = 100,
+    codec: str = "h264",
+    bitrate: int = 1800,
+    config: VisualizationConfig | None = None,
+    show_progress: bool = True,
+) -> str:
     """Export the entire DITL sky pointing visualization as a movie.
 
     Creates an animated movie showing how spacecraft pointing and constraints
@@ -1183,7 +1203,7 @@ def save_sky_pointing_movie(
     total_frames = len(time_indices)
 
     # Pre-compute constraints for all time steps to be rendered
-    controller._precompute_constraints(time_indices)
+    controller._precompute_constraints(np.array(time_indices))
 
     print(f"Creating movie with {total_frames} frames at {fps} fps...")
     print(f"Movie duration: {total_frames / fps:.1f} seconds")

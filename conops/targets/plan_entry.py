@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import rust_ephem
 
@@ -18,9 +20,11 @@ class PlanEntry:
     end: float
     windows: list[list[float]]
     ephem: rust_ephem.Ephemeris | None
-    constraint: Constraint | None
+    constraint: Constraint
+    config: MissionConfig
     merit: float
     saa: SAA | None
+    slewpath: list[float]
 
     def __init__(
         self,
@@ -29,6 +33,7 @@ class PlanEntry:
         # Extract config parameters from Config object
         if config is None:
             raise ValueError("Config must be provided to PlanEntry")
+        self.config = config
         self.constraint = config.constraint
         self.acs_config = config.spacecraft_bus.attitude_control
 
@@ -51,38 +56,38 @@ class PlanEntry:
         self.merit = 101
         self.windows = list()
         self.obstype = "PPT"
-        self.slewpath = False
-        self.slewdist = False
+        self.slewpath = []
+        self.slewdist = 0.0
         self.ss_min = 1000
         self.ss_max = 1e6
 
-    def copy(self):
+    def copy(self) -> PlanEntry:
         """Create a copy of this class"""
         obj = type(self).__new__(self.__class__)
         obj.__dict__.update(self.__dict__)
         return obj
 
     @property
-    def targetid(self):
+    def targetid(self) -> int:
         return self.obsid & 0xFFFFFF
 
     @targetid.setter
-    def targetid(self, value):
+    def targetid(self, value: int) -> None:
         self.obsid = value + (self.segment << 24)
 
     @property
-    def segment(self):
+    def segment(self) -> int:
         return self.obsid >> 24
 
     @segment.setter
-    def segment(self, value):
+    def segment(self, value: int) -> None:
         self.obsid = self.targetid + (value << 24)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{unixtime2date(self.begin)} Target: {self.name} ({self.targetid}/{self.segment}) Exp: {self.exposure}s "
 
     @property
-    def exposure(self):  # (),excludesaa=False):
+    def exposure(self) -> int:  # (),excludesaa=False):
         self.insaa = 0
 
         # if self.saa is not False:
@@ -95,11 +100,11 @@ class PlanEntry:
         )  # always an integer number of seconds
 
     @exposure.setter
-    def exposure(self, value):
+    def exposure(self, value: int) -> None:
         """Setter for exposure - accepts but ignores the value since exposure is computed."""
         pass
 
-    def givename(self, stem=""):
+    def givename(self, stem: str = "") -> None:
         self.name = givename(self.ra, self.dec, stem=stem)
 
     def visibility(
@@ -112,7 +117,7 @@ class PlanEntry:
         the entire ephemeris time range.
         """
 
-        assert self.constraint is not None, (
+        assert self.config.constraint is not None, (
             "Constraint must be set to calculate visibility"
         )
         assert self.ephem is not None, "Ephemeris must be set to calculate visibility"
@@ -132,14 +137,14 @@ class PlanEntry:
 
         return 0
 
-    def visible(self, begin, end):
+    def visible(self, begin: float, end: float) -> list[float] | Literal[False]:
         """Is the target visible between these two times, if yes, return the visibility window"""
         for window in self.windows:
             if begin >= window[0] and end <= window[1]:
                 return window
         return False
 
-    def slew_ra_dec(self, utime):
+    def slew_ra_dec(self, utime: float) -> tuple[float, float]:
         """Return the RA/Dec of Spacecraft after t seconds into a slew. Assumes linear rate of slew."""
         t = utime - self.begin
         ras = roll_over_angle(self.slewpath[0])
@@ -148,14 +153,14 @@ class PlanEntry:
         dec = np.interp(t, self.slewsecs, self.slewpath[1])
         return ra, dec
 
-    def in_slew(self, utime):
+    def in_slew(self, utime: float) -> bool:
         """Are we slewing right now?"""
         if utime >= self.begin and utime < self.begin + self.slewtime:
             return True
         else:
             return False
 
-    def ra_dec(self, utime):
+    def ra_dec(self, utime: float) -> tuple[float, float] | list[int]:
         """Return Spacecraft RA/Dec for any time during the current PPT"""
         if utime >= self.begin and utime <= self.end:
             if self.in_slew(utime):
@@ -166,29 +171,25 @@ class PlanEntry:
             return [-1, -1]
 
     def calc_slewtime(
-        self, lastra, lastdec, no_update=False, phil=False, distance=False
-    ):
+        self,
+        lastra: float,
+        lastdec: float,
+    ) -> int:
         """Calculate time to slew between 2 coordinates, given in degrees.
 
         Uses the AttitudeControlSystem configuration for accurate slew time
         calculation with bang-bang control profile.
         """
 
-        if distance is False:
-            # Use the more accurate slew distance instead of angular distance
-            if self.slewdist is False:
-                self.predict_slew(lastra, lastdec)
-            distance = self.slewdist
+        # Use the more accurate slew distance instead of angular distance
+        self.predict_slew(lastra, lastdec)
 
         # Calculate slew time using AttitudeControlSystem
-        slewtime = round(self.acs_config.slew_time(distance))
-
-        if not no_update:
-            self.slewtime = slewtime
+        slewtime = round(self.acs_config.slew_time(self.slewdist))
 
         return slewtime
 
-    def predict_slew(self, lastra, lastdec):
+    def predict_slew(self, lastra: float, lastdec: float) -> None:
         """Calculate great circle slew distance and path using ACS configuration."""
         self.slewdist, self.slewpath = self.acs_config.predict_slew(
             lastra, lastdec, self.ra, self.dec, steps=20

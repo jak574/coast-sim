@@ -1,4 +1,3 @@
-import numpy as np
 from pydantic import BaseModel
 
 from ..common import great_circle, separation
@@ -91,7 +90,7 @@ class AttitudeControlSystem(BaseModel):
         endra: float,
         enddec: float,
         steps: int = 20,
-    ) -> tuple[float, tuple[np.ndarray, np.ndarray]]:
+    ) -> tuple[float, tuple[list, list]]:
         """Calculate great circle slew distance and path.
 
         Args:

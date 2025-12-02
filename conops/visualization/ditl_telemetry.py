@@ -12,7 +12,11 @@ if TYPE_CHECKING:
     from ..ditl.ditl_mixin import DITLMixin
 
 
-def plot_ditl_telemetry(ditl: "DITLMixin", figsize=(10, 8), config=None):
+def plot_ditl_telemetry(
+    ditl: "DITLMixin",
+    figsize: tuple[float, float] = (10, 8),
+    config: VisualizationConfig | None = None,
+) -> tuple[plt.Figure, list[plt.Axes]]:
     """Plot basic DITL timeline with core spacecraft telemetry.
 
     Creates a 7-panel figure showing:

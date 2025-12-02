@@ -23,14 +23,14 @@ class Battery(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def set_defaults(cls, values):
+    def set_defaults(cls, values: dict) -> dict:
         """Set derived default values"""
         if "watthour" not in values:
             values["watthour"] = values.get("amphour", 20) * values.get("voltage", 28)
 
         return values
 
-    def __init__(self, **data):
+    def __init__(self, **data: dict) -> None:
         super().__init__(**data)
 
         self.charge_level = self.watthour  # Start fully charged
@@ -53,7 +53,7 @@ class Battery(BaseModel):
             return ChargeState.CHARGING
 
     @property
-    def battery_alert(self):
+    def battery_alert(self) -> bool:
         """Is the battery in an alert status caused by discharge"""
         # Calculate minimum allowed charge level from max depth of discharge
         min_charge_level = 1.0 - self.max_depth_of_discharge
@@ -71,7 +71,7 @@ class Battery(BaseModel):
             self.emergency_recharge = False
             return False
 
-    def charge(self, power, period):
+    def charge(self, power: float, period: float) -> None:
         """Charge the battery with <power> Watts for <period> seconds"""
         self._last_charge_power = power
         if self.charge_level < self.watthour:
@@ -82,7 +82,7 @@ class Battery(BaseModel):
             if self.charge_level > self.watthour:
                 self.charge_level = self.watthour
 
-    def drain(self, power, period):
+    def drain(self, power: float, period: float) -> None:
         """Charge the battery with <power> Watts for <period> seconds"""
         if self.charge_level > 0:
             # Battery is not fully charged
@@ -91,9 +91,7 @@ class Battery(BaseModel):
             # Check if battery is more than 100% full
             if self.charge_level < 0:
                 self.charge_level = 0
-        else:
-            return False
 
     @property
-    def battery_level(self):
+    def battery_level(self) -> float:
         return self.charge_level / self.watthour

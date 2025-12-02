@@ -81,10 +81,6 @@ class GroundStationRegistry(BaseModel):
     def codes(self) -> list[str]:
         return [s.code for s in self.stations]
 
-    def __iter__(self):  # noqa: D401
-        """Iterate over stored stations."""
-        return iter(self.stations)
-
     def __contains__(self, code: str) -> bool:  # noqa: D401
         """Return True if a station code exists in registry."""
         return any(s.code == code for s in self.stations)

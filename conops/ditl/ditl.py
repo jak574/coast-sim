@@ -236,14 +236,13 @@ class DITLs:
         >>> passes_per_sim = ditls.number_of_passes
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize empty DITLs collection.
 
         Creates an empty list to store DITL simulation results and initializes
         statistics counters.
         """
-        self.ditls = list()
-        self.reset_stats()
+        self.ditls: list[DITL] = list()
         self.total = 0
         self.suncons = 0
 

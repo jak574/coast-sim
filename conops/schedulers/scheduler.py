@@ -19,6 +19,8 @@ class DumbScheduler:
     satisfy sun/anti-sun constraints and exposure time windows.
     """
 
+    ephem: rust_ephem.Ephemeris
+
     def __init__(
         self, config: MissionConfig, days: int = 1, log: "DITLLog | None" = None
     ) -> None:
