@@ -24,7 +24,7 @@ class Slew:
     endra: float
     enddec: float
     slewtime: float
-    slewpath: list[list[float]]
+    slewpath: tuple[list[float], list[float]]
     slewsecs: list[float]
     slewdist: float
     obstype: str
@@ -59,8 +59,6 @@ class Slew:
         self.endra = 0
         self.enddec = 0
         self.slewtime = 0
-        self.slewpath = []
-        self.slewsecs = []
         self.slewdist = 0
 
         self.obstype = "PPT"
@@ -153,6 +151,7 @@ class Slew:
 
     def predict_slew(self) -> None:
         """Calculate great circle slew distance and path using ACS configuration."""
+
         self.slewdist, self.slewpath = self.acs_config.predict_slew(
             self.startra, self.startdec, self.endra, self.enddec, steps=20
         )

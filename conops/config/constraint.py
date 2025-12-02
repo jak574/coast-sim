@@ -1,6 +1,3 @@
-from collections.abc import Iterable
-from datetime import datetime
-
 import numpy as np
 import rust_ephem
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,147 +64,80 @@ class Constraint(BaseModel):
             )
         return self._constraint_cache
 
-    def in_sun(
-        self, ra: float, dec: float, time: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+    def in_sun(self, ra: float, dec: float, time: float) -> bool:
         assert self.ephem is not None, "Ephemeris must be set to use in_sun method"
 
-        # Convert time to datetime(s) for rust-ephem
-        if isinstance(time, float):
-            dt = dtutcfromtimestamp(time)
-            return self.sun_constraint.in_constraint(
-                ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
-            )
-        # Accept Python datetime iterables
-        dts = list(time)
-        result = self.sun_constraint.evaluate(
-            ephemeris=self.ephem, target_ra=ra, target_dec=dec, times=dts
+        dt = dtutcfromtimestamp(time)
+        return self.sun_constraint.in_constraint(
+            ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
         )
 
-        return result.constraint_array
-
-    def in_panel(
-        self, ra: float, dec: float, time: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+    def in_panel(self, ra: float, dec: float, time: float) -> bool:
         assert self.ephem is not None, "Ephemeris must be set to use in_panel method"
 
-        # Convert time to datetime for rust-ephem
-        if isinstance(time, float):
-            dt = dtutcfromtimestamp(time)
-            return self.panel_constraint.in_constraint(
-                ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
-            )
-        # Assume it's an iterable of datetime objects
-        dts = list(time)
-        result = self.panel_constraint.evaluate(
-            ephemeris=self.ephem, target_ra=ra, target_dec=dec, times=dts
+        dt = dtutcfromtimestamp(time)
+        return self.panel_constraint.in_constraint(
+            ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
         )
 
-        return result.constraint_array
-
-    def in_anti_sun(
-        self, ra: float, dec: float, time: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+    def in_anti_sun(self, ra: float, dec: float, time: float) -> bool:
         assert self.ephem is not None, "Ephemeris must be set to use in_anti_sun method"
 
         # Convert time to datetime for rust-ephem
-        if isinstance(time, float):
-            dt = dtutcfromtimestamp(time)
-            return self.anti_sun_constraint.in_constraint(
-                ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
-            )
-        # Assume it's an iterable of datetime objects
-        dts = list(time)
-        result = self.anti_sun_constraint.evaluate(
-            ephemeris=self.ephem, target_ra=ra, target_dec=dec, times=dts
+        dt = dtutcfromtimestamp(time)
+        return self.anti_sun_constraint.in_constraint(
+            ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
         )
-        return result.constraint_array
+        # Assume it's an iterable of datetime objects
 
-    def in_earth(
-        self, ra: float, dec: float, time: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+    def in_earth(self, ra: float, dec: float, time: float) -> bool:
         assert self.ephem is not None, "Ephemeris must be set to use in_earth method"
 
         # Convert time to datetime for rust-ephem
-        if isinstance(time, float):
-            dt = dtutcfromtimestamp(time)
-            return self.earth_constraint.in_constraint(
-                ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
-            )
-        # Assume it's an iterable of datetime objects
-        dts = list(time)
-        result = self.earth_constraint.evaluate(
-            ephemeris=self.ephem, target_ra=ra, target_dec=dec, times=dts
+        dt = dtutcfromtimestamp(time)
+        return self.earth_constraint.in_constraint(
+            ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
         )
-        return result.constraint_array
 
-    def in_eclipse(
-        self, ra: float, dec: float, time: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+    def in_eclipse(self, ra: float, dec: float, time: float) -> bool:
         assert self.ephem is not None, "Ephemeris must be set to use in_eclipse method"
 
         # Convert time to datetime for rust-ephem
-        if isinstance(time, float):
-            dt = dtutcfromtimestamp(time)
-            return rust_ephem.EclipseConstraint().in_constraint(
-                ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
-            )
-        # Assume it's an iterable of datetime objects
-        dts = list(time)
-        result = rust_ephem.EclipseConstraint().evaluate(
-            ephemeris=self.ephem, target_ra=ra, target_dec=dec, times=dts
-        )
-        return result.constraint_array
 
-    def in_moon(
-        self, ra: float, dec: float, time: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+        dt = dtutcfromtimestamp(time)
+        return rust_ephem.EclipseConstraint().in_constraint(
+            ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
+        )
+
+    def in_moon(self, ra: float, dec: float, time: float) -> bool:
         assert self.ephem is not None, "Ephemeris must be set to use in_moon method"
 
         # Convert time to datetime for rust-ephem
-        if isinstance(time, float):
-            dt = dtutcfromtimestamp(time)
-            return self.moon_constraint.in_constraint(
-                ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
-            )
-        # Assume it's an iterable of datetime objects
-        dts = list(time)
-        result = self.moon_constraint.evaluate(
-            ephemeris=self.ephem, target_ra=ra, target_dec=dec, times=dts
-        )
-        return result.constraint_array
 
-    def in_constraint(
-        self, ra: float, dec: float, utime: float | Iterable[datetime]
-    ) -> bool | np.ndarray:
+        dt = dtutcfromtimestamp(time)
+        return self.moon_constraint.in_constraint(
+            ephemeris=self.ephem, target_ra=ra, target_dec=dec, time=dt
+        )
+
+    def in_constraint(self, ra: float, dec: float, utime: float) -> bool:
         """For a given time is a RA/Dec in occult?"""
         # Short-circuit evaluation for scalar times (most common case)
         # For array times, we need to compute all to properly OR the arrays
-        is_scalar = isinstance(utime, (int, float))
 
-        if is_scalar:
-            # Check constraints in order of likelihood and return early if violated
-            if self.in_sun(ra, dec, utime):
-                return True
-            if self.in_earth(ra, dec, utime):
-                return True
-            if self.in_panel(ra, dec, utime):
-                return True
-            if self.in_moon(ra, dec, utime):
-                return True
-            if self.in_anti_sun(ra, dec, utime):
-                return True
-            return False
-        else:
-            # For arrays, compute all constraints and combine
-            in_sun = self.in_sun(ra, dec, utime)
-            in_earth = self.in_earth(ra, dec, utime)
-            in_panel = self.in_panel(ra, dec, utime)
-            in_moon = self.in_moon(ra, dec, utime)
-            in_anti_sun = self.in_anti_sun(ra, dec, utime)
-            return in_sun | in_anti_sun | in_earth | in_moon | in_panel
+        # Check constraints in order of likelihood and return early if violated
+        if self.in_sun(ra, dec, utime):
+            return True
+        if self.in_earth(ra, dec, utime):
+            return True
+        if self.in_panel(ra, dec, utime):
+            return True
+        if self.in_moon(ra, dec, utime):
+            return True
+        if self.in_anti_sun(ra, dec, utime):
+            return True
+        return False
 
-    def in_constraint_count(self, ra, dec, utime):
+    def in_constraint_count(self, ra: float, dec: float, utime: float) -> int:
         count = 0
         if self.in_sun(ra, dec, utime):
             count += 2

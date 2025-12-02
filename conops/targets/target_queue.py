@@ -14,7 +14,7 @@ class TargetQueue:
 
     targets: list[Pointing]
     ephem: rust_ephem.Ephemeris | None
-    utime: float | None
+    utime: float
     gs: Any
     log: DITLLog | None
     constraint: Constraint | None
@@ -36,7 +36,7 @@ class TargetQueue:
 
         self.targets = []
         self.ephem = ephem
-        self.utime = None
+        self.utime = 0.0
         self.gs = None
         self.log = log
 
@@ -56,7 +56,7 @@ class TargetQueue:
         obsid: int = 0,
         name: str = "FakeTarget",
         merit: float = 100.0,
-        exptime: int | None = None,
+        exptime: int = 1000,
         ss_min: int = 300,
         ss_max: int = 86400,
     ) -> None:
@@ -89,7 +89,7 @@ class TargetQueue:
         pointing.visibility()
         self.targets.append(pointing)
 
-    def meritsort(self, ra: float, dec: float) -> None:
+    def meritsort(self) -> None:
         """Sort target queue by merit based on visibility, type, and trigger recency."""
 
         for target in self.targets:
@@ -131,7 +131,7 @@ class TargetQueue:
             "Ephemeris must be set in TargetQueue before get()"
         )
         self.utime = utime
-        self.meritsort(ra, dec)
+        self.meritsort()
 
         # Select targets from queue
         targets = [t for t in self.targets if t.merit > 0 and not t.done]

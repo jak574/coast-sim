@@ -163,7 +163,7 @@ class DumbScheduler:
 
             # Compute actual exposure assigned to this plan entry (seconds)
             # exposure is time after slew and before end
-            exposure_time = max(0, endtime - ppt.begin - ppt.slewtime)
+            exposure_time = int(max(0, endtime - ppt.begin - ppt.slewtime))
             # Do not exceed the target's remaining requested exposure
             exposure_time = min(exposure_time, selected_target.exptime)  # type: ignore[attr-defined]
             # assign to the PlanEntry if the attribute exists; fallback to attribute assignment

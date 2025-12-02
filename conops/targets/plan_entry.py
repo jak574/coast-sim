@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-import numpy as np
 import rust_ephem
 
-from ..common import givename, roll_over_angle, unixtime2date
+from ..common import givename, unixtime2date
 from ..config import Constraint, MissionConfig
 from ..simulation.saa import SAA
 
@@ -24,11 +23,12 @@ class PlanEntry:
     config: MissionConfig
     merit: float
     saa: SAA | None
-    slewpath: list[float]
+    slewpath: tuple[list[float], list[float]]
 
     def __init__(
         self,
         config: MissionConfig | None = None,
+        exptime: int = 1000,
     ) -> None:
         # Extract config parameters from Config object
         if config is None:
@@ -56,10 +56,22 @@ class PlanEntry:
         self.merit = 101
         self.windows = list()
         self.obstype = "PPT"
-        self.slewpath = []
+        self.slewpath = ([], [])
         self.slewdist = 0.0
         self.ss_min = 1000
         self.ss_max = 1e6
+        self._exptime = exptime
+        self._exporig = exptime
+
+    @property
+    def exptime(self) -> int:
+        return self._exptime
+
+    @exptime.setter
+    def exptime(self, t: int) -> None:
+        if self._exptime is None:
+            self._exporig = t
+        self._exptime = t
 
     def copy(self) -> PlanEntry:
         """Create a copy of this class"""
@@ -89,12 +101,6 @@ class PlanEntry:
     @property
     def exposure(self) -> int:  # (),excludesaa=False):
         self.insaa = 0
-
-        # if self.saa is not False:
-        #     for saatime in np.arange(self.begin + self.slewtime, self.end, 1):
-        #         if self.saa.insaa(saatime):
-        #             self.insaa += 1
-
         return int(
             self.end - self.begin - self.slewtime - self.insaa
         )  # always an integer number of seconds
@@ -144,29 +150,10 @@ class PlanEntry:
                 return window
         return False
 
-    def slew_ra_dec(self, utime: float) -> tuple[float, float]:
-        """Return the RA/Dec of Spacecraft after t seconds into a slew. Assumes linear rate of slew."""
-        t = utime - self.begin
-        ras = roll_over_angle(self.slewpath[0])
-
-        ra = np.interp(t, self.slewsecs, ras) % 360
-        dec = np.interp(t, self.slewsecs, self.slewpath[1])
-        return ra, dec
-
-    def in_slew(self, utime: float) -> bool:
-        """Are we slewing right now?"""
-        if utime >= self.begin and utime < self.begin + self.slewtime:
-            return True
-        else:
-            return False
-
     def ra_dec(self, utime: float) -> tuple[float, float] | list[int]:
         """Return Spacecraft RA/Dec for any time during the current PPT"""
         if utime >= self.begin and utime <= self.end:
-            if self.in_slew(utime):
-                return self.slew_ra_dec(utime)
-            else:
-                return self.ra, self.dec
+            return self.ra, self.dec
         else:
             return [-1, -1]
 

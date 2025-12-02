@@ -24,7 +24,7 @@ class Pointing(PlanEntry):
         obsid: int = 0,
         name: str = "FakeTarget",
         merit: float = 100.0,
-        exptime: int | None = None,
+        exptime: int = 1000,
         ss_min: int = 300,
         ss_max: int = 86400,
     ):
@@ -32,7 +32,7 @@ class Pointing(PlanEntry):
         if config is None:
             raise ValueError("Config must be provided to Pointing")
 
-        PlanEntry.__init__(self, config=config)
+        PlanEntry.__init__(self, config=config, exptime=exptime)
         assert config.constraint is not None, "Constraint not properly set in Pointing"
         self.done = False
         self.obstype = "AT"
@@ -48,8 +48,6 @@ class Pointing(PlanEntry):
         # recomputed each scheduling iteration by ``Queue.meritsort``.
         self.fom = merit
         self.merit = merit
-        self._exptime: int | None = exptime
-        self._exporig: int | None = exptime
         self._done = False
         # Snapshot min/max size
         self.ss_min = ss_min  # seconds
@@ -57,7 +55,8 @@ class Pointing(PlanEntry):
 
     def in_sun(self, utime: float) -> bool:
         """Is this target in Sun constraint?"""
-        return self.config.constraint.in_sun(self.ra, self.dec, utime)
+        in_sun = self.config.constraint.in_sun(self.ra, self.dec, utime)
+        return in_sun
 
     def in_earth(self, utime: float) -> bool:
         """Is this target in Earth constraint?"""
@@ -89,16 +88,6 @@ class Pointing(PlanEntry):
 
     def __str__(self) -> str:
         return f"{unixtime2date(self.begin)} {self.name} ({self.targetid}) RA={self.ra:.4f}, Dec={self.dec:4f}, Roll={self.roll:.1f}, Merit={self.merit}"
-
-    @property
-    def exptime(self) -> int | None:
-        return self._exptime
-
-    @exptime.setter
-    def exptime(self, t: int) -> None:
-        if self._exptime is None:
-            self._exporig = t
-        self._exptime = t
 
     @property
     def done(self) -> bool:
