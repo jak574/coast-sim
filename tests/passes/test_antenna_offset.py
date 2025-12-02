@@ -85,7 +85,7 @@ class TestPassWithAntennaOffset:
         constraint.ephem = ephem
         return constraint
 
-    def test_pass_with_nadir_antenna_offset(self, constraint, ephem):
+    def test_pass_with_nadir_antenna_offset(self, mock_config, constraint, ephem):
         """Test Pass with nadir-pointing antenna (most common case)."""
         # Create nadir-pointing antenna (0, 0 = default, points away from telescope)
         comms = CommunicationsSystem(
@@ -100,11 +100,12 @@ class TestPassWithAntennaOffset:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+        # Inject our local constraint and communications into the shared mock config
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus.communications = comms
         gs_pass = Pass(
-            constraint=constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="SGS",
             begin=begin.timestamp(),
             length=480.0,
@@ -119,7 +120,7 @@ class TestPassWithAntennaOffset:
         assert np.isclose(gs_pass.gsstartra, 45.0, atol=1e-6)
         assert np.isclose(gs_pass.gsstartdec, 25.0, atol=1e-6)
 
-    def test_pass_with_offset_antenna(self, constraint, ephem):
+    def test_pass_with_offset_antenna(self, mock_config, constraint, ephem):
         """Test Pass with offset fixed antenna."""
         # Create antenna pointing 45 degrees in azimuth and elevation
         comms = CommunicationsSystem(
@@ -136,11 +137,11 @@ class TestPassWithAntennaOffset:
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
         original_ra, original_dec = 45.0, 25.0
 
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus.communications = comms
         gs_pass = Pass(
-            constraint=constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="SGS",
             begin=begin.timestamp(),
             length=480.0,
@@ -164,7 +165,7 @@ class TestPassWithAntennaOffset:
         assert np.isclose(gs_pass.gsstartra, original_ra, atol=1e-6)
         assert np.isclose(gs_pass.gsstartdec, original_dec, atol=1e-6)
 
-    def test_pass_with_omni_antenna_no_offset(self, constraint, ephem):
+    def test_pass_with_omni_antenna_no_offset(self, mock_config, constraint, ephem):
         """Test Pass with omni antenna has no pointing offset."""
         # Omni antenna should not apply any offset
         comms = CommunicationsSystem(
@@ -177,11 +178,11 @@ class TestPassWithAntennaOffset:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus.communications = comms
         gs_pass = Pass(
-            constraint=constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="SGS",
             begin=begin.timestamp(),
             length=480.0,
@@ -196,7 +197,7 @@ class TestPassWithAntennaOffset:
         assert np.isclose(gs_pass.gsstartra, 45.0, atol=1e-6)
         assert np.isclose(gs_pass.gsstartdec, 25.0, atol=1e-6)
 
-    def test_pass_with_gimbaled_antenna_no_offset(self, constraint, ephem):
+    def test_pass_with_gimbaled_antenna_no_offset(self, mock_config, constraint, ephem):
         """Test Pass with gimbaled antenna has no pointing offset."""
         # Gimbaled antenna should not apply offset (can point where needed)
         comms = CommunicationsSystem(
@@ -210,11 +211,11 @@ class TestPassWithAntennaOffset:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus.communications = comms
         gs_pass = Pass(
-            constraint=constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="SGS",
             begin=begin.timestamp(),
             length=480.0,
@@ -229,7 +230,7 @@ class TestPassWithAntennaOffset:
         assert np.isclose(gs_pass.gsstartra, 45.0, atol=1e-6)
         assert np.isclose(gs_pass.gsstartdec, 25.0, atol=1e-6)
 
-    def test_pass_pointing_profile_offset(self, constraint, ephem):
+    def test_pass_pointing_profile_offset(self, mock_config, constraint, ephem):
         """Test that full pointing profile is offset for fixed antenna."""
         comms = CommunicationsSystem(
             name="Offset Antenna",
@@ -243,11 +244,11 @@ class TestPassWithAntennaOffset:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus.communications = comms
         gs_pass = Pass(
-            constraint=constraint,
+            config=mock_config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="SGS",
             begin=begin.timestamp(),
             length=480.0,

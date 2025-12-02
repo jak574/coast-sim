@@ -184,7 +184,8 @@ class TestDetermineMode:
 
         constraint = Constraint(ephem=None)
         constraint.ephem = mock_ephem
-        acs = ACS(constraint=constraint, config=mock_config)
+        mock_config.constraint = constraint
+        acs = ACS(config=mock_config)
 
         mock_slew = Mock()
         mock_slew.is_slewing = Mock(return_value=True)
@@ -199,7 +200,8 @@ class TestDetermineMode:
 
         constraint = Constraint(ephem=None)
         constraint.ephem = mock_ephem
-        acs = ACS(constraint=constraint, config=mock_config)
+        mock_config.constraint = constraint
+        acs = ACS(config=mock_config)
 
         mock_pass = Mock(spec=Pass)
         mock_pass.in_pass = Mock(return_value=True)
@@ -213,7 +215,8 @@ class TestDetermineMode:
 
         constraint = Constraint(ephem=None)
         constraint.ephem = mock_ephem
-        acs = ACS(constraint=constraint, config=mock_config)
+        mock_config.constraint = constraint
+        acs = ACS(config=mock_config)
 
         acs.current_slew = None
         acs.saa = Mock()
@@ -227,8 +230,8 @@ class TestDetermineMode:
 
         constraint = Mock(spec=Constraint)
         constraint.ephem = mock_ephem
-
-        acs = ACS(constraint=constraint, config=mock_config)
+        mock_config.constraint = constraint
+        acs = ACS(config=mock_config)
         monkeypatch.setattr(acs.constraint, "in_eclipse", lambda ra, dec, time: False)
 
         charging_slew = Mock()
@@ -247,7 +250,8 @@ class TestDetermineMode:
 
         constraint = Constraint(ephem=None)
         constraint.ephem = mock_ephem
-        acs = ACS(constraint=constraint, config=mock_config)
+        mock_config.constraint = constraint
+        acs = ACS(config=mock_config)
 
         acs.current_slew = None
         acs.saa = None

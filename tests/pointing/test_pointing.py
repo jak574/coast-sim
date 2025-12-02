@@ -23,29 +23,33 @@ class TestPointingInitialization:
 class TestPointingVisibility:
     """Test visibility-related methods on Pointing."""
 
-    def test_in_sun(self, dummy_constraint, acs_config):
-        tr = Pointing(constraint=dummy_constraint, acs_config=acs_config)
+    def test_in_sun(self, dummy_constraint, mock_config):
+        mock_config.constraint = dummy_constraint
+        tr = Pointing(config=mock_config)
         # ra/dec values passed through to the constraint; methods just return the stubbed values
         tr.ra = 12.34
         tr.dec = -21.0
         assert tr.in_sun(12345)
 
-    def test_in_earth(self, dummy_constraint, acs_config):
-        tr = Pointing(constraint=dummy_constraint, acs_config=acs_config)
+    def test_in_earth(self, dummy_constraint, mock_config):
+        mock_config.constraint = dummy_constraint
+        tr = Pointing(config=mock_config)
         # ra/dec values passed through to the constraint; methods just return the stubbed values
         tr.ra = 12.34
         tr.dec = -21.0
         assert tr.in_earth(12345)
 
-    def test_in_moon_is_false(self, dummy_constraint, acs_config):
-        tr = Pointing(constraint=dummy_constraint, acs_config=acs_config)
+    def test_in_moon_is_false(self, dummy_constraint, mock_config):
+        mock_config.constraint = dummy_constraint
+        tr = Pointing(config=mock_config)
         # ra/dec values passed through to the constraint; methods just return the stubbed values
         tr.ra = 12.34
         tr.dec = -21.0
         assert tr.in_moon(12345) is False
 
-    def test_in_panel(self, dummy_constraint, acs_config):
-        tr = Pointing(constraint=dummy_constraint, acs_config=acs_config)
+    def test_in_panel(self, dummy_constraint, mock_config):
+        mock_config.constraint = dummy_constraint
+        tr = Pointing(config=mock_config)
         # ra/dec values passed through to the constraint; methods just return the stubbed values
         tr.ra = 12.34
         tr.dec = -21.0

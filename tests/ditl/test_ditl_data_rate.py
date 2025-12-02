@@ -6,10 +6,17 @@ import pytest
 from rust_ephem import TLEEphemeris
 
 from conops.config import (
+    AttitudeControlSystem,
     BandCapability,
+    Battery,
     CommunicationsSystem,
+    Config,
     Constraint,
     GroundStation,
+    GroundStationRegistry,
+    Payload,
+    SolarPanelSet,
+    SpacecraftBus,
 )
 from conops.simulation import Pass
 
@@ -37,7 +44,12 @@ class MockDITL:
         gs_bands = set(station.supported_bands()) if station.bands else set()
 
         # If no spacecraft comms config, fall back to GS overall capability
-        if current_pass.comms_config is None:
+        comms_config = (
+            getattr(current_pass.config.spacecraft_bus, "communications", None)
+            if hasattr(current_pass, "config")
+            else getattr(current_pass, "comms_config", None)
+        )
+        if comms_config is None:
             return station.get_overall_max_downlink()
 
         if not gs_bands:
@@ -47,7 +59,7 @@ class MockDITL:
         best = 0.0
         for band in gs_bands:
             gs_rate = station.get_downlink_rate(band) or 0.0
-            sc_rate = current_pass.comms_config.get_downlink_rate(band) or 0.0
+            sc_rate = comms_config.get_downlink_rate(band) or 0.0
             if gs_rate > 0.0 and sc_rate > 0.0:
                 eff = min(gs_rate, sc_rate)
                 if eff > best:
@@ -98,11 +110,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -126,11 +147,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=None
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=None,  # No comms config
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -159,11 +189,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -192,11 +231,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -228,11 +276,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -269,11 +326,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -303,11 +369,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,
@@ -338,11 +413,20 @@ class TestEffectiveDataRate:
         )
 
         begin = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
-        pass_obj = Pass(
+        spacecraft_bus = SpacecraftBus(
+            attitude_control=AttitudeControlSystem(), communications=comms
+        )
+        config = Config(
+            spacecraft_bus=spacecraft_bus,
+            solar_panel=SolarPanelSet(panels=[]),
+            payload=Payload(instruments=[]),
+            battery=Battery(capacity_wh=1000, max_depth_of_discharge=0.8),
             constraint=constraint,
+            ground_stations=GroundStationRegistry.default(),
+        )
+        pass_obj = Pass(
+            config=config,
             ephem=ephem,
-            acs_config=None,
-            comms_config=comms,
             station="TEST",
             begin=begin.timestamp(),
             length=480.0,

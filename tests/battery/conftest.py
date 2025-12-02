@@ -7,11 +7,18 @@ import pytest
 
 from conops import (
     Battery,
+    Config,
     Constraint,
     EmergencyCharging,
     QueueDITL,
     SolarPanel,
     SolarPanelSet,
+)
+from conops.config import (
+    AttitudeControlSystem,
+    GroundStationRegistry,
+    Payload,
+    SpacecraftBus,
 )
 
 
@@ -68,26 +75,41 @@ def mock_acs_config():
 
 
 @pytest.fixture
-def emergency_charging(mock_constraint, mock_solar_panel, mock_acs_config):
+def emergency_charging(mock_config):
     """Create an EmergencyCharging instance."""
     return EmergencyCharging(
-        constraint=mock_constraint,
-        solar_panel=mock_solar_panel,
-        acs_config=mock_acs_config,
+        config=mock_config,
         starting_obsid=999000,
     )
 
 
 @pytest.fixture
-def mock_config():
+def mock_config(mock_ephem):
     """Create a mock config with required components."""
-    config = Mock()
-    config.constraint = Mock(spec=Constraint)
-    config.constraint.inoccult = Mock(return_value=False)
-    config.constraint.ephem = Mock()  # Add ephem for Pointing initialization
-    # Add panel_constraint with solar_panel for EmergencyCharging initialization
-    config.constraint.panel_constraint = Mock()
-    config.constraint.panel_constraint.solar_panel = Mock(spec=SolarPanel)
+    # Create minimal required components
+    spacecraft_bus = SpacecraftBus(
+        attitude_control=AttitudeControlSystem(),
+        communications=None,  # Will be set in tests that need it
+    )
+
+    # Create minimal payload, battery, solar_panel
+    payload = Payload(instruments=[])
+    battery = Battery(capacity_wh=1000, max_depth_of_discharge=0.8)
+    solar_panel = SolarPanelSet(panels=[SolarPanel(sidemount=False)])
+
+    constraint = Mock(spec=Constraint)
+    constraint.ephem = mock_ephem
+    constraint.inoccult = Mock(return_value=False)
+    constraint.in_eclipse = Mock(return_value=False)
+
+    config = Config(
+        spacecraft_bus=spacecraft_bus,
+        solar_panel=solar_panel,
+        payload=payload,
+        battery=battery,
+        constraint=constraint,
+        ground_stations=GroundStationRegistry.default(),
+    )
     return config
 
 

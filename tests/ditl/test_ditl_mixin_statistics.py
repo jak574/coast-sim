@@ -16,7 +16,6 @@ from conops import (
     SolarPanelSet,
     SpacecraftBus,
 )
-from conops.config import AttitudeControlSystem
 
 
 class DummyEphemeris:
@@ -132,9 +131,7 @@ class TestDITLPrintStatistics:
         ditl.dec = [45.0]
 
         # Add a mock queue
-        mock_constraint = Mock(spec=Constraint)
-        mock_acs_config = Mock(spec=AttitudeControlSystem)
-        ditl.queue = Queue(constraint=mock_constraint, acs_config=mock_acs_config)
+        ditl.queue = Queue(config=self.config)
 
         ditl.print_statistics()
         return capsys.readouterr().out

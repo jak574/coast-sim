@@ -36,15 +36,15 @@ class TestACSInitialization:
 
     def test_acs_requires_constraint(self, mock_config):
         """Test that ACS requires a constraint."""
+        mock_config.constraint = None
         with pytest.raises(AssertionError, match="Constraint must be provided"):
-            ACS(constraint=None, config=mock_config)
+            ACS(config=mock_config)
 
     def test_acs_requires_constraint_with_ephem(self, mock_config):
         """Test that ACS requires constraint with ephemeris."""
-        constraint = Mock()
-        constraint.ephem = None
+        mock_config.constraint.ephem = None
         with pytest.raises(AssertionError, match="Ephemeris must be set"):
-            ACS(constraint=constraint, config=mock_config)
+            ACS(config=mock_config)
 
 
 class TestACSAttributes:

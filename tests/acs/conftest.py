@@ -39,9 +39,10 @@ def mock_constraint(mock_ephem):
 
 
 @pytest.fixture
-def mock_config(mock_ephem):
+def mock_config(mock_ephem, mock_constraint):
     """Create a mock config."""
     config = Mock()
+    config.constraint = mock_constraint
     config.ground_stations = Mock()
 
     # Create a mock solar panel with the optimal_charging_pointing method
@@ -74,7 +75,7 @@ def acs(mock_constraint, mock_config):
         mock_pt.next_pass = Mock(return_value=None)
         mock_pt.__iter__ = Mock(return_value=iter([]))
         mock_passtimes.return_value = mock_pt
-        acs_instance = ACS(constraint=mock_constraint, config=mock_config)
+        acs_instance = ACS(config=mock_config)
         acs_instance.passrequests = mock_pt
         return acs_instance
 

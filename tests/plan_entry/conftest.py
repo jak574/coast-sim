@@ -78,6 +78,16 @@ def mock_acs():
 
 
 @pytest.fixture
-def plan_entry(mock_constraint, mock_acs):
+def mock_config(mock_constraint, mock_acs):
+    """Fixture for mock config."""
+    config = Mock()
+    config.constraint = mock_constraint
+    config.spacecraft_bus = Mock()
+    config.spacecraft_bus.attitude_control = mock_acs
+    return config
+
+
+@pytest.fixture
+def plan_entry(mock_config):
     """Fixture for PlanEntry with mocks."""
-    return PlanEntry(constraint=mock_constraint, acs_config=mock_acs)
+    return PlanEntry(config=mock_config)
