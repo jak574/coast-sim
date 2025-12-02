@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 from ..common import unixtime2date
 from ..common.vector import angular_separation
-from ..config import AttitudeControlSystem, Constraint, SolarPanelSet
+from ..config import AttitudeControlSystem, Config, Constraint, SolarPanelSet
 from ..targets import Pointing
 
 
@@ -49,9 +49,10 @@ class EmergencyCharging:
 
     def __init__(
         self,
-        constraint: Constraint,
-        solar_panel: SolarPanelSet,
-        acs_config: AttitudeControlSystem,
+        config: Config | None = None,
+        constraint: Constraint | None = None,
+        solar_panel: SolarPanelSet | None = None,
+        acs_config: AttitudeControlSystem | None = None,
         starting_obsid: int = 999000,
         max_slew_deg: float | None = None,
         sidemount: bool = False,
@@ -61,15 +62,26 @@ class EmergencyCharging:
         Initialize emergency charging manager.
 
         Args:
-            constraint: Constraint object for validating pointings
-            solar_panel: SolarPanel object for calculating optimal pointings
-            acs_config: AttitudeControlSystem configuration for slew calculations
+            config: Config object containing all spacecraft configuration
+            constraint: Constraint object for validating pointings (legacy)
+            solar_panel: SolarPanel object for calculating optimal pointings (legacy)
+            acs_config: AttitudeControlSystem configuration for slew calculations (legacy)
             starting_obsid: Starting obsid for charging observations (default: 999000)
             max_slew_deg: Maximum slew distance in degrees from current pointing (default: None = no limit)
         """
-        self.constraint = constraint
-        self.solar_panel = solar_panel
-        self.acs_config = acs_config
+        # Handle both old and new parameter styles for backward compatibility
+        if config is not None:
+            self.config = config
+            self.constraint = config.constraint
+            self.solar_panel = config.solar_panel
+            self.acs_config = config.spacecraft_bus.attitude_control
+        else:
+            # Legacy parameters
+            self.config = None
+            self.constraint = constraint
+            self.solar_panel = solar_panel
+            self.acs_config = acs_config
+
         self.next_charging_obsid = starting_obsid
         self.current_charging_ppt: Pointing | None = None
         self.max_slew_deg = max_slew_deg
@@ -458,15 +470,25 @@ class EmergencyCharging:
         Returns:
             Configured Pointing object
         """
-        charging_ppt = Pointing(
-            constraint=self.constraint,
-            acs_config=self.acs_config,
-            ra=ra,
-            dec=dec,
-            name=f"EMERGENCY_CHARGE_{self.next_charging_obsid}",
-            obsid=self.next_charging_obsid,
-            exptime=86400,
-        )
+        if self.config is not None:
+            charging_ppt = Pointing(
+                config=self.config,
+                ra=ra,
+                dec=dec,
+                name=f"EMERGENCY_CHARGE_{self.next_charging_obsid}",
+                obsid=self.next_charging_obsid,
+                exptime=86400,
+            )
+        else:
+            charging_ppt = Pointing(
+                constraint=self.constraint,
+                acs_config=self.acs_config,
+                ra=ra,
+                dec=dec,
+                name=f"EMERGENCY_CHARGE_{self.next_charging_obsid}",
+                obsid=self.next_charging_obsid,
+                exptime=86400,
+            )
         self.next_charging_obsid += 1
         charging_ppt.begin = int(utime)
         charging_ppt.end = int(utime + 86400)  # Set far end time

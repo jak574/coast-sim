@@ -103,10 +103,9 @@ class QueueDITL(DITLMixin, DITLStats):
             self.queue = queue
         else:
             self.queue = Queue(
+                config=self.config,
                 log=self.log,
                 ephem=self.ephem,
-                constraint=self.constraint,
-                acs_config=self.config.spacecraft_bus.attitude_control,
             )
 
         # Wire log into ACS so it can log events (if ACS exists)
@@ -116,9 +115,7 @@ class QueueDITL(DITLMixin, DITLStats):
         # Initialize emergency charging manager (will be fully set up after ACS is available)
         self.charging_ppt = None
         self.emergency_charging = EmergencyCharging(
-            constraint=self.constraint,
-            solar_panel=self.config.solar_panel,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=self.config,
             starting_obsid=999000,
             log=self.log,
         )
@@ -464,8 +461,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
                 # Create slew object for the pass
                 slew = Slew(
-                    constraint=self.constraint,
-                    acs_config=self.config.spacecraft_bus.attitude_control,
+                    config=self.config,
                 )
 
                 slew.startra = ra
@@ -628,8 +624,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
             # Create and configure a Slew object
             slew = Slew(
-                constraint=self.constraint,
-                acs_config=self.config.spacecraft_bus.attitude_control,
+                config=self.config,
             )
             slew.ephem = self.acs.ephem
             slew.slewrequest = utime

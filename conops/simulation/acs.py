@@ -73,8 +73,7 @@ class ACS:
         # happen in our simulation, but defines a realistic boundary
         # condition for our simulation.
         self.last_slew = Slew(
-            constraint=self.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=config,
         )
         self.last_slew.endra = self.ra
         self.last_slew.enddec = self.dec
@@ -300,8 +299,7 @@ class ACS:
         """
         # Create slew object
         slew = Slew(
-            constraint=self.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=self.config,
         )
         slew.ephem = self.ephem
         slew.slewrequest = utime
@@ -353,8 +351,7 @@ class ACS:
     def _create_target_request(self, slew: Slew, utime: float) -> Pointing:
         """Create and configure a target observation request for visibility checking."""
         target = Pointing(
-            constraint=self.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
+            config=self.config,
             ra=slew.endra,
             dec=slew.enddec,
             obsid=slew.obsid,

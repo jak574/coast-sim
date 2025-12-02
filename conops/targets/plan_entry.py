@@ -4,7 +4,7 @@ import numpy as np
 import rust_ephem
 
 from ..common import givename, roll_over_angle, unixtime2date
-from ..config import AttitudeControlSystem, Constraint
+from ..config import AttitudeControlSystem, Config, Constraint
 from ..simulation.saa import SAA
 
 
@@ -24,14 +24,22 @@ class PlanEntry:
 
     def __init__(
         self,
+        config: Config | None = None,
         constraint: Constraint | None = None,
         acs_config: AttitudeControlSystem | None = None,
     ) -> None:
-        self.constraint = constraint
+        # Handle both old and new parameter styles for backward compatibility
+        if config is not None:
+            self.constraint = config.constraint
+            self.acs_config = config.spacecraft_bus.attitude_control
+        else:
+            # Legacy parameters
+            self.constraint = constraint
+            self.acs_config = acs_config
+
         assert self.constraint is not None, "Constraint must be set for Pass class"
         self.ephem = self.constraint.ephem
         assert self.ephem is not None, "Ephemeris must be set for Pass class"
-        self.acs_config = acs_config
         assert self.acs_config is not None, "ACS config must be set for PlanEntry class"
         self.name = ""
         # self.targetid = 0

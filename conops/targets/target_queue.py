@@ -4,7 +4,7 @@ import numpy as np
 import rust_ephem
 
 from ..common import unixtime2date
-from ..config import AttitudeControlSystem, Constraint
+from ..config import AttitudeControlSystem, Config, Constraint
 from ..ditl.ditl_log import DITLLog
 from . import Pointing
 
@@ -19,21 +19,32 @@ class Queue:
     log: DITLLog | None
     constraint: Constraint | None
     acs_config: AttitudeControlSystem | None
+    config: Config | None
 
     def __init__(
         self,
+        config: Config | None = None,
         ephem: rust_ephem.Ephemeris | None = None,
         log: DITLLog | None = None,
         constraint: Constraint | None = None,
         acs_config: AttitudeControlSystem | None = None,
     ):
+        # Handle both old and new parameter styles for backward compatibility
+        if config is not None:
+            self.config = config
+            self.constraint = config.constraint
+            self.acs_config = config.spacecraft_bus.attitude_control
+        else:
+            # Legacy parameters
+            self.config = None
+            self.constraint = constraint
+            self.acs_config = acs_config
+
         self.targets = []
         self.ephem = ephem
         self.utime = None
         self.gs = None
         self.log = log
-        self.constraint = constraint
-        self.acs_config = acs_config
 
     def __getitem__(self, number: int) -> Pointing:
         return self.targets[number]
@@ -69,18 +80,31 @@ class Queue:
             ss_min: Minimum snapshot size in seconds
             ss_max: Maximum snapshot size in seconds
         """
-        pointing = Pointing(
-            constraint=self.constraint,
-            acs_config=self.acs_config,
-            ra=ra,
-            dec=dec,
-            obsid=obsid,
-            name=name,
-            merit=merit,
-            exptime=exptime,
-            ss_min=ss_min,
-            ss_max=ss_max,
-        )
+        if self.config is not None:
+            pointing = Pointing(
+                config=self.config,
+                ra=ra,
+                dec=dec,
+                obsid=obsid,
+                name=name,
+                merit=merit,
+                exptime=exptime,
+                ss_min=ss_min,
+                ss_max=ss_max,
+            )
+        else:
+            pointing = Pointing(
+                constraint=self.constraint,
+                acs_config=self.acs_config,
+                ra=ra,
+                dec=dec,
+                obsid=obsid,
+                name=name,
+                merit=merit,
+                exptime=exptime,
+                ss_min=ss_min,
+                ss_max=ss_max,
+            )
         pointing.visibility()
         self.targets.append(pointing)
 
