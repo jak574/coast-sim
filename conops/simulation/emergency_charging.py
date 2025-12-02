@@ -60,15 +60,13 @@ class EmergencyCharging:
 
         Args:
             config: Config object containing all spacecraft configuration
-            constraint: Constraint object for validating pointings (legacy)
-            solar_panel: SolarPanel object for calculating optimal pointings (legacy)
-            acs_config: AttitudeControlSystem configuration for slew calculations (legacy)
+
             starting_obsid: Starting obsid for charging observations (default: 999000)
             max_slew_deg: Maximum slew distance in degrees from current pointing (default: None = no limit)
         """
         # Handle both old and new parameter styles for backward compatibility
 
-        assert config is not None, "Config must be set for Pass class"
+        assert config is not None, "Config must be set for EmergencyCharging"
         self.config = config
         self.constraint = config.constraint
         self.solar_panel = config.solar_panel
@@ -462,24 +460,14 @@ class EmergencyCharging:
         Returns:
             Configured Pointing object
         """
-        if self.config is not None:
-            charging_ppt = Pointing(
-                config=self.config,
-                ra=ra,
-                dec=dec,
-                name=f"EMERGENCY_CHARGE_{self.next_charging_obsid}",
-                obsid=self.next_charging_obsid,
-                exptime=86400,
-            )
-        else:
-            charging_ppt = Pointing(
-                config=self.config,
-                ra=ra,
-                dec=dec,
-                name=f"EMERGENCY_CHARGE_{self.next_charging_obsid}",
-                obsid=self.next_charging_obsid,
-                exptime=86400,
-            )
+        charging_ppt = Pointing(
+            config=self.config,
+            ra=ra,
+            dec=dec,
+            name=f"EMERGENCY_CHARGE_{self.next_charging_obsid}",
+            obsid=self.next_charging_obsid,
+            exptime=86400,
+        )
         self.next_charging_obsid += 1
         charging_ppt.begin = int(utime)
         charging_ppt.end = int(utime + 86400)  # Set far end time
