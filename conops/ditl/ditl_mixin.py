@@ -173,7 +173,7 @@ class DITLMixin:
             Effective data rate in Mbps, or None if no compatible bands/rates
         """
         # If pass has no comms config, use GS overall maximum across bands
-        if current_pass.comms_config is None:
+        if current_pass.config.spacecraft_bus.communications is None:
             return station.get_overall_max_downlink()
 
         # If GS has no per-band capabilities, no defined rate
@@ -186,7 +186,12 @@ class DITLMixin:
         best_effective = 0.0
         for band in gs_bands:
             gs_rate = station.get_downlink_rate(band) or 0.0
-            sc_rate = current_pass.comms_config.get_downlink_rate(band) or 0.0
+            sc_rate = (
+                current_pass.config.spacecraft_bus.communications.get_downlink_rate(
+                    band
+                )
+                or 0.0
+            )
             if gs_rate > 0.0 and sc_rate > 0.0:
                 effective = min(gs_rate, sc_rate)
                 if effective > best_effective:
