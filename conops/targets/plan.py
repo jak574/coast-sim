@@ -50,7 +50,7 @@ class Plan:
                 return ppt
         return None
 
-    def extend(self, ppt: list) -> None:
+    def extend(self, ppt: list[PlanEntry]) -> None:
         self.entries.extend(ppt)
 
     def append(self, ppt: PlanEntry) -> None:

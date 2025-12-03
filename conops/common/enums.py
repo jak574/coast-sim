@@ -29,3 +29,21 @@ class ACSCommandType(Enum):
     START_BATTERY_CHARGE = auto()
     END_BATTERY_CHARGE = auto()
     ENTER_SAFE_MODE = auto()
+
+
+class AntennaType(str, Enum):
+    """Antenna mounting and pointing configuration."""
+
+    OMNI = "omni"  # Omnidirectional antenna
+    FIXED = "fixed"  # Fixed pointing antenna
+    GIMBALED = "gimbaled"  # Gimbaled (steerable) antenna
+
+
+class Polarization(str, Enum):
+    """Antenna polarization type."""
+
+    LINEAR_HORIZONTAL = "linear_horizontal"
+    LINEAR_VERTICAL = "linear_vertical"
+    CIRCULAR_RIGHT = "circular_right"  # RHCP
+    CIRCULAR_LEFT = "circular_left"  # LHCP
+    DUAL = "dual"  # Supports multiple polarizations

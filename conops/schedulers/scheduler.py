@@ -68,8 +68,8 @@ class DumbScheduler:
         while ephem_utime[i] < end_limit:
             found = False
             selected_target: PlanEntry | None = None
-            selected_obslen = 0
-            selected_slewtime = 0
+            selected_obslen = 0.0
+            selected_slewtime = 0.0
 
             # Candidate targets (exptime > 0)
             candidates = [t for t in self.targlist if t.exptime > 0]
@@ -99,18 +99,22 @@ class DumbScheduler:
                 end_idx = self.ephem.index(dtutcfromtimestamp(obs_end)) + 1
 
                 # Evaluate constraints at each timestep in the observation window
-                utime_window = self.ephem.timestamp[begin_idx:end_idx]
-                in_occult = self.constraint.in_constraint(
-                    ra=task.ra,
-                    dec=task.dec,
-                    utime=utime_window,
-                )
+                time_window = self.ephem.timestamp[begin_idx:end_idx]
+                in_occult = [
+                    self.constraint.constraint.in_constraint(
+                        ephemeris=self.ephem,
+                        target_ra=task.ra,
+                        target_dec=task.dec,
+                        time=t,
+                    )
+                    for t in time_window
+                ]
 
                 # goodtime = 1 where constraints are satisfied (NOT in occult)
                 goodtime = np.bitwise_not(in_occult).astype(int).tolist()
 
                 # compute contiguous available observation length from start
-                obslen = 0
+                obslen = 0.0
                 for k in range(len(goodtime)):
                     if goodtime[k] == 1:
                         obslen += self.step_size
@@ -152,7 +156,7 @@ class DumbScheduler:
             ppt.ra = selected_target.ra
             ppt.dec = selected_target.dec
             ppt.begin = ephem_utime[i]  # numeric start time
-            ppt.slewtime = selected_slewtime
+            ppt.slewtime = int(selected_slewtime)
 
             # End time as begin + selected available window length (obslen includes slewtime)
             endtime = ppt.begin + selected_obslen
@@ -165,7 +169,7 @@ class DumbScheduler:
             # exposure is time after slew and before end
             exposure_time = int(max(0, endtime - ppt.begin - ppt.slewtime))
             # Do not exceed the target's remaining requested exposure
-            exposure_time = min(exposure_time, selected_target.exptime)  # type: ignore[attr-defined]
+            exposure_time = min(exposure_time, selected_target.exptime)
             # assign to the PlanEntry if the attribute exists; fallback to attribute assignment
             try:
                 ppt.exposure = exposure_time
@@ -173,7 +177,7 @@ class DumbScheduler:
                 setattr(ppt, "exposure", exposure_time)
 
             # Update the target's remaining requested exposure
-            selected_target.exptime -= exposure_time  # type: ignore[attr-defined]
+            selected_target.exptime -= exposure_time
 
             ppt.obsid = selected_target.targetid
             assert self.saa is not None

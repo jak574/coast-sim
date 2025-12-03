@@ -24,7 +24,7 @@ class DITLLogStore(BaseModel):
     db_path: Path = Field(default_factory=lambda: Path("ditl_logs.sqlite"))
     _conn: sqlite3.Connection = PrivateAttr()
 
-    def __init__(self, db_path: str | Path = "ditl_logs.sqlite") -> None:  # type: ignore[override]
+    def __init__(self, db_path: str | Path = "ditl_logs.sqlite") -> None:
         # Allow convenient construction with str | Path while remaining a Pydantic model
         super().__init__(db_path=Path(db_path))
         self._conn = sqlite3.connect(self.db_path)

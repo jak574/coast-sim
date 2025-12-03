@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, model_validator
 
 from ..common import ChargeState
@@ -23,14 +25,14 @@ class Battery(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def set_defaults(cls, values: dict) -> dict:
+    def set_defaults(cls, values: dict[str, Any]) -> dict[str, Any]:
         """Set derived default values"""
         if "watthour" not in values:
             values["watthour"] = values.get("amphour", 20) * values.get("voltage", 28)
 
         return values
 
-    def __init__(self, **data: dict) -> None:
+    def __init__(self, **data: dict[str, Any]) -> None:
         super().__init__(**data)
 
         self.charge_level = self.watthour  # Start fully charged

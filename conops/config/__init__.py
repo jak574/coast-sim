@@ -2,14 +2,13 @@ from .acs import AttitudeControlSystem
 from .battery import Battery
 from .communications import (
     AntennaPointing,
-    AntennaType,
     BandCapability,
     CommunicationsSystem,
-    Polarization,
 )
 from .config import MissionConfig
 from .constants import DAY_SECONDS, DTOR
 from .constraint import Constraint
+from .data_generator import DataGeneration
 from .fault_management import (
     FaultConstraint,
     FaultEvent,
@@ -18,7 +17,7 @@ from .fault_management import (
     FaultThreshold,
 )
 from .groundstation import GroundStation, GroundStationRegistry
-from .instrument import DataGeneration, Instrument, Payload
+from .instrument import Instrument, Payload
 from .observation_categories import ObservationCategories, ObservationCategory
 from .power import PowerDraw
 from .recorder import OnboardRecorder
@@ -29,7 +28,6 @@ from .visualization import VisualizationConfig
 
 __all__ = [
     "AntennaPointing",
-    "AntennaType",
     "AttitudeControlSystem",
     "BandCapability",
     "Battery",
@@ -50,7 +48,6 @@ __all__ = [
     "ObservationCategory",
     "OnboardRecorder",
     "Payload",
-    "Polarization",
     "PowerDraw",
     "SolarPanel",
     "SolarPanelSet",

@@ -1,27 +1,10 @@
 """Communications system configuration for spacecraft downlink and uplink."""
 
-from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
-class AntennaType(str, Enum):
-    """Antenna mounting and pointing configuration."""
-
-    OMNI = "omni"  # Omnidirectional antenna
-    FIXED = "fixed"  # Fixed pointing antenna
-    GIMBALED = "gimbaled"  # Gimbaled (steerable) antenna
-
-
-class Polarization(str, Enum):
-    """Antenna polarization type."""
-
-    LINEAR_HORIZONTAL = "linear_horizontal"
-    LINEAR_VERTICAL = "linear_vertical"
-    CIRCULAR_RIGHT = "circular_right"  # RHCP
-    CIRCULAR_LEFT = "circular_left"  # LHCP
-    DUAL = "dual"  # Supports multiple polarizations
+from ..common.enums import AntennaType, Polarization
 
 
 class BandCapability(BaseModel):
@@ -37,14 +20,14 @@ class BandCapability(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _apply_standard_band_defaults(cls, data: dict) -> dict:
+    def _apply_standard_band_defaults(cls, data: dict[str, Any]) -> dict[str, Any]:
         """Fill in standard per-band defaults when rates are not provided.
 
         Only applies when `uplink_rate_mbps` and/or `downlink_rate_mbps` are
         not passed in the input data. Custom-provided values are preserved.
         """
         if isinstance(data, dict):
-            band = data.get("band")
+            band: str | None = data.get("band")
             defaults = {
                 "S": {"uplink": 2.0, "downlink": 10.0},
                 "X": {"uplink": 10.0, "downlink": 150.0},

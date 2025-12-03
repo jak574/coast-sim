@@ -1,16 +1,16 @@
 import numpy as np
 import numpy.typing as npt
-from pyproj import Geod  # type: ignore[import-untyped]
+from pyproj import Geod
 
 
-def radec2vec(ra: float, dec: float) -> npt.NDArray:
+def radec2vec(ra: float, dec: float) -> npt.NDArray[np.float64]:
     """Convert RA/Dec angle (in radians) to a vector"""
 
     v1 = np.cos(dec) * np.cos(ra)
     v2 = np.cos(dec) * np.sin(ra)
     v3 = np.sin(dec)
 
-    return np.array([v1, v2, v3])
+    return np.array([v1, v2, v3], dtype=np.float64)
 
 
 def scbodyvector(
@@ -121,7 +121,9 @@ def great_circle(
     return ras.tolist(), decs.tolist()
 
 
-def roll_over_angle(angles: npt.NDArray | list[float]) -> npt.NDArray:
+def roll_over_angle(
+    angles: npt.NDArray[np.float64] | list[float],
+) -> npt.NDArray[np.float64]:
     """Make a list of angles that include a roll over (e.g. 359.9 - 0.1) into a smooth distribution"""
     outangles = list()
     last = -1.0
@@ -142,7 +144,7 @@ def roll_over_angle(angles: npt.NDArray | list[float]) -> npt.NDArray:
     return np.array(outangles)
 
 
-def vec2radec(v: npt.NDArray[np.float64]) -> npt.NDArray:
+def vec2radec(v: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Convert a vector to Ra/Dec (in radians).
 
     RA is always returned in [0, 2π).

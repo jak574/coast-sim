@@ -5,9 +5,9 @@ import rust_ephem
 from pydantic import BaseModel, Field
 
 from ..common import ics_date_conv, unixtime2date
+from ..common.enums import AntennaType
 from ..common.vector import radec2vec, rotvec, separation, vec2radec
 from ..config import Constraint, GroundStationRegistry, MissionConfig
-from ..config.communications import AntennaType
 from ..config.constants import DTOR
 
 

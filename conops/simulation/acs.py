@@ -161,7 +161,7 @@ class ACS:
             )
 
             # Dispatch to appropriate handler based on command type
-            handlers = {
+            handlers: dict[ACSCommandType, Any] = {
                 ACSCommandType.SLEW_TO_TARGET: lambda: self._handle_slew_command(
                     command, utime
                 ),
@@ -437,7 +437,7 @@ class ACS:
         4. Calculates current RA/Dec pointing
         """
         # Determine if the spacecraft is currently in eclipse
-        self.in_eclipse = self.constraint.in_eclipse(ra=0, dec=0, time=utime)  # type: ignore[assignment]
+        self.in_eclipse = self.constraint.in_eclipse(ra=0, dec=0, time=utime)
 
         # Process any commands scheduled for execution at or before current time
         self._process_commands(utime)
@@ -597,7 +597,7 @@ class ACS:
             self.ra, self.dec = self.current_pass.ra_dec(utime)  # type: ignore[assignment]
         # If we are actively slewing
         elif self.last_slew is not None:
-            self.ra, self.dec = self.last_slew.ra_dec(utime)  # type: ignore[assignment]
+            self.ra, self.dec = self.last_slew.ra_dec(utime)
         else:
             # If there's no slew or pass, maintain current pointing
             pass
@@ -627,7 +627,7 @@ class ACS:
             and self.current_slew.obstype == "SAFE"
             and self.current_slew.is_slewing(utime)
         ):
-            self.ra, self.dec = self.current_slew.ra_dec(utime)  # type: ignore[assignment]
+            self.ra, self.dec = self.current_slew.ra_dec(utime)
         else:
             # After slew completes or for continuous tracking, maintain optimal pointing
             self.ra = target_ra

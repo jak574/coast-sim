@@ -82,7 +82,7 @@ class Pointing(PlanEntry):
         try:
             visstarts = np.array(self.windows).transpose()[0]
             windex = np.where(visstarts - utime > 0)[0][0]
-            return visstarts[windex]
+            return float(visstarts[windex])
         except Exception:
             return False
 

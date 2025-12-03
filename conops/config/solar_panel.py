@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import numpy as np
+import numpy.typing as npt
 import rust_ephem
 from pydantic import BaseModel, Field
 
@@ -68,7 +69,7 @@ class SolarPanel(BaseModel):
         ephem: rust_ephem.Ephemeris,
         ra: float,
         dec: float,
-    ) -> float | np.ndarray:
+    ) -> float | npt.NDArray[np.float64]:
         """Calculate the fraction of sunlight on this solar panel.
 
         Args:
@@ -163,7 +164,7 @@ class SolarPanel(BaseModel):
 
         if scalar:
             return float(panel[0])
-        return panel
+        return np.array(panel)
 
 
 class SolarPanelSet(BaseModel):
