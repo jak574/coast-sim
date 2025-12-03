@@ -9,7 +9,7 @@ from conops import ACSMode, Pass, Pointing, Slew
 class TestAddSlew:
     """Test enqueue_command method."""
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     def test_enqueue_command_basic(self, mock_too, acs):
         """Test basic slew addition."""
         # Setup mock Pointing
@@ -23,7 +23,7 @@ class TestAddSlew:
         assert result is True
         assert len(acs.command_queue) == 1
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     def test_enqueue_command_different_obstype(self, mock_too, acs):
         """Test adding slew with different obstype."""
         mock_at = Mock(spec=Pointing)
@@ -39,7 +39,7 @@ class TestAddSlew:
 class TestAddSlewClass:
     """Test enqueue_command method."""
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_first_slew(self, mock_yearday, mock_too, acs):
         """Test adding first slew."""
@@ -73,7 +73,7 @@ class TestAddSlewClass:
         assert acs.last_slew is not None
         assert len(acs.command_queue) == 1
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_subsequent_slew(self, mock_yearday, mock_too, acs):
         """Test adding subsequent slew."""
@@ -112,7 +112,7 @@ class TestAddSlewClass:
         assert enqueued_slew.startra == 10.0
         assert enqueued_slew.startdec == 20.0
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_rejected_constraint(self, mock_yearday, mock_too, acs):
         """Test slew rejected due to constraint."""
@@ -140,7 +140,7 @@ class TestAddSlewClass:
         assert result is False
         assert len(acs.command_queue) == 0
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_delayed_for_visibility(self, mock_yearday, mock_too, acs):
         """Test slew delayed for visibility."""
@@ -169,7 +169,7 @@ class TestAddSlewClass:
         # The execution_time is set on the command queued
         assert acs.command_queue[-1].execution_time == 1514765000.0
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_during_existing_slew(self, mock_yearday, mock_too, acs):
         """Test adding slew during an existing slew."""
@@ -208,7 +208,7 @@ class TestAddSlewClass:
         assert result is True
         # Slew should be delayed until existing slew finishes
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_during_pass(self, mock_yearday, mock_too, acs):
         """Test adding slew during a pass updates last_ppt."""
@@ -241,7 +241,7 @@ class TestAddSlewClass:
         # Given current ACS design, enqueuing still occurs in PASS mode
         assert len(acs.command_queue) == 1
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_gsp_obstype(self, mock_yearday, mock_too, acs):
         """Test adding slew with GSP obstype."""
@@ -397,7 +397,7 @@ class TestPointing:
         mock_slew.at.in_panel = Mock(return_value=False)
 
         acs.last_slew = mock_slew
-        acs.constraint.inoccult = Mock(return_value=True)
+        acs.constraint.in_constraint = Mock(return_value=True)
 
         ra, dec, roll, obsid = acs.pointing(1514764800.0)
 
@@ -419,7 +419,7 @@ class TestPointing:
         mock_slew.at = None  # No at attribute
 
         acs.last_slew = mock_slew
-        acs.constraint.inoccult = Mock(return_value=False)
+        acs.constraint.in_constraint = Mock(return_value=False)
 
         ra, dec, roll, obsid = acs.pointing(1514764800.0)
 
@@ -535,7 +535,7 @@ class TestRequestPass:
 class TestAddSlewClassEdgeCases:
     """Test edge cases in enqueue_command."""
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_pass_object(self, mock_yearday, mock_too, acs):
         """Test adding a Pass object (not storing as last_ppt)."""
@@ -573,7 +573,7 @@ class TestAddSlewClassEdgeCases:
         # Pass objects should not be stored as last_ppt
         assert acs.last_ppt is False
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_slew_in_pass(self, mock_yearday, mock_too, acs):
         """Test adding Slew during pass mode stores it as last_ppt."""
@@ -607,7 +607,7 @@ class TestAddSlewClassEdgeCases:
         # Enqueuing during pass does not set last_ppt until slew start
         assert acs.last_ppt is False
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_non_ppt_rejection(self, mock_yearday, mock_too, acs):
         """Test that only PPT slews are rejected for constraints."""
@@ -636,7 +636,7 @@ class TestAddSlewClassEdgeCases:
         # GSP should succeed even without visibility
         assert result is True
 
-    @patch("conops.simulation.acs.Pointing")
+    @patch("conops.targets.Pointing")
     @patch("conops.unixtime2yearday")
     def test_enqueue_command_delayed_start_not_ppt(self, mock_yearday, mock_too, acs):
         """Test slew with delayed start for non-PPT obstype."""

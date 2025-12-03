@@ -76,5 +76,9 @@ def mock_solar_panel_canted():
 def mock_ephem_sidemount():
     ephem = Mock()
     ephem.index = Mock(return_value=0)
-    ephem.sunvec = [np.array([1000, 500, 800])]
+    # Mock the sun attribute to be subscriptable
+    sun_mock = Mock()
+    sun_mock.cartesian.xyz.to_value = Mock(return_value=np.array([1000, 500, 800]))
+    ephem.sun = Mock()
+    ephem.sun.__getitem__ = Mock(return_value=sun_mock)
     return ephem

@@ -38,6 +38,25 @@ def mock_ditl():
     ditl = Mock()
     ditl.config = config
 
+    # Add ephemeris mock for sky pointing tests
+    class MockEphem:
+        def __init__(self):
+            self.earth = []
+            self.earth_radius_deg = []
+            for _ in range(100):
+                mock_earth = Mock()
+                mock_earth.ra = Mock()
+                mock_earth.ra.deg = 0.0
+                mock_earth.dec = Mock()
+                mock_earth.dec.deg = 0.0
+                self.earth.append(mock_earth)
+                self.earth_radius_deg.append(1.0)
+
+        def index(self, dt):
+            return 0
+
+    ditl.ephem = MockEphem()
+
     # Add minimal telemetry data
     ditl.utime = [0, 3600, 7200, 10800, 14400]  # 5 time points: 0, 1, 2, 3, 4 hours
     ditl.ra = [0.0, 10.0, 20.0, 30.0, 40.0]
@@ -72,8 +91,26 @@ def mock_ditl():
 @pytest.fixture
 def mock_ditl_with_ephem(mock_ditl):
     """Create a mock DITL with ephemeris data for timeline plotting."""
+
     # Add ephemeris-related attributes needed for timeline plotting
-    mock_ditl.ephem = Mock()
+    # Create a mock ephem object that behaves like the real rust_ephem.Ephemeris
+    class MockEphem:
+        def __init__(self):
+            self.earth = []
+            self.earth_radius_deg = []
+            for _ in range(100):
+                mock_earth = Mock()
+                mock_earth.ra = Mock()
+                mock_earth.ra.deg = 0.0
+                mock_earth.dec = Mock()
+                mock_earth.dec.deg = 0.0
+                self.earth.append(mock_earth)
+                self.earth_radius_deg.append(1.0)
+
+        def index(self, dt):
+            return 0
+
+    mock_ditl.ephem = MockEphem()
     mock_ditl.saa = Mock()
     mock_ditl.passes = Mock()
     mock_ditl.executed_passes = Mock()

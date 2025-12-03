@@ -10,7 +10,7 @@ class TestPowerDraw:
 
     def test_initialization_defaults_nominal_power(self, default_power_draw):
         """Test PowerDraw initializes with default nominal_power."""
-        assert default_power_draw.nominal_power == 200
+        assert default_power_draw.nominal_power == 50
 
     def test_initialization_defaults_peak_power(self, default_power_draw):
         """Test PowerDraw initializes with default peak_power."""

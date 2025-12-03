@@ -4,6 +4,8 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
 
 from ..config.visualization import VisualizationConfig
@@ -12,7 +14,11 @@ if TYPE_CHECKING:
     from ..ditl.ditl_mixin import DITLMixin
 
 
-def plot_acs_mode_distribution(ditl: "DITLMixin", figsize=(10, 8), config=None):
+def plot_acs_mode_distribution(
+    ditl: "DITLMixin",
+    figsize: tuple[float, float] = (10, 8),
+    config: VisualizationConfig | None = None,
+) -> tuple[Figure, Axes]:
     """Plot a pie chart showing the distribution of time spent in each ACS mode.
 
     Creates a pie chart displaying the percentage of time spent in different
@@ -75,12 +81,12 @@ def plot_acs_mode_distribution(ditl: "DITLMixin", figsize=(10, 8), config=None):
     fig, ax = plt.subplots(figsize=figsize)
     # Compute colors for each wedge based on config.mode_colors (fallback to Matplotlib defaults)
     mode_colors_map = config.mode_colors
-    wedge_colors = [mode_colors_map.get(label.upper(), None) for label in labels]
+    wedge_colors = [mode_colors_map.get(label.upper(), "gray") for label in labels]
 
     pie_res = ax.pie(
         sizes,
         labels=labels,
-        colors=wedge_colors if any(c is not None for c in wedge_colors) else None,
+        colors=wedge_colors,
         autopct="%1.1f%%",
         startangle=140,
         textprops={"fontsize": label_font_size, "fontfamily": font_family},

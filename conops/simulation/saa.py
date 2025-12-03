@@ -1,18 +1,36 @@
+from __future__ import annotations
+
 import numpy as np
+import rust_ephem
 from shapely import Point, Polygon
 
 from ..common import dtutcfromtimestamp
 
 
 class SAA:
-    def __init__(self, year=None, day=None):
+    """South Atlantic Anomaly (SAA) calculation and tracking for spacecraft."""
+
+    ephem: rust_ephem.Ephemeris | None
+    year: int | None
+    day: int | None
+    lat: float | bool  # bool initially, becomes float after calculation
+    long: float | bool  # bool initially, becomes float after calculation
+    saatimes: np.ndarray
+    calculated: bool
+    saapoly: Polygon
+
+    def __init__(self, year: int | None = None, day: int | None = None) -> None:
         self.year = year
         self.day = day
         self.lat = False
         self.long = False
-        self.ephem = None
-        self.saatimes = list()
+        self.ephem: rust_ephem.Ephemeris | None = None
+        self.saatimes = np.array([]).reshape(
+            0, 2
+        )  # Empty 2D array for [start, end] pairs
         self.calculated = False
+
+        # SAA polygon boundary points (longitude, latitude pairs)
         points = np.array(
             [
                 [-8.50000000e01, -1.99999935e01],
@@ -239,21 +257,27 @@ class SAA:
         )
         self.saapoly = Polygon(points)
 
-    def insaa_calc(self, utime):
+    def insaa_calc(self, utime: float) -> bool:
         """For a given time, are we inside the BAT SAA polygon"""
+        if self.ephem is None:
+            raise ValueError("Ephemeris must be set before checking SAA status")
+
         i = self.ephem.index(dtutcfromtimestamp(utime))
-        self.long = self.ephem.long[i]
-        self.lat = self.ephem.lat[i]
+        self.long = self.ephem.long[i]  # type: ignore[attr-defined]
+        self.lat = self.ephem.lat[i]  # type: ignore[attr-defined]
 
         return self.saapoly.contains(Point(self.long, self.lat))
 
-    def calc(self):
+    def calc(self) -> None:
         """
         Calculate the SAA times based on the ephemeris data.
         This method determines the time intervals when the BAT is inside the SAA
         region by analyzing the satellite ephemeris data and checking the
         corresponding geographic coordinates against the SAA polygon.
         """
+        if self.ephem is None:
+            raise ValueError("Ephemeris must be set before calculating SAA times")
+
         # First, calculate using the original method
         ephem_utime = [dt.timestamp() for dt in self.ephem.timestamp]
         inside = np.array([self.insaa_calc(t) for t in ephem_utime])
@@ -264,23 +288,23 @@ class SAA:
         # Exits are where diff goes from 1 to 0 (so diff is -1)
         end_indices = np.where(diff == -1)[0]
 
-        self.saatimes = []
+        saatimes_list = []
 
         for start, end in zip(start_indices, end_indices):
             # The start index from np.diff is the point *before* the transition.
             # So we need to add 1 to get the first point inside the SAA.
             # The end index is also the point *before* the transition, so we take
             # that time as the last point inside the SAA.
-            self.saatimes.append([ephem_utime[start + 1], ephem_utime[end]])
-        self.saatimes = np.array(self.saatimes)
+            saatimes_list.append([ephem_utime[start + 1], ephem_utime[end]])
+        self.saatimes = np.array(saatimes_list)
         self.calculated = True
 
-    def get_saa_times(self):
+    def get_saa_times(self) -> np.ndarray:
         if not self.calculated:
             self.calc()
         return self.saatimes
 
-    def insaa(self, utime):
+    def insaa(self, utime: float) -> int:
         """
         Check if the given UTC time is within an SAA interval.
 
@@ -294,11 +318,11 @@ class SAA:
             self.calc()
 
         for start, end in self.saatimes:
-            if start <= utime and utime <= end:
+            if start <= utime <= end:
                 return 1
         return 0
 
-    def get_next_saa_time(self, utime):
+    def get_next_saa_time(self, utime: float) -> tuple[float, float] | None:
         """
         Get the next SAA time interval after the given utime.
         Returns:
@@ -309,7 +333,7 @@ class SAA:
             self.calc()
 
         for start, end in self.saatimes:
-            if start <= utime and utime <= end:
-                return start, end
+            if start > utime:
+                return (start, end)
 
         return None

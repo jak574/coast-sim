@@ -14,7 +14,7 @@ class TestQueueInitAndAppend:
 
     def test_queue_init_utime_none(self, mock_config):
         queue = Queue(config=mock_config)
-        assert queue.utime is None
+        assert queue.utime == 0.0
 
     def test_queue_init_gs_none(self, mock_config):
         queue = Queue(config=mock_config)
@@ -68,14 +68,14 @@ class TestMeritsort:
         invisible_target = queue_instance.targets[1]
         invisible_target.visible.return_value = False
 
-        queue_instance.meritsort(ra=0, dec=0)
+        queue_instance.meritsort()
 
         assert invisible_target.merit == -900 + 0.2
 
     @patch("numpy.random.random", side_effect=[0.1, 0.2, 0.3, 0.4, 0.5])
     def test_meritsort_sorted_descending(self, mock_random, queue_instance):
         """Check that the targets are sorted by merit descending."""
-        queue_instance.meritsort(ra=0, dec=0)
+        queue_instance.meritsort()
         for i in range(len(queue_instance.targets) - 1):
             assert (
                 queue_instance.targets[i].merit >= queue_instance.targets[i + 1].merit
@@ -87,7 +87,7 @@ class TestMeritsort:
         invisible_target = queue_instance.targets[1]
         invisible_target.visible.return_value = False
 
-        queue_instance.meritsort(ra=0, dec=0)
+        queue_instance.meritsort()
 
         assert queue_instance.targets[-1] is invisible_target
 
@@ -98,7 +98,7 @@ class TestGetTarget:
         utime = 1762924800.0
         with patch.object(queue_instance, "meritsort") as mock_meritsort:
             _ = queue_instance.get(ra=0, dec=0, utime=utime)
-            mock_meritsort.assert_called_once_with(0, 0)
+            mock_meritsort.assert_called_once_with()
 
     def test_get_target_returns_not_none(self, queue_instance):
         """Test that get returns a target when available."""

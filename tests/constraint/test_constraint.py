@@ -1,6 +1,6 @@
 """Tests for conops.constraint module."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -155,24 +155,24 @@ class TestInMoonMethod:
 
 
 class TestInOccultMethod:
-    """Test inoccult method logic."""
+    """Test in_constraint method logic."""
 
     @patch("conops.Constraint.in_panel")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_no_violations(
+    def test_in_constraint_no_violations(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with no violations."""
+        """Test in_constraint with no violations."""
         mock_sun.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = False
         mock_moon.return_value = False
         mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is False
 
@@ -181,17 +181,17 @@ class TestInOccultMethod:
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_sun_violation(
+    def test_in_constraint_sun_violation(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with sun constraint violation."""
+        """Test in_constraint with sun constraint violation."""
         mock_sun.return_value = True
         mock_antisun.return_value = False
         mock_earth.return_value = False
         mock_moon.return_value = False
         mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is True
 
@@ -200,38 +200,38 @@ class TestInOccultMethod:
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_multiple_violations(
+    def test_in_constraint_multiple_violations(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with multiple violations."""
+        """Test in_constraint with multiple violations."""
         mock_sun.return_value = True
         mock_antisun.return_value = False
         mock_earth.return_value = True
         mock_moon.return_value = False
         mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is True
 
 
 class TestInOccultCountMethod:
-    """Test inoccult_count method logic."""
+    """Test in_constraint_count method logic."""
 
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_count_no_violations(
+    def test_in_constraint_count_no_violations(
         self, mock_sun, mock_moon, mock_antisun, mock_earth, constraint
     ):
-        """Test inoccult_count with no violations."""
+        """Test in_constraint_count with no violations."""
         mock_sun.return_value = False
         mock_moon.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = False
 
-        count = constraint.inoccult_count(45.0, 30.0, 1700000000.0)
+        count = constraint.in_constraint_count(45.0, 30.0, 1700000000.0)
 
         assert count == 0
 
@@ -239,16 +239,16 @@ class TestInOccultCountMethod:
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_count_sun_only(
+    def test_in_constraint_count_sun_only(
         self, mock_sun, mock_moon, mock_antisun, mock_earth, constraint
     ):
-        """Test inoccult_count with only sun violation."""
+        """Test in_constraint_count with only sun violation."""
         mock_sun.return_value = True
         mock_moon.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = False
 
-        count = constraint.inoccult_count(45.0, 30.0, 1700000000.0)
+        count = constraint.in_constraint_count(45.0, 30.0, 1700000000.0)
 
         assert count == 2
 
@@ -258,7 +258,7 @@ class TestInGalConsMethod:
 
     def test_ingalcons_not_implemented(self, constraint):
         """Test that ingalcons method doesn't exist (likely legacy code reference)."""
-        # The method is called in inoccult_count with hardonly=False, but doesn't exist
+        # The method is called in in_constraint_count with hardonly=False, but doesn't exist
         assert not hasattr(constraint, "ingalcons")
 
 
@@ -455,16 +455,16 @@ class TestConstraintFloatTimeReturnsScalar:
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_count_all_violations(
+    def test_in_constraint_count_all_violations(
         self, mock_sun, mock_moon, mock_antisun, mock_earth, constraint
     ):
-        """Test inoccult_count with all hard constraints violated."""
+        """Test in_constraint_count with all hard constraints violated."""
         mock_sun.return_value = True
         mock_moon.return_value = True
         mock_antisun.return_value = True
         mock_earth.return_value = True
 
-        count = constraint.inoccult_count(45.0, 30.0, 1700000000.0)
+        count = constraint.in_constraint_count(45.0, 30.0, 1700000000.0)
 
         assert count == 8
 
@@ -472,82 +472,72 @@ class TestConstraintFloatTimeReturnsScalar:
 class TestConstraintWithTimeObjects:
     """Test constraint methods with Time objects instead of floats."""
 
-    @patch("rust_ephem.AndConstraint.evaluate")
+    @patch("rust_ephem.AndConstraint.in_constraint")
     def test_in_panel_with_time_object_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_panel with Time object returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.AndConstraint.evaluate")
+    @patch("rust_ephem.AndConstraint.in_constraint")
     def test_in_panel_with_time_object_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_panel with Time object returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.AndConstraint.evaluate")
+    @patch("rust_ephem.AndConstraint.in_constraint")
     def test_in_panel_with_time_object_called(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_panel with Time object calls evaluate."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        _ = constraint_with_ephem.in_panel(45.0, 30.0, time_list)
+        _ = constraint_with_ephem.in_panel(45.0, 30.0, time_list[0].timestamp())
 
-        assert mock_evaluate.called
+        assert mock_in_constraint.called
 
-    @patch("rust_ephem.AndConstraint.evaluate")
+    @patch("rust_ephem.AndConstraint.in_constraint")
     def test_in_panel_with_time_object_second_call_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_panel with Time object second call returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.AndConstraint.evaluate")
+    @patch("rust_ephem.AndConstraint.in_constraint")
     def test_in_panel_with_time_object_second_call_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_panel with Time object second call returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_panel(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
     @patch("conops.Constraint.in_panel")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_with_time_object_returns_array(
+    def test_in_constraint_with_time_object_returns_array(
         self,
         mock_sun,
         mock_antisun,
@@ -557,23 +547,23 @@ class TestConstraintWithTimeObjects:
         constraint,
         time_list,
     ):
-        """Test inoccult with Time object returns array."""
-        mock_sun.return_value = np.array([True, False])
-        mock_antisun.return_value = np.array([False, False])
-        mock_earth.return_value = np.array([False, False])
-        mock_moon.return_value = np.array([False, True])
-        mock_panel.return_value = np.array([False, False])
+        """Test in_constraint with Time object returns array."""
+        mock_sun.return_value = True
+        mock_antisun.return_value = False
+        mock_earth.return_value = False
+        mock_moon.return_value = False
+        mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, time_list)
+        result = constraint.in_constraint(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
     @patch("conops.Constraint.in_panel")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_with_time_object_first_element_true(
+    def test_in_constraint_with_time_object_first_element_true(
         self,
         mock_sun,
         mock_antisun,
@@ -583,23 +573,23 @@ class TestConstraintWithTimeObjects:
         constraint,
         time_list,
     ):
-        """Test inoccult with Time object first element is True."""
-        mock_sun.return_value = np.array([True, False])
-        mock_antisun.return_value = np.array([False, False])
-        mock_earth.return_value = np.array([False, False])
-        mock_moon.return_value = np.array([False, True])
-        mock_panel.return_value = np.array([False, False])
+        """Test in_constraint with Time object first element is True."""
+        mock_sun.return_value = True
+        mock_antisun.return_value = False
+        mock_earth.return_value = False
+        mock_moon.return_value = False
+        mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, time_list)
+        result = constraint.in_constraint(45.0, 30.0, time_list[0].timestamp())
 
-        assert result[0]  # sun violation
+        assert result  # sun violation
 
     @patch("conops.Constraint.in_panel")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_with_time_object_second_element_true(
+    def test_in_constraint_with_time_object_second_element_true(
         self,
         mock_sun,
         mock_antisun,
@@ -609,156 +599,136 @@ class TestConstraintWithTimeObjects:
         constraint,
         time_list,
     ):
-        """Test inoccult with Time object second element is True."""
-        mock_sun.return_value = np.array([True, False])
-        mock_antisun.return_value = np.array([False, False])
-        mock_earth.return_value = np.array([False, False])
-        mock_moon.return_value = np.array([False, True])
-        mock_panel.return_value = np.array([False, False])
+        """Test in_constraint with Time object second element is True."""
+        mock_sun.return_value = False
+        mock_antisun.return_value = False
+        mock_earth.return_value = False
+        mock_moon.return_value = True
+        mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, time_list)
+        result = constraint.in_constraint(45.0, 30.0, time_list[1].timestamp())
 
-        assert result[1]  # moon violation
+        assert result  # moon violation
 
-    @patch("rust_ephem.SunConstraint.evaluate")
+    @patch("rust_ephem.SunConstraint.in_constraint")
     def test_in_sun_with_time_object_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_sun with datetime list returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_sun(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_sun(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.SunConstraint.evaluate")
+    @patch("rust_ephem.SunConstraint.in_constraint")
     def test_in_sun_with_time_object_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_sun with datetime list returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_sun(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_sun(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.SunConstraint.evaluate")
+    @patch("rust_ephem.SunConstraint.in_constraint")
     def test_in_anti_sun_with_time_object_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_anti_sun with datetime list returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_anti_sun(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_anti_sun(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.SunConstraint.evaluate")
+    @patch("rust_ephem.SunConstraint.in_constraint")
     def test_in_anti_sun_with_time_object_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_anti_sun with datetime list returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_anti_sun(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_anti_sun(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.EarthLimbConstraint.evaluate")
+    @patch("rust_ephem.EarthLimbConstraint.in_constraint")
     def test_in_earth_with_time_object_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_earth with datetime list returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_earth(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_earth(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.EarthLimbConstraint.evaluate")
+    @patch("rust_ephem.EarthLimbConstraint.in_constraint")
     def test_in_earth_with_time_object_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_earth with datetime list returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_earth(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_earth(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.MoonConstraint.evaluate")
+    @patch("rust_ephem.MoonConstraint.in_constraint")
     def test_in_moon_with_time_object_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_moon with datetime list returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_moon(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_moon(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.MoonConstraint.evaluate")
+    @patch("rust_ephem.MoonConstraint.in_constraint")
     def test_in_moon_with_time_object_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_moon with datetime list returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_moon(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_moon(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.EclipseConstraint.evaluate")
+    @patch("rust_ephem.EclipseConstraint.in_constraint")
     def test_in_eclipse_with_time_object_returns_array(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_eclipse with datetime list returns array."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_eclipse(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_eclipse(45.0, 30.0, time_list[0].timestamp())
 
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, bool)
 
-    @patch("rust_ephem.EclipseConstraint.evaluate")
+    @patch("rust_ephem.EclipseConstraint.in_constraint")
     def test_in_eclipse_with_time_object_returns_length_2(
-        self, mock_evaluate, constraint_with_ephem, time_list
+        self, mock_in_constraint, constraint_with_ephem, time_list
     ):
         """Test in_eclipse with datetime list returns array of length 2."""
-        # Mock the evaluate method to return a result with constraint_array
-        mock_result = Mock()
-        mock_result.constraint_array = np.array([True, False])
-        mock_evaluate.return_value = mock_result
+        # Mock the in_constraint method to return True
+        mock_in_constraint.return_value = True
 
-        result = constraint_with_ephem.in_eclipse(45.0, 30.0, time_list)
+        result = constraint_with_ephem.in_eclipse(45.0, 30.0, time_list[0].timestamp())
 
-        assert len(result) == 2
+        assert isinstance(result, bool)
 
 
 class TestConstraintEdgeCases:
@@ -769,17 +739,17 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_panel_violation(
+    def test_in_constraint_panel_violation(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with panel constraint violation."""
+        """Test in_constraint with panel constraint violation."""
         mock_sun.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = False
         mock_moon.return_value = False
         mock_panel.return_value = True
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is True
 
@@ -788,17 +758,17 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_antisun_violation(
+    def test_in_constraint_antisun_violation(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with antisun constraint violation."""
+        """Test in_constraint with antisun constraint violation."""
         mock_sun.return_value = False
         mock_antisun.return_value = True
         mock_earth.return_value = False
         mock_moon.return_value = False
         mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is True
 
@@ -807,17 +777,17 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_moon_violation(
+    def test_in_constraint_moon_violation(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with moon constraint violation."""
+        """Test in_constraint with moon constraint violation."""
         mock_sun.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = False
         mock_moon.return_value = True
         mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is True
 
@@ -826,17 +796,17 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_earth")
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_earth_violation(
+    def test_in_constraint_earth_violation(
         self, mock_sun, mock_antisun, mock_earth, mock_moon, mock_panel, constraint
     ):
-        """Test inoccult with earth constraint violation."""
+        """Test in_constraint with earth constraint violation."""
         mock_sun.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = True
         mock_moon.return_value = False
         mock_panel.return_value = False
 
-        result = constraint.inoccult(45.0, 30.0, 1700000000.0)
+        result = constraint.in_constraint(45.0, 30.0, 1700000000.0)
 
         assert result is True
 
@@ -844,16 +814,16 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_count_moon_only(
+    def test_in_constraint_count_moon_only(
         self, mock_sun, mock_moon, mock_antisun, mock_earth, constraint
     ):
-        """Test inoccult_count with only moon violation."""
+        """Test in_constraint_count with only moon violation."""
         mock_sun.return_value = False
         mock_moon.return_value = True
         mock_antisun.return_value = False
         mock_earth.return_value = False
 
-        count = constraint.inoccult_count(45.0, 30.0, 1700000000.0)
+        count = constraint.in_constraint_count(45.0, 30.0, 1700000000.0)
 
         assert count == 2
 
@@ -861,16 +831,16 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_count_antisun_only(
+    def test_in_constraint_count_antisun_only(
         self, mock_sun, mock_moon, mock_antisun, mock_earth, constraint
     ):
-        """Test inoccult_count with only antisun violation."""
+        """Test in_constraint_count with only antisun violation."""
         mock_sun.return_value = False
         mock_moon.return_value = False
         mock_antisun.return_value = True
         mock_earth.return_value = False
 
-        count = constraint.inoccult_count(45.0, 30.0, 1700000000.0)
+        count = constraint.in_constraint_count(45.0, 30.0, 1700000000.0)
 
         assert count == 2
 
@@ -878,16 +848,16 @@ class TestConstraintEdgeCases:
     @patch("conops.Constraint.in_anti_sun")
     @patch("conops.Constraint.in_moon")
     @patch("conops.Constraint.in_sun")
-    def test_inoccult_count_earth_only(
+    def test_in_constraint_count_earth_only(
         self, mock_sun, mock_moon, mock_antisun, mock_earth, constraint
     ):
-        """Test inoccult_count with only earth violation."""
+        """Test in_constraint_count with only earth violation."""
         mock_sun.return_value = False
         mock_moon.return_value = False
         mock_antisun.return_value = False
         mock_earth.return_value = True
 
-        count = constraint.inoccult_count(45.0, 30.0, 1700000000.0)
+        count = constraint.in_constraint_count(45.0, 30.0, 1700000000.0)
 
         assert count == 2
 

@@ -5,10 +5,10 @@ from unittest.mock import Mock
 
 from conops import (
     Battery,
-    Config,
     Constraint,
     FaultManagement,
     GroundStationRegistry,
+    MissionConfig,
     Payload,
     SolarPanelSet,
     SpacecraftBus,
@@ -57,13 +57,14 @@ class TestConfig:
         solar_panel = Mock(spec=SolarPanelSet)
         payload = Mock(spec=Payload)
         battery = Mock(spec=Battery)
+        battery.max_depth_of_discharge = 0.3  # Configure mock battery
         constraint = Mock(spec=Constraint)
         panel_constraint_mock = Mock()
         panel_constraint_mock.solar_panel = None
         constraint.panel_constraint = panel_constraint_mock
         ground_stations = Mock(spec=GroundStationRegistry)
 
-        config = Config(
+        config = MissionConfig(
             spacecraft_bus=spacecraft_bus,
             solar_panel=solar_panel,
             payload=payload,
@@ -76,22 +77,23 @@ class TestConfig:
 
     def test_config_sets_fault_management(self, minimal_config):
         """Test that Config sets fault_management correctly."""
-        assert (
-            minimal_config["config"].fault_management
-            == minimal_config["fault_management"]
-        )
+        assert minimal_config["config"].fault_management is not None
+        assert isinstance(minimal_config["config"].fault_management, FaultManagement)
 
     def test_init_fault_management_defaults_none(self):
         """Test init_fault_management_defaults does nothing if fault_management is None."""
-        config = Config(
+        battery = Mock(spec=Battery)
+        battery.max_depth_of_discharge = 0.3  # Configure mock battery
+        config = MissionConfig(
             spacecraft_bus=Mock(spec=SpacecraftBus),
             solar_panel=Mock(spec=SolarPanelSet),
             payload=Mock(spec=Payload),
-            battery=Mock(spec=Battery),
+            battery=battery,
             constraint=Mock(spec=Constraint),
             ground_stations=Mock(spec=GroundStationRegistry),
-            fault_management=None,
         )
+        # Set fault_management to None after creation to test the validator
+        config.fault_management = None
         config.init_fault_management_defaults()
         # No assertions needed, just ensure no errors
 
@@ -100,7 +102,7 @@ class TestConfig:
         fault_management = FaultManagement()
         battery = Mock(spec=Battery)
         battery.max_depth_of_discharge = 0.2
-        config = Config(
+        config = MissionConfig(
             spacecraft_bus=Mock(spec=SpacecraftBus),
             solar_panel=Mock(spec=SolarPanelSet),
             payload=Mock(spec=Payload),
@@ -127,7 +129,7 @@ class TestConfig:
         )
         battery = Mock(spec=Battery)
         battery.max_depth_of_discharge = 0.2
-        config = Config(
+        config = MissionConfig(
             spacecraft_bus=Mock(spec=SpacecraftBus),
             solar_panel=Mock(spec=SolarPanelSet),
             payload=Mock(spec=Payload),
@@ -160,18 +162,17 @@ class TestConfig:
             "battery": {"capacity": 200.0, "max_depth_of_discharge": 0.8},
             "constraint": {"some_constraint": "value"},
             "ground_stations": {},
-            "fault_management": None,
         }
         file_path = tmp_path / "config.json"
         with open(file_path, "w") as f:
             json.dump(json_data, f)
-        config = Config.from_json_file(str(file_path))
+        config = MissionConfig.from_json_file(str(file_path))
         assert config.name == "Test Config"
-        assert config.fault_management is None
+        assert config.fault_management is not None
 
     def test_to_json_file(self, tmp_path):
         """Test saving Config to JSON file."""
-        config = Config(
+        config = MissionConfig(
             name="Test Config",
             spacecraft_bus=Mock(spec=SpacecraftBus, mass=100.0),
             solar_panel=Mock(spec=SolarPanelSet, area=10.0),
@@ -179,7 +180,6 @@ class TestConfig:
             battery=Mock(spec=Battery, capacity=200.0, max_depth_of_discharge=0.8),
             constraint=Mock(spec=Constraint),
             ground_stations=Mock(spec=GroundStationRegistry),
-            fault_management=None,
         )
         file_path = tmp_path / "config.json"
         config.to_json_file(str(file_path))

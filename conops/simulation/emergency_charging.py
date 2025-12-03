@@ -5,13 +5,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 import rust_ephem
 
+from conops.config.battery import Battery
+
 if TYPE_CHECKING:
     from ..ditl.ditl_log import DITLLog
+    from ..targets import Pointing
 
 from ..common import unixtime2date
 from ..common.vector import angular_separation
-from ..config import Config
-from ..targets import Pointing
+from ..config import MissionConfig
 
 
 class EmergencyCharging:
@@ -49,7 +51,7 @@ class EmergencyCharging:
 
     def __init__(
         self,
-        config: Config | None = None,
+        config: MissionConfig | None = None,
         starting_obsid: int = 999000,
         max_slew_deg: float | None = None,
         sidemount: bool = False,
@@ -59,7 +61,7 @@ class EmergencyCharging:
         Initialize emergency charging manager.
 
         Args:
-            config: Config object containing all spacecraft configuration
+            config: MissionConfig object containing all spacecraft configuration
 
             starting_obsid: Starting obsid for charging observations (default: 999000)
             max_slew_deg: Maximum slew distance in degrees from current pointing (default: None = no limit)
@@ -73,7 +75,7 @@ class EmergencyCharging:
         self.acs_config = config.spacecraft_bus.attitude_control
 
         self.next_charging_obsid = starting_obsid
-        self.current_charging_ppt: Pointing | None = None
+        self.current_charging_ppt: "Pointing | None" = None
         self.max_slew_deg = max_slew_deg
         self.sidemount = sidemount
         self._charging_suppressed_due_to_eclipse = False
@@ -94,7 +96,7 @@ class EmergencyCharging:
         ephem: rust_ephem.Ephemeris,
         lastra: float = 0.0,
         lastdec: float = 0.0,
-    ) -> Pointing | None:
+    ) -> "Pointing | None":
         """
         Create an emergency charging pointing to recover battery charge.
 
@@ -156,8 +158,8 @@ class EmergencyCharging:
         ephem: rust_ephem.Ephemeris,
         lastra: float,
         lastdec: float,
-        current_ppt: Pointing | None,
-    ) -> Pointing | None:
+        current_ppt: "Pointing | None",
+    ) -> "Pointing | None":
         """Terminate current science PPT (if any) and create a charging PPT.
 
         This encapsulates the initiation path so callers can delegate the
@@ -220,7 +222,7 @@ class EmergencyCharging:
             Tuple of (ra, dec) if valid pointing found, or (None, None) if not
         """
         # Validate optimal pointing
-        if not self.constraint.inoccult(optimal_ra, optimal_dec, utime):
+        if not self.constraint.in_constraint(optimal_ra, optimal_dec, utime):
             # Check if within slew limit
             if self.max_slew_deg is not None:
                 slew = angular_separation(
@@ -280,7 +282,7 @@ class EmergencyCharging:
         # Evaluate each candidate
         for alt_ra, alt_dec in candidates:
             # Check if this pointing violates constraints
-            if self.constraint.inoccult(alt_ra, alt_dec, utime):
+            if self.constraint.in_constraint(alt_ra, alt_dec, utime):
                 continue  # Skip constrained pointings
 
             # Check slew distance if limit is set
@@ -400,7 +402,7 @@ class EmergencyCharging:
         best_slew = float("inf")
 
         for candidate_ra, candidate_dec in candidates:
-            if self.constraint.inoccult(candidate_ra, candidate_dec, utime):
+            if self.constraint.in_constraint(candidate_ra, candidate_dec, utime):
                 continue  # Skip constrained pointings
 
             # If no current position provided, return first valid pointing
@@ -448,7 +450,7 @@ class EmergencyCharging:
         )
         return None, None
 
-    def _create_pointing(self, ra: float, dec: float, utime: float) -> Pointing:
+    def _create_pointing(self, ra: float, dec: float, utime: float) -> "Pointing":
         """
         Create a Pointing object for emergency charging.
 
@@ -460,6 +462,8 @@ class EmergencyCharging:
         Returns:
             Configured Pointing object
         """
+        from ..targets import Pointing
+
         charging_ppt = Pointing(
             config=self.config,
             ra=ra,
@@ -489,7 +493,7 @@ class EmergencyCharging:
         return self.current_charging_ppt is not None
 
     def check_termination(
-        self, utime: float, battery, ephem: rust_ephem.Ephemeris
+        self, utime: float, battery: Battery, ephem: rust_ephem.Ephemeris
     ) -> str | None:
         """Evaluate whether the current emergency charging pointing should terminate.
 
@@ -507,7 +511,7 @@ class EmergencyCharging:
             return "battery_recharged"
 
         # Constraint violation (e.g., occultation)
-        if self.constraint.inoccult(
+        if self.constraint.in_constraint(
             self.current_charging_ppt.ra, self.current_charging_ppt.dec, utime
         ):
             return "constraint"

@@ -1,6 +1,5 @@
 """Unit tests for the DumbScheduler class."""
 
-import numpy as np
 import pytest
 from astropy.time import Time  # type: ignore[import-untyped]
 
@@ -341,15 +340,15 @@ class TestDumbSchedulerPlanEntry:
 class TestDumbSchedulerConstraints:
     """Test constraint evaluation."""
 
-    def test_constraint_inoccult_called(self, scheduler, simple_target_factory):
-        original_inoccult = scheduler.constraint.inoccult
+    def test_constraint_in_constraint_called(self, scheduler, simple_target_factory):
+        original_in_constraint = scheduler.constraint.in_constraint
         call_count = [0]
 
-        def tracked_inoccult(*args, **kwargs):
+        def tracked_in_constraint(*args, **kwargs):
             call_count[0] += 1
-            return original_inoccult(*args, **kwargs)
+            return original_in_constraint(*args, **kwargs)
 
-        scheduler.constraint.inoccult = tracked_inoccult
+        scheduler.constraint.in_constraint = tracked_in_constraint
 
         target = simple_target_factory(1, 45.0, 30.0, 600)
         scheduler.targlist.add_target(target)
@@ -360,9 +359,7 @@ class TestDumbSchedulerConstraints:
     def test_constraint_with_all_times_valid_schedules(
         self, scheduler, mock_ephemeris, simple_target_factory
     ):
-        scheduler.constraint.inoccult = lambda ra, dec, utime, hardonly=True: np.zeros(
-            len(utime) if hasattr(utime, "__len__") else 1, dtype=bool
-        )
+        scheduler.constraint.in_constraint = lambda ra, dec, utime, hardonly=True: False
         target = simple_target_factory(1, 45.0, 30.0, 600)
         scheduler.targlist.add_target(target)
         scheduler.schedule()
@@ -371,9 +368,7 @@ class TestDumbSchedulerConstraints:
     def test_constraint_with_all_times_invalid_not_scheduled(
         self, scheduler, simple_target_factory
     ):
-        scheduler.constraint.inoccult = lambda ra, dec, utime, hardonly=True: np.ones(
-            len(utime) if hasattr(utime, "__len__") else 1, dtype=bool
-        )
+        scheduler.constraint.in_constraint = lambda *args, **kwargs: True
         target = simple_target_factory(1, 45.0, 30.0, 600)
         scheduler.targlist.add_target(target)
         scheduler.schedule()

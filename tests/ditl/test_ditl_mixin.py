@@ -31,10 +31,10 @@ class TestDITLMixin:
         ditl, _, _ = ditl_instance
         assert isinstance(ditl.utime, list) and ditl.utime == []
 
-    def test_init_sets_ephem_to_none(self, ditl_instance):
-        """DITLMixin.__init__ should set ephem to None."""
+    def test_init_sets_ephem_from_config(self, ditl_instance, mock_config):
+        """DITLMixin.__init__ should set ephem from config.constraint.ephem."""
         ditl, _, _ = ditl_instance
-        assert ditl.ephem is None
+        assert ditl.ephem is mock_config.constraint.ephem
 
     def test_init_uses_passes(self, ditl_instance):
         """DITLMixin.__init__ should use PassTimes."""

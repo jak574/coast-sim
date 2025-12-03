@@ -1,4 +1,3 @@
-import numpy as np
 from pydantic import BaseModel
 
 from ..common import great_circle, separation
@@ -31,11 +30,11 @@ class AttitudeControlSystem(BaseModel):
         if 2 * d_accel >= angle_deg:
             # Triangular profile
             t_peak = (angle_deg / a) ** 0.5
-            return 2 * t_peak
+            return float(2 * t_peak)
         # Trapezoidal profile
         d_cruise = angle_deg - 2 * d_accel
         t_cruise = d_cruise / vmax
-        return 2 * t_accel + t_cruise
+        return float(2 * t_accel + t_cruise)
 
     def s_of_t(self, angle_deg: float, t: float) -> float:
         """Distance traveled (deg) along the slew after t seconds under bang-bang control.
@@ -62,7 +61,7 @@ class AttitudeControlSystem(BaseModel):
                 s = 0.5 * a * tau**2
             else:
                 s = angle_deg - 0.5 * a * (motion_time - tau) ** 2
-            return max(0.0, min(angle_deg, s))
+            return float(max(0.0, min(angle_deg, s)))
 
         # Trapezoidal
         d_cruise = angle_deg - 2 * d_accel
@@ -76,7 +75,7 @@ class AttitudeControlSystem(BaseModel):
         else:
             t_dec = tau - (t_accel + t_cruise)
             s = d_accel + d_cruise + vmax * t_dec - 0.5 * a * t_dec**2
-        return max(0.0, min(angle_deg, s))
+        return float(max(0.0, min(angle_deg, s)))
 
     def slew_time(self, angle_deg: float) -> float:
         """Total slew time (motion + settle) using bang-bang control."""
@@ -91,7 +90,7 @@ class AttitudeControlSystem(BaseModel):
         endra: float,
         enddec: float,
         steps: int = 20,
-    ) -> tuple[float, tuple[np.ndarray, np.ndarray]]:
+    ) -> tuple[float, tuple[list[float], list[float]]]:
         """Calculate great circle slew distance and path.
 
         Args:

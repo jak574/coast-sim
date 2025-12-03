@@ -177,10 +177,13 @@ class TestPlotSkyPointing:
         mock_ax.get_yticklabels.return_value = []
         mock_plt.subplots.return_value = (mock_fig, mock_ax)
 
-        fig, ax, controller = plot_sky_pointing(
-            mock_ditl,
-            show_controls=False,
-        )
+        with patch(
+            "conops.visualization.sky_pointing.SkyPointingController._plot_earth_disk"
+        ):
+            fig, ax, controller = plot_sky_pointing(
+                mock_ditl,
+                show_controls=False,
+            )
 
         assert fig == mock_fig
         assert ax == mock_ax

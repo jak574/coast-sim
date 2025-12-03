@@ -9,16 +9,17 @@ from ..common import (
     unixtime2date,
     unixtime2yearday,
 )
-from ..config import Config
+from ..config import MissionConfig
 from ..config.constants import DTOR
 from ..simulation.passes import PassTimes
-from ..targets import Pointing
 from .acs_command import ACSCommand
+from .emergency_charging import EmergencyCharging
 from .passes import Pass
 from .slew import Slew
 
 if TYPE_CHECKING:
     from ..ditl.ditl_log import DITLLog
+    from ..targets import Pointing
 
 
 class ACS:
@@ -45,12 +46,12 @@ class ACS:
     last_slew: Slew | None
     in_eclipse: bool
 
-    def __init__(self, config: Config, log: "DITLLog | None" = None) -> None:
+    def __init__(self, config: MissionConfig, log: "DITLLog | None" = None) -> None:
         """Initialize the Attitude Control System.
 
         Args:
             constraint: Constraint object with ephemeris.
-            config: Configuration object.
+            config: MissionConfiguration object.
             log: Optional DITLLog for event logging. If None, prints to stdout.
         """
         assert config.constraint is not None, "Constraint must be provided to ACS"
@@ -160,7 +161,7 @@ class ACS:
             )
 
             # Dispatch to appropriate handler based on command type
-            handlers = {
+            handlers: dict[ACSCommandType, Any] = {
                 ACSCommandType.SLEW_TO_TARGET: lambda: self._handle_slew_command(
                     command, utime
                 ),
@@ -345,8 +346,10 @@ class ACS:
 
         return True
 
-    def _create_target_request(self, slew: Slew, utime: float) -> Pointing:
+    def _create_target_request(self, slew: Slew, utime: float) -> "Pointing":
         """Create and configure a target observation request for visibility checking."""
+        from ..targets import Pointing
+
         target = Pointing(
             config=self.config,
             ra=slew.endra,
@@ -436,7 +439,7 @@ class ACS:
         4. Calculates current RA/Dec pointing
         """
         # Determine if the spacecraft is currently in eclipse
-        self.in_eclipse = self.constraint.in_eclipse(ra=0, dec=0, time=utime)  # type: ignore[assignment]
+        self.in_eclipse = self.constraint.in_eclipse(ra=0, dec=0, time=utime)
 
         # Process any commands scheduled for execution at or before current time
         self._process_commands(utime)
@@ -553,7 +556,7 @@ class ACS:
             and self.last_slew.at is not None
             and not isinstance(self.last_slew.at, bool)
             and self.last_slew.obstype == "PPT"
-            and self.constraint.inoccult(
+            and self.constraint.in_constraint(
                 self.last_slew.at.ra, self.last_slew.at.dec, utime
             )
         ):
@@ -596,7 +599,7 @@ class ACS:
             self.ra, self.dec = self.current_pass.ra_dec(utime)  # type: ignore[assignment]
         # If we are actively slewing
         elif self.last_slew is not None:
-            self.ra, self.dec = self.last_slew.ra_dec(utime)  # type: ignore[assignment]
+            self.ra, self.dec = self.last_slew.ra_dec(utime)
         else:
             # If there's no slew or pass, maintain current pointing
             pass
@@ -626,7 +629,7 @@ class ACS:
             and self.current_slew.obstype == "SAFE"
             and self.current_slew.is_slewing(utime)
         ):
-            self.ra, self.dec = self.current_slew.ra_dec(utime)  # type: ignore[assignment]
+            self.ra, self.dec = self.current_slew.ra_dec(utime)
         else:
             # After slew completes or for continuous tracking, maintain optimal pointing
             self.ra = target_ra
@@ -707,11 +710,11 @@ class ACS:
     def initiate_emergency_charging(
         self,
         utime: float,
-        ephem,
-        emergency_charging,
+        ephem: rust_ephem.Ephemeris,
+        emergency_charging: EmergencyCharging,
         lastra: float,
         lastdec: float,
-        current_ppt,
+        current_ppt: "Pointing | None",
     ) -> tuple[float, float, Any]:
         """Initiate emergency charging by creating charging PPT and enqueuing charge command.
 

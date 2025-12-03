@@ -3,12 +3,11 @@
 import pytest
 
 from conops import Pass
+from conops.common.enums import AntennaType, Polarization
 from conops.config import (
     AntennaPointing,
-    AntennaType,
     BandCapability,
     CommunicationsSystem,
-    Polarization,
 )
 
 
@@ -221,8 +220,9 @@ class TestPassDataVolume:
             ephem=mock_ephem,
             station="SGS",
             begin=1514764800.0,
-            length=None,
+            length=100.0,  # Dummy length
         )
+        p.length = None  # Set to None after creation
 
         assert p.calculate_data_volume("S") == 0.0
 

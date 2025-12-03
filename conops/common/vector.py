@@ -1,21 +1,21 @@
 import numpy as np
 import numpy.typing as npt
-from pyproj import Geod  # type: ignore[import-untyped]
+from pyproj import Geod
 
 
-def radec2vec(ra: float, dec: float) -> npt.NDArray:
+def radec2vec(ra: float, dec: float) -> npt.NDArray[np.float64]:
     """Convert RA/Dec angle (in radians) to a vector"""
 
     v1 = np.cos(dec) * np.cos(ra)
     v2 = np.cos(dec) * np.sin(ra)
     v3 = np.sin(dec)
 
-    return np.array([v1, v2, v3])
+    return np.array([v1, v2, v3], dtype=np.float64)
 
 
 def scbodyvector(
-    ra: float, dec: float, roll: float, eciarr: npt.NDArray
-) -> npt.NDArray:
+    ra: float, dec: float, roll: float, eciarr: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
     """For a given RA,Dec and Roll, and vector, return that vector that in
     the spacecraft body coordinate system"""
 
@@ -28,18 +28,22 @@ def scbodyvector(
     sdec = np.sin(-dec)
 
     # Direction Cosine matrix (new sleeker version)
-    rot1 = np.array(((1, 0, 0), (0, croll, sroll), (0, -sroll, croll)))
-    rot2 = np.array(((cdec, 0, -sdec), (0, 1, 0), (sdec, 0, cdec)))
-    rot3 = np.array(((cra, sra, 0), (-sra, cra, 0), (0, 0, 1)))
+    rot1: npt.NDArray[np.float64] = np.array(
+        ((1, 0, 0), (0, croll, sroll), (0, -sroll, croll))
+    )
+    rot2: npt.NDArray[np.float64] = np.array(
+        ((cdec, 0, -sdec), (0, 1, 0), (sdec, 0, cdec))
+    )
+    rot3: npt.NDArray[np.float64] = np.array(((cra, sra, 0), (-sra, cra, 0), (0, 0, 1)))
 
     # Multiply them all up
-    a = np.dot(rot1, rot2)
-    b = np.dot(a, rot3)
-    body = np.dot(b, eciarr)
+    a: npt.NDArray[np.float64] = np.dot(rot1, rot2)
+    b: npt.NDArray[np.float64] = np.dot(a, rot3)
+    body: npt.NDArray[np.float64] = np.dot(b, eciarr)
     return body
 
 
-def rotvec(n: int, a: float, v: np.ndarray) -> np.ndarray:
+def rotvec(n: int, a: float, v: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Rotate a vector v by angle a (radians) around axis n (1=x,2=y,3=z).
     Preserves the original sign convention (rotation uses -a)."""
     if n not in (1, 2, 3):
@@ -52,10 +56,16 @@ def rotvec(n: int, a: float, v: np.ndarray) -> np.ndarray:
     c = np.cos(a)
     s = -np.sin(a)  # match original sign convention
 
-    return v * c + np.cross(k, v) * s + k * (np.dot(k, v)) * (1 - c)
+    result: npt.NDArray[np.float64] = (
+        v * c + np.cross(k, v) * s + k * (np.dot(k, v)) * (1 - c)
+    )
+    return result
 
 
-def separation(one: npt.NDArray | list[float], two: npt.NDArray | list[float]) -> float:
+def separation(
+    one: npt.NDArray[np.float64] | list[float],
+    two: npt.NDArray[np.float64] | list[float],
+) -> float:
     """Calculate the angular distance between two RA,Dec values.
     Both Ra/Dec values are given as an array of form [ra,dec] where
     RA and Dec are in radians. Form of function mimics pyephem library
@@ -65,10 +75,21 @@ def separation(one: npt.NDArray | list[float], two: npt.NDArray | list[float]) -
     twovec = radec2vec(two[0], two[1])
 
     # Flatten vectors to ensure they're 1D for dot product
-    onevec = np.atleast_1d(onevec).flatten()
-    twovec = np.atleast_1d(twovec).flatten()
+    onevec = np.atleast_1d(onevec).flatten().astype(float)
+    twovec = np.atleast_1d(twovec).flatten().astype(float)
 
-    return np.arccos(np.dot(onevec, twovec))
+    # Normalize and handle degenerate zero-length vectors
+    n1 = np.linalg.norm(onevec)
+    n2 = np.linalg.norm(twovec)
+    if n1 < 1e-15 or n2 < 1e-15:
+        # If either vector is effectively zero-length, treat separation as zero
+        return 0.0
+
+    # Compute cosine of the angle and clip to [-1, 1] to avoid rounding errors producing NaN
+    cosang = np.dot(onevec / n1, twovec / n2)
+    cosang = np.clip(cosang, -1.0, 1.0)
+
+    return float(np.arccos(cosang))
 
 
 def angular_separation(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
@@ -79,12 +100,12 @@ def angular_separation(ra1: float, dec1: float, ra2: float, dec2: float) -> floa
     dec2_rad = np.deg2rad(dec2)
 
     sep_rad = separation([ra1_rad, dec1_rad], [ra2_rad, dec2_rad])
-    return np.rad2deg(sep_rad)
+    return float(np.rad2deg(sep_rad))
 
 
 def great_circle(
     ra1: float, dec1: float, ra2: float, dec2: float, npts: int = 100
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[list[float], list[float]]:
     """Return Great Circle Path between two coordinates"""
     g = Geod(ellps="sphere")
 
@@ -97,10 +118,12 @@ def great_circle(
     ras = np.append(ras, ra2)
     decs = np.append(dec1, decs)
     decs = np.append(decs, dec2)
-    return ras, decs
+    return ras.tolist(), decs.tolist()
 
 
-def roll_over_angle(angles: npt.NDArray | list[float]) -> npt.NDArray:
+def roll_over_angle(
+    angles: npt.NDArray[np.float64] | list[float],
+) -> npt.NDArray[np.float64]:
     """Make a list of angles that include a roll over (e.g. 359.9 - 0.1) into a smooth distribution"""
     outangles = list()
     last = -1.0
@@ -121,7 +144,7 @@ def roll_over_angle(angles: npt.NDArray | list[float]) -> npt.NDArray:
     return np.array(outangles)
 
 
-def vec2radec(v: npt.NDArray[np.float64]) -> npt.NDArray:
+def vec2radec(v: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Convert a vector to Ra/Dec (in radians).
 
     RA is always returned in [0, 2π).

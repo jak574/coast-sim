@@ -78,10 +78,6 @@ class DITLLog(BaseModel):
         """Return the number of logged events."""
         return len(self.events)
 
-    def __iter__(self):
-        """Iterate over logged events."""
-        return iter(self.events)
-
     def __getitem__(self, index: int) -> DITLEvent:
         """Get event by index."""
         return self.events[index]

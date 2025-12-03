@@ -1,5 +1,6 @@
 """Test fixtures for ditl subsystem tests."""
 
+import datetime
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -13,15 +14,17 @@ from conops.ditl.ditl_mixin import DITLMixin
 class DummyEphemeris:
     """Minimal mock ephemeris for testing."""
 
-    def __init__(self):
+    def __init__(self, num_steps: int = 5):
         from datetime import datetime, timezone
 
-        self.step_size = 3600
-        # Cover 2018 day 331 (Nov 27) for 1 days - but use larger timestep (3600s instead of 60s)
-        # to reduce Mock object creation: 1 days @ 3600-second steps = 24 timesteps instead of 1440
-        unix_times = np.arange(1543276800, 1543446000, 3600)
+        self.step_size = 60  # Use 60 second steps for faster tests
+        # Create a short simulation: just a few minutes instead of 24 hours
+        start_time = 1543276800  # 2018-11-27 00:00:00 UTC
+        unix_times = np.arange(
+            start_time, start_time + num_steps * self.step_size, self.step_size
+        )
         self.timestamp = [
-            datetime.fromtimestamp(t, tz=timezone.utc) for t in unix_times
+            datetime.fromtimestamp(float(t), tz=timezone.utc) for t in unix_times
         ]
         self.utime = unix_times
         # Add earth and sun attributes for ACS initialization
@@ -41,6 +44,11 @@ def mock_config():
     cfg.constraint = Mock()
     cfg.constraint.ephem = Mock()  # DITLMixin asserts this is not None
     cfg.constraint.ephem.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0))]
+    # Set timestamp to match DummyEphemeris range
+    cfg.constraint.ephem.timestamp = [
+        datetime.datetime(2018, 11, 27, 0, 0, 0, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2018, 11, 28, 0, 0, 0, tzinfo=datetime.timezone.utc),
+    ]
     cfg.battery = Mock()
     cfg.battery.max_depth_of_discharge = 0.5
     return cfg
@@ -62,7 +70,7 @@ def mock_config_detailed():
     config.constraint.ephem = DummyEphemeris()
     config.constraint.panel_constraint = Mock()
     config.constraint.panel_constraint.solar_panel = Mock()
-    config.constraint.inoccult = Mock(return_value=False)
+    config.constraint.in_constraint = Mock(return_value=False)
 
     # Mock battery
     config.battery = Mock()
@@ -330,6 +338,12 @@ def ditl_with_pass_setup(ditl_instance, mock_config):
     mock_station = Mock()
     # New per-band API: when no spacecraft comms, use GS overall max
     mock_station.get_overall_max_downlink.return_value = 100.0
+    # Set up station to avoid the iterable error
+    mock_station.bands = None  # This will make it use the overall max path
     ditl.config.ground_stations = Mock()
     ditl.config.ground_stations.get = Mock(return_value=mock_station)
+    # Ensure spacecraft_bus.communications is None to use overall max
+    if not hasattr(ditl.config, "spacecraft_bus"):
+        ditl.config.spacecraft_bus = Mock()
+    ditl.config.spacecraft_bus.communications = None
     return ditl

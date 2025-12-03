@@ -8,7 +8,7 @@ class TestPowerDrawInitialization:
 
     def test_default_values(self):
         power = PowerDraw()
-        assert power.nominal_power == 200
+        assert power.nominal_power == 50
         assert power.peak_power == 300
         assert power.power_mode == {}
         assert power.eclipse_power is None

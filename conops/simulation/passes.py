@@ -5,9 +5,9 @@ import rust_ephem
 from pydantic import BaseModel, Field
 
 from ..common import ics_date_conv, unixtime2date
+from ..common.enums import AntennaType
 from ..common.vector import radec2vec, rotvec, separation, vec2radec
-from ..config import Config, Constraint, GroundStationRegistry
-from ..config.communications import AntennaType
+from ..config import Constraint, GroundStationRegistry, MissionConfig
 from ..config.constants import DTOR
 
 
@@ -21,12 +21,12 @@ class Pass(BaseModel):
 
     # Core dependencies
     ephem: rust_ephem.Ephemeris | None = None
-    config: Config | None = None
+    config: MissionConfig | None = None
 
     # Pass metadata
     station: str
     begin: float
-    length: float | None = None
+    length: float
 
     # What type of observation is this, a Ground Station Pass (GSP)
     obstype: str = "GSP"
@@ -52,7 +52,7 @@ class Pass(BaseModel):
         assert self.length is not None, "Pass length must be set"
         return self.begin + self.length
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Return string of details on the pass"""
         return f"{unixtime2date(self.begin):18s}  {self.station:3s}  {self.length / 60.0:4.1f} mins"  #  {self.time_to_pass():12s}"
 
@@ -273,11 +273,11 @@ class PassTimes:
     constraint: Constraint
     ephem: rust_ephem.Ephemeris
     ground_stations: GroundStationRegistry
-    config: Config
+    config: MissionConfig
 
     def __init__(
         self,
-        config: Config,
+        config: MissionConfig,
     ):
         self.constraint = config.constraint
         assert self.constraint is not None, "Constraint must be set for PassTimes class"
@@ -339,7 +339,7 @@ class PassTimes:
         # Use binary search instead of np.where for finding start index
         # Prefer adapter datetimes if available, otherwise use Time.unix
         timestamp_unix = np.array([dt.timestamp() for dt in self.ephem.timestamp])
-        startindex = np.searchsorted(timestamp_unix, ustart)
+        startindex = int(np.searchsorted(timestamp_unix, ustart))
 
         # Calculate end index
         num_steps = int(86400 * length / self.ephem.step_size)
@@ -351,7 +351,7 @@ class PassTimes:
         end_time = timestamps[-1]
 
         # Process each ground station
-        for station in self.ground_stations:
+        for station in self.ground_stations.stations:
             # Create GroundEphemeris for this station (vectorized ground station ephemeris)
 
             gs_ephem = rust_ephem.GroundEphemeris(

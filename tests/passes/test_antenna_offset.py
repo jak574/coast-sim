@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from rust_ephem import TLEEphemeris
 
+from conops.common.enums import AntennaType
 from conops.config import (
     AntennaPointing,
-    AntennaType,
     BandCapability,
     CommunicationsSystem,
     Constraint,

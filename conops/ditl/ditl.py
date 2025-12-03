@@ -1,6 +1,11 @@
-import numpy as np
+from datetime import datetime
 
-from ..config import Config  # type: ignore[attr-defined]
+import numpy as np
+import rust_ephem
+
+from conops.targets.plan import Plan
+
+from ..config import MissionConfig
 from .ditl_log import DITLLog
 from .ditl_mixin import DITLMixin
 from .ditl_stats import DITLStats
@@ -26,8 +31,8 @@ class DITL(DITLMixin, DITLStats):
         ephem (Ephemeris): Ephemeris data for position and illumination calculations.
         plan (Plan): Pre-planned pointing schedule to execute.
         acs (ACS): Attitude Control System for pointing and slew calculations.
-        begin (datetime): Start time for simulation (default: Nov 27, 2018 00:00:00 UTC).
-        end (datetime): End time for simulation (default: Nov 28, 2018 00:00:00 UTC).
+        begin (datetime): Start time for simulation (default: None).
+        end (datetime): End time for simulation (default: None).
         step_size (int): Time step in seconds (default: 60).
 
     Telemetry Arrays (populated during calc()):
@@ -46,25 +51,40 @@ class DITL(DITLMixin, DITLStats):
         data_downlinked_gb (np.ndarray): Data downlinked in Gb at each timestep.
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: MissionConfig,
+        ephem: rust_ephem.Ephemeris | None = None,
+        plan: Plan = Plan(),
+        begin: datetime | None = None,
+        end: datetime | None = None,
+    ) -> None:
         """Initialize DITL with spacecraft configuration.
 
         Args:
-            config (Config): Spacecraft configuration containing all subsystems
+            config (MissionConfig): Spacecraft configuration containing all subsystems
                 (spacecraft_bus, payload, solar_panel, battery, constraint,
                 ground_stations). Must not be None.
+            ephem (Ephemeris, optional): Ephemeris data for position and illumination calculations.
+            plan (Plan, optional): Pre-planned pointing schedule to execute.
+            begin (datetime, optional): Start time for simulation (timezone-aware).
+            end (datetime, optional): End time for simulation (timezone-aware).
+            step_size (int, optional): Time step in seconds (default: 60).
 
         Raises:
-            AssertionError: If config is None. Config must be provided as it contains
+            AssertionError: If config is None. MissionConfig must be provided as it contains
                 all necessary spacecraft subsystems and constraints.
 
         Note:
             DITLMixin.__init__ is called to set up base simulation parameters.
             All subsystems are extracted from the provided config for direct access.
         """
-        DITLMixin.__init__(self, config=config)
+        DITLMixin.__init__(
+            self, config=config, ephem=ephem, begin=begin, end=end, plan=plan
+        )
         # DITL also needs solar_panel
         self.solar_panel = self.config.solar_panel
+
         # Event log
         self.log = DITLLog()
         # Wire log into ACS so it can log events (if ACS exists)
@@ -106,19 +126,10 @@ class DITL(DITLMixin, DITLStats):
         """
         # A few sanity checks before we start
         if self.ephem is None:
-            self.log.log_event(
-                utime=self.begin.timestamp(),
-                event_type="ERROR",
-                description="ERROR: No ephemeris loaded",
-            )
-            return False
+            raise ValueError("ERROR: No ephemeris loaded")
+
         if self.plan is None:
-            self.log.log_event(
-                utime=self.begin.timestamp(),
-                event_type="ERROR",
-                description="ERROR: No Plan loaded",
-            )
-            return False
+            raise ValueError("ERROR: No plan loaded")
 
         # Set up ACS ephemeris if not already set
         if self.acs.ephem is None:
@@ -129,12 +140,8 @@ class DITL(DITLMixin, DITLStats):
         self.uend = self.end.timestamp()
         ephem_utime = [dt.timestamp() for dt in self.ephem.timestamp]
         if self.ustart not in ephem_utime or self.uend not in ephem_utime:
-            self.log.log_event(
-                utime=self.ustart,
-                event_type="ERROR",
-                description="ERROR: Ephemeris not valid for date range",
-            )
-            return False
+            raise ValueError("ERROR: Ephemeris does not cover simulation date range")
+
         self.utime = np.arange(self.ustart, self.uend, self.step_size).tolist()
 
         # Set up simulation telemetry arrays
@@ -249,14 +256,13 @@ class DITLs:
         >>> passes_per_sim = ditls.number_of_passes
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize empty DITLs collection.
 
         Creates an empty list to store DITL simulation results and initializes
         statistics counters.
         """
-        self.ditls = list()
-        self.reset_stats()
+        self.ditls: list[DITL] = list()
         self.total = 0
         self.suncons = 0
 

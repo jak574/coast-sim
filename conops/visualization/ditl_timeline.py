@@ -6,6 +6,11 @@ eclipses, and ground station passes.
 """
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+
+from conops.ditl.ditl import DITL
+from conops.ditl.queue_ditl import QueueDITL
 
 from ..common import ACSMode
 from ..config import ObservationCategories
@@ -13,18 +18,18 @@ from ..config.visualization import VisualizationConfig
 
 
 def plot_ditl_timeline(
-    ditl,
-    offset_hours=0,
-    figsize=(10, 6),
-    orbit_period=5762.0,
-    show_orbit_numbers=True,
-    show_saa=False,
-    save_path=None,
-    font_family=None,
-    font_size=None,
-    observation_categories=None,
-    config=None,
-):
+    ditl: DITL | QueueDITL,
+    offset_hours: float = 0.0,
+    figsize: tuple[float, float] = (10, 6),
+    orbit_period: float = 5762.0,
+    show_orbit_numbers: bool = True,
+    show_saa: bool = False,
+    save_path: str | None = None,
+    font_family: str | None = None,
+    font_size: int | None = None,
+    observation_categories: ObservationCategories | None = None,
+    config: VisualizationConfig | None = None,
+) -> tuple[Figure, Axes]:
     """Plot a DITL timeline showing spacecraft operations.
 
     Creates a comprehensive timeline visualization showing:
@@ -97,8 +102,6 @@ def plot_ditl_timeline(
     if font_size is None:
         font_size = config.label_font_size
 
-    hfont = {"fontname": font_family, "fontsize": font_size}
-
     # Extract simulation start time
     if not ditl.plan or len(ditl.plan) == 0:
         raise ValueError("DITL simulation has no pointings. Run calc() first.")
@@ -107,7 +110,7 @@ def plot_ditl_timeline(
 
     # Create figure
     fig = plt.figure(figsize=figsize)
-    ax = plt.axes([0.12, 0.3, 0.8, 0.5], frameon=True)
+    ax = plt.axes((0.12, 0.3, 0.8, 0.5), frameon=True)
 
     # Calculate timeline duration in hours
     if hasattr(ditl, "utime") and len(ditl.utime) > 0:
@@ -140,26 +143,23 @@ def plot_ditl_timeline(
     num_data_rows = len(timeline_rows)
     data_y_positions = [-(i * row_spacing) for i in range(num_data_rows)]
 
+    # Create mapping of row names to y-positions
+    row_positions = dict(zip([row[0] for row in timeline_rows], data_y_positions))
+
     # If showing orbit numbers, shift everything down and add orbit at top
     if show_orbit_numbers:
         orbit_y_position = data_y_positions[0] + row_spacing
         data_y_positions = [orbit_y_position] + data_y_positions
         timeline_rows.insert(0, ("Orbit", None, None))
-    else:
-        orbit_y_position = None
 
-    # Create mapping of row names to y-positions
-    row_positions = dict(zip([row[0] for row in timeline_rows], data_y_positions))
-
-    # Draw orbit numbers if requested
-    if show_orbit_numbers:
+        # Draw orbit numbers if requested
         num_orbits = int(duration_hours * 3600 / orbit_period) + 1
         for i in range(num_orbits):
             barcol = "grey" if i % 2 == 1 else "white"
             orbit_start = i * orbit_period / 3600
             orbit_width = orbit_period / 3600
             ax.broken_barh(
-                [[orbit_start, orbit_width]],
+                [(orbit_start, orbit_width)],
                 (orbit_y_position, bar_height),
                 facecolors=barcol,
                 edgecolor="black",
@@ -288,7 +288,7 @@ def plot_ditl_timeline(
     y_labels = [row[0] for row in timeline_rows]
     y_ticks = [pos + bar_height / 2 for pos in data_y_positions]
 
-    ax.set_yticks(y_ticks, labels=y_labels, **hfont)
+    ax.set_yticks(y_ticks, labels=y_labels, fontname=font_family, fontsize=font_size)
     ax.yaxis.grid(True, zorder=0)
     ax.set_axisbelow(True)
 
@@ -296,8 +296,10 @@ def plot_ditl_timeline(
     ax.set_xlim(-0.1, duration_hours + 0.1)
     x_ticks = range(0, int(duration_hours) + 1, max(1, int(duration_hours / 6)))
     ax.set_xticks(x_ticks)
-    ax.set_xticklabels([f"{t}" for t in x_ticks], **hfont)
-    ax.set_xlabel("Hour", **hfont)
+    ax.set_xticklabels(
+        [f"{t}" for t in x_ticks], fontname=font_family, fontsize=font_size
+    )
+    ax.set_xlabel("Hour", fontname=font_family, fontsize=font_size)
 
     # Add legend
     ax.legend(
@@ -317,7 +319,12 @@ def plot_ditl_timeline(
     return fig, ax
 
 
-def _extract_observations(ditl, t_start, offset_hours, categories=None):
+def _extract_observations(
+    ditl: QueueDITL | DITL,
+    t_start: float,
+    offset_hours: float,
+    categories: ObservationCategories | None = None,
+) -> dict[str, list[tuple[float, float]]]:
     """Extract observation segments grouped by type based on obsid.
 
     Parameters
@@ -336,7 +343,9 @@ def _extract_observations(ditl, t_start, offset_hours, categories=None):
         categories = ObservationCategories.default_categories()
 
     # Initialize observation dict with all category names
-    observations = {name: [] for name in categories.get_all_category_names()}
+    observations: dict[str, list[tuple[float, float]]] = {
+        name: [] for name in categories.get_all_category_names()
+    }
 
     for ppt in ditl.plan:
         # Calculate observation start and duration
@@ -358,7 +367,9 @@ def _extract_observations(ditl, t_start, offset_hours, categories=None):
     return observations
 
 
-def _extract_slews(ditl, t_start, offset_hours):
+def _extract_slews(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
     """Extract slew segments from plan."""
     slew_segments = []
     for ppt in ditl.plan:
@@ -369,14 +380,16 @@ def _extract_slews(ditl, t_start, offset_hours):
     return slew_segments
 
 
-def _extract_safe_mode(ditl, t_start, offset_hours):
+def _extract_safe_mode(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
     """Extract safe mode periods from mode timeline."""
     if not hasattr(ditl, "mode") or not hasattr(ditl, "utime"):
         return []
 
-    safe_segments = []
+    safe_segments: list[tuple[float, float]] = []
     in_safe = False
-    safe_start = 0
+    safe_start = 0.0
 
     for i, mode_val in enumerate(ditl.mode):
         # Check if in SAFE mode (mode value = 5)
@@ -405,14 +418,16 @@ def _extract_safe_mode(ditl, t_start, offset_hours):
     return safe_segments
 
 
-def _extract_saa_passages(ditl, t_start, offset_hours):
+def _extract_saa_passages(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
     """Extract SAA passage times from mode timeline."""
     if not hasattr(ditl, "mode") or not hasattr(ditl, "utime"):
         return []
 
-    saa_segments = []
+    saa_segments: list[tuple[float, float]] = []
     in_saa = False
-    saa_start = 0
+    saa_start = 0.0
 
     for i, mode_val in enumerate(ditl.mode):
         # Check if in SAA mode
@@ -441,9 +456,11 @@ def _extract_saa_passages(ditl, t_start, offset_hours):
     return saa_segments
 
 
-def _extract_eclipses(ditl, t_start, offset_hours):
+def _extract_eclipses(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
     """Extract eclipse periods from constraint or mode timeline."""
-    eclipse_segments = []
+    eclipse_segments: list[tuple[float, float]] = []
 
     # Try to get eclipse info from the constraint if available
     if (
@@ -452,7 +469,7 @@ def _extract_eclipses(ditl, t_start, offset_hours):
         and hasattr(ditl, "utime")
     ):
         in_eclipse = False
-        eclipse_start = 0
+        eclipse_start = 0.0
 
         for i, utime in enumerate(ditl.utime):
             time_hours = (utime - t_start) / 3600 - offset_hours
@@ -480,7 +497,9 @@ def _extract_eclipses(ditl, t_start, offset_hours):
     return eclipse_segments
 
 
-def _extract_ground_passes(ditl, t_start, offset_hours):
+def _extract_ground_passes(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
     """Extract ground station pass times from ACS pass list."""
     if not hasattr(ditl, "acs") or ditl.acs is None:
         return []
@@ -502,8 +521,14 @@ def _extract_ground_passes(ditl, t_start, offset_hours):
 
 
 def annotate_slew_distances(
-    ax, ditl, t_start, offset_hours, slew_indices, font_family="Helvetica", font_size=9
-):
+    ax: Axes,
+    ditl: QueueDITL | DITL,
+    t_start: float,
+    offset_hours: float,
+    slew_indices: list[int],
+    font_family: str = "Helvetica",
+    font_size: int = 9,
+) -> Axes:
     """Add annotations showing slew distances for specific slews.
 
     Parameters
