@@ -153,7 +153,6 @@ def plot_ditl_timeline(
         timeline_rows.insert(0, ("Orbit", None, None))
 
         # Draw orbit numbers if requested
-
         num_orbits = int(duration_hours * 3600 / orbit_period) + 1
         for i in range(num_orbits):
             barcol = "grey" if i % 2 == 1 else "white"

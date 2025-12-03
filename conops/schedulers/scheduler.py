@@ -101,11 +101,10 @@ class DumbScheduler:
                 # Evaluate constraints at each timestep in the observation window
                 time_window = self.ephem.timestamp[begin_idx:end_idx]
                 in_occult = [
-                    self.constraint.constraint.in_constraint(
-                        ephemeris=self.ephem,
-                        target_ra=task.ra,
-                        target_dec=task.dec,
-                        time=t,
+                    self.constraint.in_constraint(
+                        ra=task.ra,
+                        dec=task.dec,
+                        utime=t.timestamp(),
                     )
                     for t in time_window
                 ]

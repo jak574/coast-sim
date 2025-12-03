@@ -722,9 +722,9 @@ class TestCalcMethod:
         queue_ditl.length = 1
         queue_ditl.step_size = 3600  # 1 hour steps for faster test
         queue_ditl.calc()
-        assert len(queue_ditl.mode) == 1440
-        assert len(queue_ditl.ra) == 1440
-        assert len(queue_ditl.dec) == 1440
+        assert len(queue_ditl.mode) == 24
+        assert len(queue_ditl.ra) == 24
+        assert len(queue_ditl.dec) == 24
 
     def test_calc_sets_acs_ephemeris(self, queue_ditl):
         queue_ditl.acs.ephem = None

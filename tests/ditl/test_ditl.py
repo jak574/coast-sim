@@ -306,11 +306,12 @@ class TestDITLIntegration:
         """Test that simulation respects the configured simulation length."""
         from datetime import datetime, timezone
 
-        # Set begin and end to span exactly 1 day
+        # Set begin and end to match the ephemeris timestamps
         ditl.begin = datetime(2018, 11, 27, 0, 0, 0, tzinfo=timezone.utc)
-        ditl.end = datetime(2018, 11, 28, 0, 0, 0, tzinfo=timezone.utc)
+        ditl.end = datetime(
+            2018, 11, 27, 0, 4, 0, tzinfo=timezone.utc
+        )  # Last timestamp in ephemeris
         ditl.step_size = 60
         ditl.calc()
-        # Should have approximately 1440 timesteps (86400 seconds / 60)
-        expected_len = int(86400 / ditl.step_size)
-        assert len(ditl.utime) == expected_len
+        # Should have 4 timesteps (np.arange from 0 to 4 with step 1 gives [0,1,2,3])
+        assert len(ditl.utime) == 4

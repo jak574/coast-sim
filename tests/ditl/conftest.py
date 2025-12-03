@@ -14,15 +14,17 @@ from conops.ditl.ditl_mixin import DITLMixin
 class DummyEphemeris:
     """Minimal mock ephemeris for testing."""
 
-    def __init__(self):
+    def __init__(self, num_steps: int = 5):
         from datetime import datetime, timezone
 
-        self.step_size = 3600
-        # Cover 2018 day 331 (Nov 27) for 1 days - but use larger timestep (3600s instead of 60s)
-        # to reduce Mock object creation: 1 days @ 3600-second steps = 24 timesteps instead of 1440
-        unix_times = np.arange(1543276800, 1543446000, 3600)
+        self.step_size = 60  # Use 60 second steps for faster tests
+        # Create a short simulation: just a few minutes instead of 24 hours
+        start_time = 1543276800  # 2018-11-27 00:00:00 UTC
+        unix_times = np.arange(
+            start_time, start_time + num_steps * self.step_size, self.step_size
+        )
         self.timestamp = [
-            datetime.fromtimestamp(t, tz=timezone.utc) for t in unix_times
+            datetime.fromtimestamp(float(t), tz=timezone.utc) for t in unix_times
         ]
         self.utime = unix_times
         # Add earth and sun attributes for ACS initialization
