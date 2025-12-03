@@ -342,14 +342,14 @@ class TestDumbSchedulerConstraints:
     """Test constraint evaluation."""
 
     def test_constraint_in_constraint_called(self, scheduler, simple_target_factory):
-        original_in_constraint = scheduler.constraint.in_constraint
+        original_in_constraint = scheduler.constraint.constraint.in_constraint
         call_count = [0]
 
         def tracked_in_constraint(*args, **kwargs):
             call_count[0] += 1
             return original_in_constraint(*args, **kwargs)
 
-        scheduler.constraint.in_constraint = tracked_in_constraint
+        scheduler.constraint.constraint.in_constraint = tracked_in_constraint
 
         target = simple_target_factory(1, 45.0, 30.0, 600)
         scheduler.targlist.add_target(target)
@@ -373,11 +373,7 @@ class TestDumbSchedulerConstraints:
     def test_constraint_with_all_times_invalid_not_scheduled(
         self, scheduler, simple_target_factory
     ):
-        scheduler.constraint.in_constraint = (
-            lambda ra, dec, utime, hardonly=True: np.ones(
-                len(utime) if hasattr(utime, "__len__") else 1, dtype=bool
-            )
-        )
+        scheduler.constraint.constraint.in_constraint = lambda *args, **kwargs: True
         target = simple_target_factory(1, 45.0, 30.0, 600)
         scheduler.targlist.add_target(target)
         scheduler.schedule()

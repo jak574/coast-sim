@@ -15,17 +15,17 @@ class DummyEphemeris:
     """Minimal mock ephemeris for testing."""
 
     def __init__(self):
-        self.step_size = 3600.0
-        # Cover 2018 day 331 (Nov 27) for 2 days
+        self.step_size = 60.0
+        # Cover 2018 day 331 (Nov 27) for 1 day
         base_time = datetime(2018, 11, 27, tzinfo=timezone.utc)
         # timestamp must be a list of datetime objects for helper functions
         self.timestamp = [
-            base_time + timedelta(seconds=i * 3600)
-            for i in range(48)  # 2 days worth
+            base_time + timedelta(seconds=i * 60)
+            for i in range(1441)  # 1 day worth at 60s steps
         ]
         # Add earth and sun attributes for ACS initialization
-        self.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0)) for _ in range(48)]
-        self.sun = [Mock(ra=Mock(deg=45.0), dec=Mock(deg=23.5)) for _ in range(48)]
+        self.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0)) for _ in range(1441)]
+        self.sun = [Mock(ra=Mock(deg=45.0), dec=Mock(deg=23.5)) for _ in range(1441)]
 
     def index(self, time):
         """Mock index method."""

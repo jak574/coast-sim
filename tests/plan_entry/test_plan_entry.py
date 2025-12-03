@@ -57,8 +57,8 @@ class TestPlanEntryInit:
         assert pe.merit == 101
         assert pe.windows == []
         assert pe.obstype == "PPT"
-        assert pe.slewpath is False
-        assert pe.slewdist is False
+        assert pe.slewpath == ([], [])
+        assert pe.slewdist == 0.0
 
     def test_init_without_config_raises_assertion(self):
         """Test that initialization without constraint raises AssertionError."""
@@ -284,43 +284,6 @@ class TestVisible:
         assert window is False
 
 
-class TestInSlew:
-    def test_in_slew_before_start(self, plan_entry):
-        """Test in_slew before slew starts."""
-        plan_entry.begin = 1000
-        plan_entry.slewtime = 100
-
-        assert plan_entry.in_slew(999) is False
-
-    def test_in_slew_at_start(self, plan_entry):
-        """Test in_slew at start of slew."""
-        plan_entry.begin = 1000
-        plan_entry.slewtime = 100
-
-        assert plan_entry.in_slew(1000) is True
-
-    def test_in_slew_during(self, plan_entry):
-        """Test in_slew during slew."""
-        plan_entry.begin = 1000
-        plan_entry.slewtime = 100
-
-        assert plan_entry.in_slew(1050) is True
-
-    def test_in_slew_at_end(self, plan_entry):
-        """Test in_slew at end of slew."""
-        plan_entry.begin = 1000
-        plan_entry.slewtime = 100
-
-        assert plan_entry.in_slew(1099) is True
-
-    def test_in_slew_after_end(self, plan_entry):
-        """Test in_slew after slew ends."""
-        plan_entry.begin = 1000
-        plan_entry.slewtime = 100
-
-        assert plan_entry.in_slew(1100) is False
-
-
 class TestRaDec:
     def test_ra_dec_before_observation(self, plan_entry):
         """Test ra_dec before observation starts."""
@@ -341,16 +304,12 @@ class TestRaDec:
         plan_entry.slewtime = 100
         plan_entry.ra = 180.0
         plan_entry.dec = 45.0
-        plan_entry.slewpath = (
-            np.array([100.0, 180.0]),
-            np.array([30.0, 45.0]),
-        )
-        plan_entry.slewsecs = np.array([0, 100])
+        # Note: ra_dec only returns target ra/dec during observation, not during slew
         ra, dec = plan_entry.ra_dec(1050)
 
-        # Should interpolate halfway
-        assert ra == 140
-        assert dec == 37.5
+        # Should return target ra/dec during observation period
+        assert ra == 180.0
+        assert dec == 45.0
 
     def test_ra_dec_after_slew(self, plan_entry):
         """Test ra_dec after slew completes."""
@@ -400,60 +359,21 @@ class TestCalcSlewtime:
         slewtime = plan_entry.calc_slewtime(lastra, lastdec)
 
         assert slewtime > 0
-        assert slewtime == plan_entry.slewtime  # Should update
-
-    def test_calc_slewtime_with_no_update(self, plan_entry):
-        """Test calc_slewtime with no_update flag."""
-        lastra = 100.0
-        lastdec = 30.0
-        plan_entry.ra = 150.0
-        plan_entry.dec = 60.0
-        plan_entry.slewtime = 0
-
-        slewtime = plan_entry.calc_slewtime(lastra, lastdec, no_update=True)
-
-        assert slewtime > 0
-        assert plan_entry.slewtime == 0  # Should not update
-
-    def test_calc_slewtime_with_distance(self, plan_entry):
-        """Test calc_slewtime with provided distance."""
-        lastra = 100.0
-        lastdec = 30.0
-        plan_entry.ra = 150.0
-        plan_entry.dec = 60.0
-
-        slewtime = plan_entry.calc_slewtime(
-            lastra, lastdec, distance=45.0, no_update=False
-        )
-
-        assert slewtime > 0
-        assert slewtime == round(plan_entry.acs_config.slew_time(45.0))
+        # Note: calc_slewtime no longer updates self.slewtime
+        assert plan_entry.slewtime == 0
 
     def test_calc_slewtime_uses_cached_distance(self, plan_entry):
-        """Test calc_slewtime uses cached slewdist."""
+        """Test calc_slewtime computes distance (predict_slew always recalculates)."""
         lastra = 100.0
         lastdec = 30.0
         plan_entry.ra = 150.0
         plan_entry.dec = 60.0
-        plan_entry.slewdist = 30.0
 
-        slewtime = plan_entry.calc_slewtime(lastra, lastdec, distance=False)
+        slewtime = plan_entry.calc_slewtime(lastra, lastdec)
 
-        assert slewtime == round(plan_entry.acs_config.slew_time(30.0))
-
-    def test_calc_slewtime_computes_distance_if_needed(self, plan_entry):
-        """Test calc_slewtime computes distance if not cached."""
-        lastra = 100.0
-        lastdec = 30.0
-        plan_entry.ra = 150.0
-        plan_entry.dec = 60.0
-        plan_entry.slewdist = False
-
-        slewtime = plan_entry.calc_slewtime(lastra, lastdec, distance=False)
-
-        assert plan_entry.slewdist is not False
-        assert plan_entry.slewpath is not False
-        assert slewtime > 0
+        # calc_slewtime always calls predict_slew which recalculates distance
+        assert plan_entry.slewdist > 0
+        assert slewtime == round(plan_entry.acs_config.slew_time(plan_entry.slewdist))
 
 
 class TestPredictSlew:

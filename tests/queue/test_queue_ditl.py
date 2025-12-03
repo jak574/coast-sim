@@ -86,9 +86,6 @@ class TestSetupSimulationTiming:
         assert queue_ditl.uend > queue_ditl.ustart
 
     def test_setup_timing_uend_length_and_utime(self, queue_ditl):
-        queue_ditl.year = 2018
-        queue_ditl.day = 331
-        queue_ditl.length = 1
         queue_ditl.step_size = 60
         queue_ditl._setup_simulation_timing()
         assert queue_ditl.uend == queue_ditl.ustart + 86400
@@ -113,10 +110,10 @@ class TestScheduleGroundstationPasses:
         queue_ditl.length = 1
         queue_ditl._schedule_groundstation_passes()
         # Check the log instead of print output
-        assert len(queue_ditl.log) > 0
+        assert len(queue_ditl.log.events) > 0
         assert any(
             "Scheduling groundstation passes" in event.description
-            for event in queue_ditl.log
+            for event in queue_ditl.log.events
         )
 
     def test_schedule_passes_already_scheduled_no_get(self, queue_ditl):
@@ -144,8 +141,8 @@ class TestScheduleGroundstationPasses:
         queue_ditl.acs.passrequests.get.side_effect = populate_passes
         queue_ditl._schedule_groundstation_passes()
         # Check the log instead of print output
-        assert len(queue_ditl.log) > 0
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        assert len(queue_ditl.log.events) > 0
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "Scheduling groundstation passes" in log_text
         assert "Pass 1" in log_text
         assert "Pass 2" in log_text
@@ -332,7 +329,7 @@ class TestHandleChargingMode:
         queue_ditl._handle_charging_mode(1000.0)
         assert queue_ditl.charging_ppt is None
         # Check the log instead of print output
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "Battery recharged" in log_text
 
     def test_charging_ends_when_constrained_end_and_done_set(self, queue_ditl, capsys):
@@ -350,7 +347,7 @@ class TestHandleChargingMode:
         assert mock_charging.done is True
         assert queue_ditl.charging_ppt is None
         # Check the log instead of print output
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "Charging pointing constrained" in log_text
 
     def test_charging_ends_in_eclipse_clears_charging(self, queue_ditl, capsys):
@@ -364,7 +361,7 @@ class TestHandleChargingMode:
         queue_ditl._handle_charging_mode(1000.0)
         assert queue_ditl.charging_ppt is None
         # Check the log instead of print output
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "Entered eclipse" in log_text
 
     def test_charging_continues(self, queue_ditl):
@@ -495,7 +492,7 @@ class TestFetchNewPPT:
         queue_ditl.queue.get = Mock(return_value=mock_ppt)
         _ = queue_ditl._fetch_new_ppt(1000.0, 10.0, 20.0)
         # Check the log instead of print output
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "Fetching new PPT from Queue" in log_text
 
     def test_fetch_ppt_none_available(self, queue_ditl, capsys):
@@ -503,7 +500,7 @@ class TestFetchNewPPT:
         queue_ditl._fetch_new_ppt(1000.0, 10.0, 20.0)
         assert queue_ditl.ppt is None
         # Check the log instead of print output
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "No targets available from Queue" in log_text
 
 
@@ -725,9 +722,9 @@ class TestCalcMethod:
         queue_ditl.length = 1
         queue_ditl.step_size = 3600  # 1 hour steps for faster test
         queue_ditl.calc()
-        assert len(queue_ditl.mode) == 24
-        assert len(queue_ditl.ra) == 24
-        assert len(queue_ditl.dec) == 24
+        assert len(queue_ditl.mode) == 1440
+        assert len(queue_ditl.ra) == 1440
+        assert len(queue_ditl.dec) == 1440
 
     def test_calc_sets_acs_ephemeris(self, queue_ditl):
         queue_ditl.acs.ephem = None
@@ -758,7 +755,7 @@ class TestCalcMethod:
         mock_ppt.copy.return_value.begin = 1543622400
         mock_ppt.copy.return_value.end = 1543629600
 
-        queue_ditl.queue.get = Mock(side_effect=[mock_ppt] + [None] * 100)
+        queue_ditl.queue.get = Mock(side_effect=[mock_ppt] + [None] * 1500)
         queue_ditl.calc()
 
         assert len(queue_ditl.plan) > 0
@@ -994,7 +991,7 @@ class TestCalcMethod:
         assert command.execution_time == 1100.0
 
         # Check that the delay message was logged
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "delaying next slew until" in log_text
 
     def test_fetch_ppt_delays_for_visibility(self, queue_ditl, capsys):
@@ -1018,7 +1015,7 @@ class TestCalcMethod:
         assert command.execution_time == 1200.0
 
         # Check that the visibility delay message was logged
-        log_text = "\n".join(event.description for event in queue_ditl.log)
+        log_text = "\n".join(event.description for event in queue_ditl.log.events)
         assert "Slew delayed by" in log_text
 
     def test_terminate_science_ppt_for_pass_sets_done_flag(self, queue_ditl):
@@ -1069,19 +1066,16 @@ class TestCalcMethod:
         """Test _setup_simulation_timing fails when ephemeris doesn't cover date range."""
         from datetime import datetime, timezone
 
+        import pytest
+
         # Set begin/end times that are not in the ephemeris
         queue_ditl.begin = datetime(2025, 1, 1, tzinfo=timezone.utc)  # Far future date
         queue_ditl.end = datetime(2025, 1, 2, tzinfo=timezone.utc)
 
-        result = queue_ditl._setup_simulation_timing()
-
-        assert result is False
-        # Check the log instead of print output
-        assert len(queue_ditl.log) > 0
-        assert any(
-            "ERROR: Ephemeris not valid for date range" in event.description
-            for event in queue_ditl.log
-        )
+        with pytest.raises(
+            ValueError, match="ERROR: Ephemeris does not cover simulation date range"
+        ):
+            queue_ditl._setup_simulation_timing()
 
 
 class TestGetConstraintName:
@@ -1285,7 +1279,9 @@ class TestCheckAndManagePasses:
         """Test that pass gets assigned obsid when starting."""
         utime = 1000.0
         ra, dec = 10.0, 20.0
-        pass_obj = Pass(station="GS_STATION", begin=950.0, slewrequired=900.0)
+        pass_obj = Pass(
+            station="GS_STATION", begin=950.0, slewrequired=900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=1234)
@@ -1297,7 +1293,9 @@ class TestCheckAndManagePasses:
         """Test START_PASS behavior in SAA mode (should not be enqueued)."""
         utime = 1000.0
         ra, dec = 10.0, 20.0
-        pass_obj = Pass(station="GS_STATION", begin=950.0, slewrequired=900.0)
+        pass_obj = Pass(
+            station="GS_STATION", begin=950.0, slewrequired=900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=1234)
@@ -1310,7 +1308,7 @@ class TestCheckAndManagePasses:
         """Test that START_PASS is not issued when in SAA mode."""
         utime = 2000.0
         ra, dec = 30.0, 40.0
-        pass_obj = Pass(station="GS2", begin=1850.0, slewrequired=1800.0)
+        pass_obj = Pass(station="GS2", begin=1850.0, slewrequired=1800.0, length=600.0)
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SAA
         queue_ditl._check_and_manage_passes(utime, ra, dec)
@@ -1322,7 +1320,9 @@ class TestCheckAndManagePasses:
         """Test pass management with both end and start scenarios."""
         utime = 3000.0
         ra, dec = 0.0, 0.0
-        pass_obj = Pass(station="GS_ORDER", begin=2950.0, slewrequired=2900.0)
+        pass_obj = Pass(
+            station="GS_ORDER", begin=2950.0, slewrequired=2900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=0xBEEF)
@@ -1335,7 +1335,9 @@ class TestCheckAndManagePasses:
         """Test multiple commands during pass transitions."""
         utime = 3000.0
         ra, dec = 0.0, 0.0
-        pass_obj = Pass(station="GS_ORDER", begin=2950.0, slewrequired=2900.0)
+        pass_obj = Pass(
+            station="GS_ORDER", begin=2950.0, slewrequired=2900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=0xBEEF)
@@ -1346,7 +1348,9 @@ class TestCheckAndManagePasses:
         """Test command ordering during pass transitions."""
         utime = 3000.0
         ra, dec = 0.0, 0.0
-        pass_obj = Pass(station="GS_ORDER", begin=2950.0, slewrequired=2900.0)
+        pass_obj = Pass(
+            station="GS_ORDER", begin=2950.0, slewrequired=2900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=0xBEEF)
@@ -1359,7 +1363,9 @@ class TestCheckAndManagePasses:
         """Test START_PASS command structure and timing."""
         utime = 3000.0
         ra, dec = 0.0, 0.0
-        pass_obj = Pass(station="GS_ORDER", begin=2950.0, slewrequired=2900.0)
+        pass_obj = Pass(
+            station="GS_ORDER", begin=2950.0, slewrequired=2900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=0xBEEF)
@@ -1372,7 +1378,9 @@ class TestCheckAndManagePasses:
         """Test obsid handling during pass transitions."""
         utime = 3000.0
         ra, dec = 0.0, 0.0
-        pass_obj = Pass(station="GS_ORDER", begin=2950.0, slewrequired=2900.0)
+        pass_obj = Pass(
+            station="GS_ORDER", begin=2950.0, slewrequired=2900.0, length=600.0
+        )
         queue_ditl.acs.passrequests.current_pass = Mock(return_value=pass_obj)
         queue_ditl.acs.acsmode = ACSMode.SCIENCE
         queue_ditl.acs.last_ppt = Mock(obsid=0xBEEF)

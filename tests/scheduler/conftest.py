@@ -108,22 +108,19 @@ class MockConstraint(RealConstraint):
         super().__init__()
         # Set the ephemeris (other tests rely on this attribute)
         self.ephem = ephem
+        self._mock_constraint = Mock()
+        self._mock_constraint.in_constraint = Mock(return_value=False)
+
+    @property
+    def constraint(self):
+        """Mock the constraint property to avoid rust_ephem."""
+        return self._mock_constraint
 
     # Allow assigning methods/attributes at runtime in tests (monkeypatching)
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
-    def in_constraint(self, ra, dec, utime, hardonly=True):
-        # If utime is an iterable (list/np.ndarray or something with __len__),
-        # return a numpy boolean array matching its length to mimic the real
-        # Constraint behavior.
-        if isinstance(utime, (list, np.ndarray)) or hasattr(utime, "__len__"):
-            try:
-                length = len(utime)
-            except Exception:
-                # fallback if len() raises for some unusual iterable
-                return np.zeros(0, dtype=bool)
-            return np.zeros(length, dtype=bool)
-        # Otherwise, treat as a scalar time and return a single boolean
+    def in_constraint(self, time, ephemeris, target_ra, target_dec):
+        # Mock implementation that doesn't use rust_ephem
         return False
 
 

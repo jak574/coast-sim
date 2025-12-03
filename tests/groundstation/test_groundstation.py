@@ -66,11 +66,11 @@ class TestGroundStationRegistry:
         assert "GHA" in groundstation_registry.codes()
 
     def test_iteration_returns_multiple_groundstations(self, default_registry):
-        items = list(default_registry)
+        items = list(default_registry.stations)
         assert len(items) >= 2
 
     def test_iteration_returns_groundstation_instances(self, default_registry):
-        items = list(default_registry)
+        items = list(default_registry.stations)
         for s in items:
             assert isinstance(s, GroundStation)
 

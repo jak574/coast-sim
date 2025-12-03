@@ -1,8 +1,10 @@
-from conops import AttitudeControlSystem, Slew
+from conops import AttitudeControlSystem, Constraint, MissionConfig, Slew, SpacecraftBus
 
 
-class DummyConstraint:
-    def __init__(self):
+class DummyConstraint(Constraint):
+    def __init__(self, **kwargs):
+        # Initialize with minimal required fields
+        super().__init__(**kwargs)
         # Slew asserts constraint.ephem is not None, but does not use it during calc
         self.ephem = object()
 
@@ -11,7 +13,12 @@ def test_slew_uses_acs_config():
     acs = AttitudeControlSystem(
         slew_acceleration=1.0, max_slew_rate=0.5, settle_time=90.0
     )
-    s = Slew(constraint=DummyConstraint(), acs_config=acs)
+    constraint = DummyConstraint()
+    spacecraft_bus = SpacecraftBus(attitude_control=acs)
+    config = MissionConfig(
+        name="Test", constraint=constraint, spacecraft_bus=spacecraft_bus
+    )
+    s = Slew(config=config)
     s.startra = 0
     s.startdec = 0
     s.endra = 90
@@ -23,7 +30,12 @@ def test_slew_uses_acs_config():
 
 def test_slew_path_and_secs_lengths():
     acs = AttitudeControlSystem()
-    s = Slew(constraint=DummyConstraint(), acs_config=acs)
+    constraint = DummyConstraint()
+    spacecraft_bus = SpacecraftBus(attitude_control=acs)
+    config = MissionConfig(
+        name="Test", constraint=constraint, spacecraft_bus=spacecraft_bus
+    )
+    s = Slew(config=config)
     s.startra = 10
     s.startdec = 5
     s.endra = 20

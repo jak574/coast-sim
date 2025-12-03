@@ -34,6 +34,13 @@ def mock_config():
     sun_entry.dec = sun_dec
     ephem.sun = [sun_entry]
     ephem.index = Mock(return_value=0)
+    # Add timestamp for DITLMixin init
+    from datetime import datetime, timezone
+
+    ephem.timestamp = [
+        datetime(2018, 11, 27, 0, 0, 0, tzinfo=timezone.utc),
+        datetime(2018, 11, 28, 0, 0, 0, tzinfo=timezone.utc),
+    ]
 
     cfg.constraint = Mock()
     cfg.constraint.ephem = ephem
@@ -112,6 +119,11 @@ def test_process_data_management_generates_and_downlinks(mock_config):
     station.bands = ["X"]
     station.get_downlink_rate = Mock(return_value=100.0)
     mock_config.ground_stations.get = Mock(return_value=station)
+    # Set up spacecraft communications in main config
+    mock_config.spacecraft_bus.communications = Mock()
+    mock_config.spacecraft_bus.communications.get_downlink_rate = Mock(
+        return_value=50.0
+    )
     # recorder remove_data returns the amount actually removed (Gb)
     mock_config.recorder.remove_data = Mock(return_value=0.3)
 
@@ -124,22 +136,17 @@ def test_process_data_management_generates_and_downlinks(mock_config):
 def test_get_effective_data_rate_branches(mock_config):
     mixin = DITLMixin(config=mock_config)
     station = Mock()
-    current_pass = Mock()
 
     # No comms_config -> use station overall max
     station.get_overall_max_downlink = Mock(return_value=10.0)
-    current_pass.config = Mock()
-    current_pass.config.spacecraft_bus = Mock()
-    current_pass.config.spacecraft_bus.communications = None
-    assert mixin._get_effective_data_rate(station, current_pass) == 10.0
+    mock_config.spacecraft_bus.communications = None
+    assert mixin._get_effective_data_rate(station) == 10.0
 
     # No bands on station -> None
-    current_pass.config = Mock()
-    current_pass.config.spacecraft_bus = Mock()
-    current_pass.config.spacecraft_bus.communications = Mock()
+    mock_config.spacecraft_bus.communications = Mock()
     station.bands = None
     station.supported_bands = Mock(return_value=[])
-    assert mixin._get_effective_data_rate(station, current_pass) is None
+    assert mixin._get_effective_data_rate(station) is None
 
     # Compute min across common bands and take max
     station.bands = ["S", "X", "Ka"]
@@ -147,8 +154,8 @@ def test_get_effective_data_rate_branches(mock_config):
     station.get_downlink_rate = Mock(
         side_effect=lambda b: {"S": 5.0, "X": 50.0, "Ka": 80.0}[b]
     )
-    current_pass.config.spacecraft_bus.communications.get_downlink_rate = Mock(
+    mock_config.spacecraft_bus.communications.get_downlink_rate = Mock(
         side_effect=lambda b: {"S": 10.0, "X": 40.0, "Ka": 0.0}[b]
     )
     # Effective per band: S=min(5,10)=5, X=min(50,40)=40, Ka excluded (0)
-    assert mixin._get_effective_data_rate(station, current_pass) == 40.0
+    assert mixin._get_effective_data_rate(station) == 40.0

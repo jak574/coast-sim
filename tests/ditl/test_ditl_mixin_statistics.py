@@ -3,6 +3,8 @@
 from datetime import datetime
 from unittest.mock import Mock
 
+from conftest import DummyEphemeris
+
 from conops import (
     ACSMode,
     Battery,
@@ -16,18 +18,6 @@ from conops import (
     SolarPanelSet,
     SpacecraftBus,
 )
-
-
-class DummyEphemeris:
-    """Minimal mock ephemeris for testing."""
-
-    def __init__(self):
-        self.step_size = 1.0
-        self.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0))]
-        self.sun = [Mock(ra=Mock(deg=45.0), dec=Mock(deg=23.5))]
-
-    def index(self, time):
-        return 0
 
 
 class MockDITL(DITLMixin, DITLStats):

@@ -1,7 +1,5 @@
 """Test fixtures for config subsystem tests."""
 
-from unittest.mock import Mock
-
 import pytest
 
 from conops import (
@@ -13,18 +11,19 @@ from conops import (
     SolarPanelSet,
     SpacecraftBus,
 )
+from conops.config.recorder import OnboardRecorder
 
 
 @pytest.fixture
 def minimal_config():
     name = "Test Config"
-    spacecraft_bus = Mock(spec=SpacecraftBus)
-    solar_panel = Mock(spec=SolarPanelSet)
-    payload = Mock(spec=Payload)
-    battery = Mock(spec=Battery)
-    constraint = Mock(spec=Constraint)
-    ground_stations = Mock(spec=GroundStationRegistry)
-    fault_management = None
+    spacecraft_bus = SpacecraftBus()
+    solar_panel = SolarPanelSet()
+    payload = Payload()
+    battery = Battery()
+    constraint = Constraint()
+    ground_stations = GroundStationRegistry()
+    recorder = OnboardRecorder()
 
     config = MissionConfig(
         name=name,
@@ -34,7 +33,7 @@ def minimal_config():
         battery=battery,
         constraint=constraint,
         ground_stations=ground_stations,
-        fault_management=fault_management,
+        recorder=recorder,
     )
 
     return {
@@ -45,5 +44,5 @@ def minimal_config():
         "battery": battery,
         "constraint": constraint,
         "ground_stations": ground_stations,
-        "fault_management": fault_management,
+        "recorder": recorder,
     }

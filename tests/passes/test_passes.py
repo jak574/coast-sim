@@ -27,10 +27,11 @@ class TestPassInitialization:
             ephem=None,
             station="SGS",
             begin=base_begin,
+            length=480.0,
         )
         assert p.station == "SGS"
         assert p.begin == base_begin
-        assert p.length is None
+        assert p.length == 480.0
         assert p.obsid == 0xFFFF
 
     def test_pass_creation_full(
@@ -84,16 +85,16 @@ class TestPassProperties:
     def test_end_property_no_length(
         self, mock_config, mock_constraint, mock_acs_config, base_begin
     ):
-        """Test end property raises when length is None."""
+        """Test end property works when length is set."""
         mock_config.spacecraft_bus.attitude_control = mock_acs_config
         p = Pass(
             config=mock_config,
             ephem=None,
             station="SGS",
             begin=base_begin,
+            length=480.0,
         )
-        with pytest.raises(AssertionError, match="Pass length must be set"):
-            _ = p.end
+        assert p.end == base_begin + 480.0
 
 
 class TestPassMethods:
@@ -488,6 +489,7 @@ class TestPassEdgeCases:
             config=mock_config,
             station="SGS",
             begin=base_begin,
+            length=480.0,
         )
         assert p.obsid == 0xFFFF
 
@@ -501,6 +503,7 @@ class TestPassEdgeCases:
             config=mock_config,
             station="SGS",
             begin=base_begin,
+            length=480.0,
         )
         assert p.slewrequired == 0.0
         assert p.slewlate == 0.0
@@ -653,18 +656,18 @@ class TestPassTimesCurrent:
     def test_current_pass_raises_if_pass_in_pass_list_has_no_length(
         self, mock_constraint, mock_config, mock_acs_config
     ):
-        """If a Pass has no length, in_pass() raises; current_pass should propagate AssertionError."""
+        """Test that Pass objects have length properly set."""
         pt = PassTimes(config=mock_config)
 
         mock_config.constraint = mock_constraint
         mock_config.spacecraft_bus.attitude_control = mock_acs_config
-        bad_pass = Pass(
+        good_pass = Pass(
             config=mock_config,
-            station="BAD",
+            station="GOOD",
             begin=2000.0,
-            length=None,
+            length=100.0,
         )
 
-        pt.passes = [bad_pass]
-        with pytest.raises(AssertionError, match="Pass length must be set"):
-            pt.current_pass(2000.0)
+        pt.passes = [good_pass]
+        # Should work fine with proper length
+        assert pt.current_pass(2000.0) is good_pass  # In pass

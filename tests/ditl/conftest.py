@@ -1,5 +1,6 @@
 """Test fixtures for ditl subsystem tests."""
 
+import datetime
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -41,6 +42,11 @@ def mock_config():
     cfg.constraint = Mock()
     cfg.constraint.ephem = Mock()  # DITLMixin asserts this is not None
     cfg.constraint.ephem.earth = [Mock(ra=Mock(deg=0.0), dec=Mock(deg=0.0))]
+    # Set timestamp to match DummyEphemeris range
+    cfg.constraint.ephem.timestamp = [
+        datetime.datetime(2018, 11, 27, 0, 0, 0, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2018, 11, 28, 0, 0, 0, tzinfo=datetime.timezone.utc),
+    ]
     cfg.battery = Mock()
     cfg.battery.max_depth_of_discharge = 0.5
     return cfg
@@ -330,6 +336,12 @@ def ditl_with_pass_setup(ditl_instance, mock_config):
     mock_station = Mock()
     # New per-band API: when no spacecraft comms, use GS overall max
     mock_station.get_overall_max_downlink.return_value = 100.0
+    # Set up station to avoid the iterable error
+    mock_station.bands = None  # This will make it use the overall max path
     ditl.config.ground_stations = Mock()
     ditl.config.ground_stations.get = Mock(return_value=mock_station)
+    # Ensure spacecraft_bus.communications is None to use overall max
+    if not hasattr(ditl.config, "spacecraft_bus"):
+        ditl.config.spacecraft_bus = Mock()
+    ditl.config.spacecraft_bus.communications = None
     return ditl

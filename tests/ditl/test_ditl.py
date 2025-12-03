@@ -44,16 +44,16 @@ class TestDITLCalc:
     """Test DITL calc method."""
 
     def test_calc_without_ephemeris_returns_false(self, ditl):
-        """Test that calc returns False when ephemeris is not loaded."""
+        """Test that calc raises ValueError when ephemeris is not loaded."""
         ditl.ephem = None
-        result = ditl.calc()
-        assert result is False
+        with pytest.raises(ValueError, match="ERROR: No ephemeris loaded"):
+            ditl.calc()
 
     def test_calc_without_plan_returns_false(self, ditl):
-        """Test that calc returns False when plan is not loaded."""
+        """Test that calc raises ValueError when plan is not loaded."""
         ditl.plan = None
-        result = ditl.calc()
-        assert result is False
+        with pytest.raises(ValueError, match="ERROR: No plan loaded"):
+            ditl.calc()
 
     def test_calc_sets_acs_ephemeris(self, ditl):
         """Test that calc sets ACS ephemeris if not already set."""
@@ -304,9 +304,13 @@ class TestDITLIntegration:
 
     def test_simulation_respects_simulation_length(self, ditl):
         """Test that simulation respects the configured simulation length."""
-        ditl.length = 1  # 1 day
+        from datetime import datetime, timezone
+
+        # Set begin and end to span exactly 1 day
+        ditl.begin = datetime(2018, 11, 27, 0, 0, 0, tzinfo=timezone.utc)
+        ditl.end = datetime(2018, 11, 28, 0, 0, 0, tzinfo=timezone.utc)
         ditl.step_size = 60
         ditl.calc()
         # Should have approximately 1440 timesteps (86400 seconds / 60)
-        expected_len = int(86400 * ditl.length / ditl.step_size)
+        expected_len = int(86400 / ditl.step_size)
         assert len(ditl.utime) == expected_len

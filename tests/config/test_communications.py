@@ -2,12 +2,11 @@
 
 import pytest
 
+from conops.common.enums import AntennaType, Polarization
 from conops.config import (
     AntennaPointing,
-    AntennaType,
     BandCapability,
     CommunicationsSystem,
-    Polarization,
 )
 
 

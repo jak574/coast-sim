@@ -11,66 +11,59 @@ from conops import Slew
 class TestSlewInit:
     """Test Slew initialization."""
 
-    def test_slew_init_constraint_set(self, slew, constraint):
-        assert slew.constraint == constraint
-
-    def test_slew_init_ephem_set(self, slew, ephem):
-        assert slew.ephem == ephem
-
-    def test_slew_init_acs_config_set(self, slew, acs_config):
-        assert slew.acs_config == acs_config
-
-    def test_slew_init_slewtime_zero(self, slew):
-        assert slew.slewtime == 0
-
-    def test_slew_init_slewdist_zero(self, slew):
-        assert slew.slewdist == 0
-
-    def test_slew_init_slewstart_zero(self, slew):
-        assert slew.slewstart == 0
-
-    def test_slew_init_slewend_zero(self, slew):
-        assert slew.slewend == 0
-
-    def test_slew_init_slewrequest_zero(self, slew):
-        assert slew.slewrequest == 0
-
-    def test_slew_init_startra_zero(self, slew):
-        assert slew.startra == 0
-
-    def test_slew_init_startdec_zero(self, slew):
-        assert slew.startdec == 0
-
-    def test_slew_init_endra_zero(self, slew):
-        assert slew.endra == 0
-
-    def test_slew_init_enddec_zero(self, slew):
-        assert slew.enddec == 0
-
-    def test_slew_init_obsid_zero(self, slew):
-        assert slew.obsid == 0
-
-    def test_slew_init_mode_zero(self, slew):
-        assert slew.mode == 0
-
-    def test_slew_init_at_false(self, slew):
-        assert slew.at is False
-
-    def test_slew_init_obstype_ppt(self, slew):
-        assert slew.obstype == "PPT"
+    @pytest.mark.parametrize(
+        "attr,value",
+        [
+            ("constraint", "constraint"),
+            ("ephem", "ephem"),
+            ("acs_config", "acs_config"),
+            ("slewtime", 0),
+            ("slewdist", 0),
+            ("slewstart", 0),
+            ("slewend", 0),
+            ("slewrequest", 0),
+            ("startra", 0),
+            ("startdec", 0),
+            ("endra", 0),
+            ("enddec", 0),
+            ("obsid", 0),
+            ("mode", 0),
+            ("at", None),
+            ("obstype", "PPT"),
+        ],
+    )
+    def test_slew_init(self, slew, attr, value, constraint, ephem, acs_config):
+        if attr in ["constraint", "ephem", "acs_config"]:
+            # Assuming fixtures provide the expected values
+            expected = locals()[attr]
+        else:
+            expected = value
+        assert getattr(slew, attr) == expected
 
     def test_slew_init_missing_constraint(self, acs_config):
+        mock_config = Mock()
+        mock_config.constraint = None
+        mock_config.spacecraft_bus = Mock()
+        mock_config.spacecraft_bus.attitude_control = acs_config
         with pytest.raises(AssertionError, match="Constraint must be set"):
-            Slew(constraint=None, acs_config=acs_config)
+            Slew(config=mock_config)
 
     def test_slew_init_missing_ephemeris(self, constraint, acs_config):
         constraint.ephem = None
+        mock_config = Mock()
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus = Mock()
+        mock_config.spacecraft_bus.attitude_control = acs_config
         with pytest.raises(AssertionError, match="Ephemeris must be set"):
-            Slew(constraint=constraint, acs_config=acs_config)
+            Slew(config=mock_config)
 
     def test_slew_init_missing_acs_config(self, constraint):
+        mock_config = Mock()
+        mock_config.constraint = constraint
+        mock_config.spacecraft_bus = Mock()
+        mock_config.spacecraft_bus.attitude_control = None
         with pytest.raises(AssertionError, match="ACS config must be set"):
-            Slew(constraint=constraint, acs_config=None)
+            Slew(config=mock_config)
 
 
 class TestSlewStr:
@@ -127,60 +120,20 @@ class TestRaDec:
 class TestSlewRaDec:
     """Test slew_ra_dec method."""
 
-    def test_slew_ra_dec_returns_ra_float(self, slew, acs_config):
-        acs_config.s_of_t = Mock(return_value=0.0)
-        acs_config.motion_time = Mock(return_value=100.0)
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewpath = (np.array([45.0, 90.0]), np.array([30.0, 60.0]))
-        slew.slewdist = 50.0  # Use modern path
-        ra, dec = slew.slew_ra_dec(1700000000.0)
+    def test_slew_ra_dec_returns_ra_float(self, slew_setup):
+        ra, dec = slew_setup.slew_ra_dec(1700000000.0)
         assert isinstance(ra, (float, np.floating))
 
-    def test_slew_ra_dec_returns_dec_float(self, slew, acs_config):
-        acs_config.s_of_t = Mock(return_value=0.0)
-        acs_config.motion_time = Mock(return_value=100.0)
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewpath = (np.array([45.0, 90.0]), np.array([30.0, 60.0]))
-        slew.slewdist = 50.0  # Use modern path
-        ra, dec = slew.slew_ra_dec(1700000000.0)
+    def test_slew_ra_dec_returns_dec_float(self, slew_setup):
+        ra, dec = slew_setup.slew_ra_dec(1700000000.0)
         assert isinstance(dec, (float, np.floating))
 
-    def test_slew_ra_dec_ra_in_range(self, slew, acs_config):
-        acs_config.s_of_t = Mock(return_value=0.0)
-        acs_config.motion_time = Mock(return_value=100.0)
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewpath = (np.array([45.0, 90.0]), np.array([30.0, 60.0]))
-        slew.slewdist = 50.0  # Use modern path
-        ra, dec = slew.slew_ra_dec(1700000000.0)
+    def test_slew_ra_dec_ra_in_range(self, slew_setup):
+        ra, dec = slew_setup.slew_ra_dec(1700000000.0)
         assert 0 <= ra < 360
 
-    def test_slew_ra_dec_dec_in_range(self, slew, acs_config):
-        acs_config.s_of_t = Mock(return_value=0.0)
-        acs_config.motion_time = Mock(return_value=100.0)
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewpath = (np.array([45.0, 90.0]), np.array([30.0, 60.0]))
-        slew.slewdist = 50.0  # Use modern path
-        ra, dec = slew.slew_ra_dec(1700000000.0)
+    def test_slew_ra_dec_dec_in_range(self, slew_setup):
+        ra, dec = slew_setup.slew_ra_dec(1700000000.0)
         assert -90 <= dec <= 90
 
     def test_slew_ra_dec_no_path_returns_ra_start(self, slew):
@@ -197,164 +150,62 @@ class TestSlewRaDec:
         ra, dec = slew.slew_ra_dec(1700000000.0)
         assert dec == 30.0
 
-    def test_slew_ra_dec_interpolation_mid_slew(self, slew, acs_config):
-        acs_config.s_of_t = Mock(return_value=25.0)  # Halfway through motion
-        acs_config.motion_time = Mock(return_value=100.0)
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewpath = (np.array([45.0, 90.0]), np.array([30.0, 60.0]))
-        slew.slewdist = 50.0  # Use modern path
-        # Call at 50 seconds into the slew to trigger interpolation
-        ra, dec = slew.slew_ra_dec(1700000050.0)
+    def test_slew_ra_dec_interpolation_mid_slew(self, slew_interpolation):
+        ra, dec = slew_interpolation.slew_ra_dec(1700000050.0)
         assert isinstance(ra, (float, np.floating))
         assert isinstance(dec, (float, np.floating))
-        # Should be interpolated value between start and end
         assert 45.0 <= ra <= 90.0
         assert 30.0 <= dec <= 60.0
 
-    def test_slew_ra_dec_modern_path_small_n(self, slew, acs_config):
-        acs_config.s_of_t = Mock(return_value=0.0)
-        acs_config.motion_time = Mock(return_value=100.0)
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        # Path with only 1 point to trigger n <= 1 case
-        slew.slewpath = (np.array([67.5]), np.array([45.0]))
-        slew.slewdist = 50.0  # > 0 to use modern path
-        # Call during slew to trigger modern path
-        ra, dec = slew.slew_ra_dec(1700000050.0)
+    def test_slew_ra_dec_modern_path_small_n(self, slew_modern_path):
+        ra, dec = slew_modern_path.slew_ra_dec(1700000050.0)
         assert ra == 67.5
         assert dec == 45.0
 
-    def test_slew_ra_dec_acs_returns_ra_float(self, slew, acs_config):
-        acs_config.motion_time = Mock(return_value=100.0)
-        acs_config.s_of_t = Mock(return_value=50.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewdist = 14.142
-        slew.slewpath = (np.linspace(0.0, 10.0, 20), np.linspace(0.0, 10.0, 20))
-        ra, dec = slew.slew_ra_dec(1700000050.0)
+    def test_slew_ra_dec_acs_returns_ra_float(self, slew_acs):
+        ra, dec = slew_acs.slew_ra_dec(1700000050.0)
         assert isinstance(ra, (float, np.floating))
 
-    def test_slew_ra_dec_acs_returns_dec_float(self, slew, acs_config):
-        acs_config.motion_time = Mock(return_value=100.0)
-        acs_config.s_of_t = Mock(return_value=50.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewdist = 14.142
-        slew.slewpath = (np.linspace(0.0, 10.0, 20), np.linspace(0.0, 10.0, 20))
-        ra, dec = slew.slew_ra_dec(1700000050.0)
+    def test_slew_ra_dec_acs_returns_dec_float(self, slew_acs):
+        ra, dec = slew_acs.slew_ra_dec(1700000050.0)
         assert isinstance(dec, (float, np.floating))
 
-    def test_slew_ra_dec_acs_ra_in_range(self, slew, acs_config):
-        acs_config.motion_time = Mock(return_value=100.0)
-        acs_config.s_of_t = Mock(return_value=50.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewdist = 14.142
-        slew.slewpath = (np.linspace(0.0, 10.0, 20), np.linspace(0.0, 10.0, 20))
-        ra, dec = slew.slew_ra_dec(1700000050.0)
+    def test_slew_ra_dec_acs_ra_in_range(self, slew_acs):
+        ra, dec = slew_acs.slew_ra_dec(1700000050.0)
         assert 0 <= ra < 360
 
-    def test_slew_ra_dec_acs_dec_in_range(self, slew, acs_config):
-        acs_config.motion_time = Mock(return_value=100.0)
-        acs_config.s_of_t = Mock(return_value=50.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slew.slewend = 1700000100.0
-        slew.slewdist = 14.142
-        slew.slewpath = (np.linspace(0.0, 10.0, 20), np.linspace(0.0, 10.0, 20))
-        ra, dec = slew.slew_ra_dec(1700000050.0)
+    def test_slew_ra_dec_acs_dec_in_range(self, slew_acs):
+        ra, dec = slew_acs.slew_ra_dec(1700000050.0)
         assert -90 <= dec <= 90
 
-    def test_slew_ra_dec_interpolates_ra_at_start(self, slew):
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.slewstart = 1700000000.0
-        slew.slewpath = (np.array([0.0, 10.0]), np.array([0.0, 10.0]))
-        slew.slewsecs = np.array([0.0, 100.0])
-        slew.slewdist = 0
-        ra, dec = slew.slew_ra_dec(1700000000.0)
+    def test_slew_ra_dec_interpolates_ra_at_start(self, slew_interp_start):
+        ra, dec = slew_interp_start.slew_ra_dec(1700000000.0)
         assert np.isclose(ra, 0.0)
 
-    def test_slew_ra_dec_interpolates_dec_at_start(self, slew):
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.slewstart = 1700000000.0
-        slew.slewpath = (np.array([0.0, 10.0]), np.array([0.0, 10.0]))
-        slew.slewsecs = np.array([0.0, 100.0])
-        slew.slewdist = 0
-        ra, dec = slew.slew_ra_dec(1700000000.0)
+    def test_slew_ra_dec_interpolates_dec_at_start(self, slew_interp_start):
+        ra, dec = slew_interp_start.slew_ra_dec(1700000000.0)
         assert np.isclose(dec, 0.0)
 
 
 class TestCalcSlewtime:
     """Test calc_slewtime method."""
 
-    def test_calc_slewtime_returns_slewtime(self, slew, acs_config):
-        acs_config.predict_slew = Mock(
-            return_value=(10.0, (np.array([0.0, 10.0]), np.array([0.0, 10.0])))
-        )
-        acs_config.slew_time = Mock(return_value=50.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slewtime = slew.calc_slewtime()
+    def test_calc_slewtime_returns_slewtime(self, slew_calc_setup):
+        slewtime = slew_calc_setup.calc_slewtime()
         assert slewtime == 50.0
 
-    def test_calc_slewtime_sets_slewend(self, slew, acs_config):
-        acs_config.predict_slew = Mock(
-            return_value=(10.0, (np.array([0.0, 10.0]), np.array([0.0, 10.0])))
-        )
-        acs_config.slew_time = Mock(return_value=50.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slew.calc_slewtime()
-        assert slew.slewend == 1700000050.0
+    def test_calc_slewtime_sets_slewend(self, slew_calc_setup):
+        slew_calc_setup.calc_slewtime()
+        assert slew_calc_setup.slewend == 1700000050.0
 
-    def test_calc_slewtime_sets_slewend_correctly(self, slew, acs_config):
-        acs_config.predict_slew = Mock(
-            return_value=(5.0, (np.array([0.0, 5.0]), np.array([0.0, 5.0])))
-        )
-        acs_config.slew_time = Mock(return_value=30.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 5.0
-        slew.enddec = 5.0
-        slew.slewstart = 1700000000.0
-        slew.calc_slewtime()
-        assert slew.slewend == 1700000030.0
+    def test_calc_slewtime_sets_slewend_correctly(self, slew_calc_setup_alt):
+        slew_calc_setup_alt.calc_slewtime()
+        assert slew_calc_setup_alt.slewend == 1700000030.0
 
-    def test_calc_slewtime_handles_nan_distance_slewtime(self, slew, acs_config):
+    @pytest.mark.parametrize("distance", [np.nan, -5.0])
+    def test_calc_slewtime_handles_invalid_distance(self, slew, acs_config, distance):
         acs_config.predict_slew = Mock(
-            return_value=(np.nan, (np.array([0.0]), np.array([0.0])))
+            return_value=(distance, (np.array([0.0]), np.array([0.0])))
         )
         acs_config.slew_time = Mock(return_value=0.0)
         slew.startra = 0.0
@@ -362,114 +213,41 @@ class TestCalcSlewtime:
         slew.endra = 10.0
         slew.enddec = 10.0
         slew.slewstart = 1700000000.0
-        slewtime = slew.calc_slewtime()
-        assert slewtime == 0.0
-
-    def test_calc_slewtime_handles_nan_distance_slewdist(self, slew, acs_config):
-        acs_config.predict_slew = Mock(
-            return_value=(np.nan, (np.array([0.0]), np.array([0.0])))
-        )
-        acs_config.slew_time = Mock(return_value=0.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        _ = slew.calc_slewtime()
-        assert slew.slewdist == 0.0
-
-    def test_calc_slewtime_handles_negative_distance_slewtime(self, slew, acs_config):
-        acs_config.predict_slew = Mock(
-            return_value=(-5.0, (np.array([0.0]), np.array([0.0])))
-        )
-        acs_config.slew_time = Mock(return_value=0.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        slewtime = slew.calc_slewtime()
-        assert slewtime == 0.0
-
-    def test_calc_slewtime_handles_negative_distance_slewdist(self, slew, acs_config):
-        acs_config.predict_slew = Mock(
-            return_value=(-5.0, (np.array([0.0]), np.array([0.0])))
-        )
-        acs_config.slew_time = Mock(return_value=0.0)
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
-        slew.slewstart = 1700000000.0
-        _ = slew.calc_slewtime()
-        assert slew.slewdist == 0.0
+        with pytest.raises(ValueError, match="Invalid slew distance"):
+            slew.calc_slewtime()
 
 
 class TestPredictSlew:
     """Test predict_slew method."""
 
-    def test_predict_slew_calls_acs_predict_slew(self, slew, acs_config):
-        ra_path = np.linspace(0.0, 10.0, 20)
-        dec_path = np.linspace(0.0, 10.0, 20)
-        acs_config.predict_slew = Mock(return_value=(10.0, (ra_path, dec_path)))
-        slew.startra = 0.0
-        slew.startdec = 0.0
-        slew.endra = 10.0
-        slew.enddec = 10.0
+    def test_predict_slew_calls_acs_predict_slew(self, slew_predict_setup):
+        slew, ra_path, dec_path = slew_predict_setup
         slew.predict_slew()
-        acs_config.predict_slew.assert_called_once_with(0.0, 0.0, 10.0, 10.0, steps=20)
+        slew.acs_config.predict_slew.assert_called_once_with(
+            45.0, 30.0, 90.0, 60.0, steps=20
+        )
 
-    def test_predict_slew_sets_slewdist(self, slew, acs_config):
-        ra_path = np.linspace(45.0, 90.0, 20)
-        dec_path = np.linspace(30.0, 60.0, 20)
-        acs_config.predict_slew = Mock(return_value=(14.142, (ra_path, dec_path)))
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
+    def test_predict_slew_sets_slewdist(self, slew_predict_setup):
+        slew, ra_path, dec_path = slew_predict_setup
         slew.predict_slew()
         assert slew.slewdist == 14.142
 
-    def test_predict_slew_sets_path_ra_length(self, slew, acs_config):
-        ra_path = np.linspace(45.0, 90.0, 20)
-        dec_path = np.linspace(30.0, 60.0, 20)
-        acs_config.predict_slew = Mock(return_value=(14.142, (ra_path, dec_path)))
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
+    def test_predict_slew_sets_path_ra_length(self, slew_predict_setup):
+        slew, ra_path, dec_path = slew_predict_setup
         slew.predict_slew()
         assert len(slew.slewpath[0]) == 20
 
-    def test_predict_slew_sets_path_dec_length(self, slew, acs_config):
-        ra_path = np.linspace(45.0, 90.0, 20)
-        dec_path = np.linspace(30.0, 60.0, 20)
-        acs_config.predict_slew = Mock(return_value=(14.142, (ra_path, dec_path)))
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
+    def test_predict_slew_sets_path_dec_length(self, slew_predict_setup):
+        slew, ra_path, dec_path = slew_predict_setup
         slew.predict_slew()
         assert len(slew.slewpath[1]) == 20
 
-    def test_predict_slew_sets_path_ra_values(self, slew, acs_config):
-        ra_path = np.linspace(45.0, 90.0, 20)
-        dec_path = np.linspace(30.0, 60.0, 20)
-        acs_config.predict_slew = Mock(return_value=(14.142, (ra_path, dec_path)))
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
+    def test_predict_slew_sets_path_ra_values(self, slew_predict_setup):
+        slew, ra_path, dec_path = slew_predict_setup
         slew.predict_slew()
         assert np.allclose(slew.slewpath[0], ra_path)
 
-    def test_predict_slew_sets_path_dec_values(self, slew, acs_config):
-        ra_path = np.linspace(45.0, 90.0, 20)
-        dec_path = np.linspace(30.0, 60.0, 20)
-        acs_config.predict_slew = Mock(return_value=(14.142, (ra_path, dec_path)))
-        slew.startra = 45.0
-        slew.startdec = 30.0
-        slew.endra = 90.0
-        slew.enddec = 60.0
+    def test_predict_slew_sets_path_dec_values(self, slew_predict_setup):
+        slew, ra_path, dec_path = slew_predict_setup
         slew.predict_slew()
         assert np.allclose(slew.slewpath[1], dec_path)
