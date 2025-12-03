@@ -6,6 +6,8 @@ eclipses, and ground station passes.
 """
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 from conops.ditl.ditl import DITL
 from conops.ditl.queue_ditl import QueueDITL
@@ -27,7 +29,7 @@ def plot_ditl_timeline(
     font_size: int | None = None,
     observation_categories: ObservationCategories | None = None,
     config: VisualizationConfig | None = None,
-) -> tuple[plt.Figure, plt.Axes]:
+) -> tuple[Figure, Axes]:
     """Plot a DITL timeline showing spacecraft operations.
 
     Creates a comprehensive timeline visualization showing:
@@ -520,14 +522,14 @@ def _extract_ground_passes(
 
 
 def annotate_slew_distances(
-    ax: plt.Axes,
+    ax: Axes,
     ditl: QueueDITL | DITL,
     t_start: float,
     offset_hours: float,
     slew_indices: list[int],
     font_family: str = "Helvetica",
     font_size: int = 9,
-) -> plt.Axes:
+) -> Axes:
     """Add annotations showing slew distances for specific slews.
 
     Parameters

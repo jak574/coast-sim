@@ -12,7 +12,10 @@ import numpy as np
 import numpy.typing as npt
 import rust_ephem
 import rust_ephem.constraints
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
+from matplotlib.patches import Circle
 from matplotlib.widgets import Button, Slider
 
 from ..common import dtutcfromtimestamp
@@ -59,7 +62,7 @@ def plot_sky_pointing(
     time_step_seconds: float | None = None,
     constraint_alpha: float = 0.3,
     config: VisualizationConfig | None = None,
-) -> tuple[plt.Figure, plt.Axes, Optional["SkyPointingController"]]:
+) -> tuple[Figure, Axes, Optional["SkyPointingController"]]:
     """Plot spacecraft pointing on a mollweide sky map with constraints.
 
     Creates an interactive visualization showing:
@@ -164,8 +167,8 @@ class SkyPointingController:
     def __init__(
         self,
         ditl: "DITL | QueueDITL",
-        fig: plt.Figure,
-        ax: plt.Axes,
+        fig: Figure,
+        ax: Axes,
         n_grid_points: int = 100,
         time_step_seconds: float = 60,
         constraint_alpha: float = 0.3,
@@ -191,8 +194,8 @@ class SkyPointingController:
             Visualization configuration settings.
         """
         self.ditl: "DITL | QueueDITL" = ditl
-        self.fig: plt.Figure = fig
-        self.ax: plt.Axes = ax
+        self.fig: Figure = fig
+        self.ax: Axes = ax
         self.n_grid_points: int = n_grid_points
         self.time_step_seconds: float = time_step_seconds
         self.constraint_alpha: float = constraint_alpha
@@ -391,7 +394,9 @@ class SkyPointingController:
                     colors.append("lightblue")
                     sizes.append(40)
 
-            self._cached_observations: dict[str, list] = {
+            self._cached_observations: dict[
+                str, list[float] | list[str] | list[int]
+            ] = {
                 "ras": ras,
                 "decs": decs,
                 "colors": colors,
@@ -876,7 +881,7 @@ class SkyPointingController:
         )
 
         # Add a small circle around it for visibility
-        circle = plt.Circle(
+        circle = Circle(
             (np.deg2rad(ra_plot), np.deg2rad(dec)),
             radius=np.deg2rad(5),
             fill=False,

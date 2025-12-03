@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
 
 from ..config.visualization import VisualizationConfig
@@ -16,7 +18,7 @@ def plot_ditl_telemetry(
     ditl: "DITLMixin",
     figsize: tuple[float, float] = (10, 8),
     config: VisualizationConfig | None = None,
-) -> tuple[plt.Figure, list[plt.Axes]]:
+) -> tuple[Figure, list[Axes]]:
     """Plot basic DITL timeline with core spacecraft telemetry.
 
     Creates a 7-panel figure showing:

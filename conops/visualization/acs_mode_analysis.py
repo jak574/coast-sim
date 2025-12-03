@@ -4,6 +4,8 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
 
 from ..config.visualization import VisualizationConfig
@@ -16,7 +18,7 @@ def plot_acs_mode_distribution(
     ditl: "DITLMixin",
     figsize: tuple[float, float] = (10, 8),
     config: VisualizationConfig | None = None,
-) -> tuple[plt.Figure, plt.Axes]:
+) -> tuple[Figure, Axes]:
     """Plot a pie chart showing the distribution of time spent in each ACS mode.
 
     Creates a pie chart displaying the percentage of time spent in different
