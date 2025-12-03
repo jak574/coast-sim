@@ -1,4 +1,9 @@
+from datetime import datetime
+
 import numpy as np
+import rust_ephem
+
+from conops.targets.plan import Plan
 
 from ..config import MissionConfig
 from .ditl_log import DITLLog
@@ -46,13 +51,25 @@ class DITL(DITLMixin, DITLStats):
         data_downlinked_gb (np.ndarray): Data downlinked in Gb at each timestep.
     """
 
-    def __init__(self, config: MissionConfig) -> None:
+    def __init__(
+        self,
+        config: MissionConfig,
+        ephem: rust_ephem.Ephemeris | None = None,
+        plan: Plan = Plan(),
+        begin: datetime | None = None,
+        end: datetime | None = None,
+    ) -> None:
         """Initialize DITL with spacecraft configuration.
 
         Args:
-            config (Config): Spacecraft configuration containing all subsystems
+            config (MissionConfig): Spacecraft configuration containing all subsystems
                 (spacecraft_bus, payload, solar_panel, battery, constraint,
                 ground_stations). Must not be None.
+            ephem (Ephemeris, optional): Ephemeris data for position and illumination calculations.
+            plan (Plan, optional): Pre-planned pointing schedule to execute.
+            begin (datetime, optional): Start time for simulation (timezone-aware).
+            end (datetime, optional): End time for simulation (timezone-aware).
+            step_size (int, optional): Time step in seconds (default: 60).
 
         Raises:
             AssertionError: If config is None. MissionConfig must be provided as it contains
@@ -62,9 +79,12 @@ class DITL(DITLMixin, DITLStats):
             DITLMixin.__init__ is called to set up base simulation parameters.
             All subsystems are extracted from the provided config for direct access.
         """
-        DITLMixin.__init__(self, config=config)
+        DITLMixin.__init__(
+            self, config=config, ephem=ephem, begin=begin, end=end, plan=plan
+        )
         # DITL also needs solar_panel
         self.solar_panel = self.config.solar_panel
+
         # Event log
         self.log = DITLLog()
         # Wire log into ACS so it can log events (if ACS exists)

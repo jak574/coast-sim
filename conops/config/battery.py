@@ -84,15 +84,23 @@ class Battery(BaseModel):
             if self.charge_level > self.watthour:
                 self.charge_level = self.watthour
 
-    def drain(self, power: float, period: float) -> None:
-        """Charge the battery with <power> Watts for <period> seconds"""
+    def drain(self, power: float, period: float) -> bool:
+        """Drain the battery with <power> Watts for <period> seconds
+
+        Returns:
+            bool: True if the drain was successful, False if battery was already empty
+        """
         if self.charge_level > 0:
-            # Battery is not fully charged
+            # Battery has charge
             wattsec = power * period
             self.charge_level -= wattsec / 3600  # watthours
-            # Check if battery is more than 100% full
+            # Check if battery is drained below 0
             if self.charge_level < 0:
                 self.charge_level = 0
+            return True
+        else:
+            # Battery is already empty
+            return False
 
     @property
     def battery_level(self) -> float:

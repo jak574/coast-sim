@@ -43,17 +43,7 @@ class QueueDITL(DITLMixin, DITLStats):
         queue: Queue | None = None,
     ) -> None:
         # Initialize mixin
-        DITLMixin.__init__(self, config=config, ephem=ephem)
-
-        # Override begin/end if provided, else use limits of ephemeris
-        if begin is not None:
-            self.begin = begin
-        else:
-            self.begin = self.ephem.timestamp[0]
-        if end is not None:
-            self.end = end
-        else:
-            self.end = self.ephem.timestamp[-1]
+        DITLMixin.__init__(self, config=config, ephem=ephem, begin=begin, end=end)
 
         # Current target (already set in mixin but repeated for clarity)
         self.ppt = None

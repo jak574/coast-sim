@@ -12,7 +12,6 @@ from ..common import (
 from ..config import MissionConfig
 from ..config.constants import DTOR
 from ..simulation.passes import PassTimes
-from ..targets import Pointing
 from .acs_command import ACSCommand
 from .emergency_charging import EmergencyCharging
 from .passes import Pass
@@ -20,6 +19,7 @@ from .slew import Slew
 
 if TYPE_CHECKING:
     from ..ditl.ditl_log import DITLLog
+    from ..targets import Pointing
 
 
 class ACS:
@@ -346,8 +346,10 @@ class ACS:
 
         return True
 
-    def _create_target_request(self, slew: Slew, utime: float) -> Pointing:
+    def _create_target_request(self, slew: Slew, utime: float) -> "Pointing":
         """Create and configure a target observation request for visibility checking."""
+        from ..targets import Pointing
+
         target = Pointing(
             config=self.config,
             ra=slew.endra,
@@ -712,7 +714,7 @@ class ACS:
         emergency_charging: EmergencyCharging,
         lastra: float,
         lastdec: float,
-        current_ppt: Pointing | None,
+        current_ppt: "Pointing | None",
     ) -> tuple[float, float, Any]:
         """Initiate emergency charging by creating charging PPT and enqueuing charge command.
 

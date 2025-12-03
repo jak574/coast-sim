@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import matplotlib.pyplot as plt
 import rust_ephem
 
@@ -18,6 +20,9 @@ class DITLMixin:
     mode: list[int]
     panel: list[float]
     power: list[float]
+    begin: datetime
+    end: datetime
+    step_size: int
     panel_power: list[float]
     batterylevel: list[float]
     charge_state: list[int]
@@ -36,7 +41,12 @@ class DITLMixin:
     data_downlinked_gb: list[float]
 
     def __init__(
-        self, config: MissionConfig, ephem: rust_ephem.Ephemeris | None = None
+        self,
+        config: MissionConfig,
+        ephem: rust_ephem.Ephemeris | None = None,
+        begin: datetime | None = None,
+        end: datetime | None = None,
+        plan: Plan = Plan(),
     ) -> None:
         # Initialize mixin
         self.config = config
@@ -51,6 +61,16 @@ class DITLMixin:
             )
             self.ephem = config.constraint.ephem
 
+        # Override begin/end if provided, else use limits of ephemeris
+        if begin is not None:
+            self.begin = begin
+        else:
+            self.begin = self.ephem.timestamp[0]
+        if end is not None:
+            self.end = end
+        else:
+            self.end = self.ephem.timestamp[-1]
+
         self.ra = []
         self.dec = []
         self.utime = []
@@ -60,7 +80,7 @@ class DITLMixin:
         self.step_size = 60  # seconds
         self.ustart = 0.0  # Calculate these
         self.uend = 0.0  # later
-        self.plan = Plan()
+        self.plan = plan
         self.saa = None
         self.passes = PassTimes(config=config)
         self.executed_passes = PassTimes(config=config)

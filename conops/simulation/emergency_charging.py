@@ -9,11 +9,11 @@ from conops.config.battery import Battery
 
 if TYPE_CHECKING:
     from ..ditl.ditl_log import DITLLog
+    from ..targets import Pointing
 
 from ..common import unixtime2date
 from ..common.vector import angular_separation
 from ..config import MissionConfig
-from ..targets import Pointing
 
 
 class EmergencyCharging:
@@ -75,7 +75,7 @@ class EmergencyCharging:
         self.acs_config = config.spacecraft_bus.attitude_control
 
         self.next_charging_obsid = starting_obsid
-        self.current_charging_ppt: Pointing | None = None
+        self.current_charging_ppt: "Pointing | None" = None
         self.max_slew_deg = max_slew_deg
         self.sidemount = sidemount
         self._charging_suppressed_due_to_eclipse = False
@@ -96,7 +96,7 @@ class EmergencyCharging:
         ephem: rust_ephem.Ephemeris,
         lastra: float = 0.0,
         lastdec: float = 0.0,
-    ) -> Pointing | None:
+    ) -> "Pointing | None":
         """
         Create an emergency charging pointing to recover battery charge.
 
@@ -158,8 +158,8 @@ class EmergencyCharging:
         ephem: rust_ephem.Ephemeris,
         lastra: float,
         lastdec: float,
-        current_ppt: Pointing | None,
-    ) -> Pointing | None:
+        current_ppt: "Pointing | None",
+    ) -> "Pointing | None":
         """Terminate current science PPT (if any) and create a charging PPT.
 
         This encapsulates the initiation path so callers can delegate the
@@ -450,7 +450,7 @@ class EmergencyCharging:
         )
         return None, None
 
-    def _create_pointing(self, ra: float, dec: float, utime: float) -> Pointing:
+    def _create_pointing(self, ra: float, dec: float, utime: float) -> "Pointing":
         """
         Create a Pointing object for emergency charging.
 
@@ -462,6 +462,8 @@ class EmergencyCharging:
         Returns:
             Configured Pointing object
         """
+        from ..targets import Pointing
+
         charging_ppt = Pointing(
             config=self.config,
             ra=ra,
