@@ -19,6 +19,7 @@ import numpy.typing as npt
 import rust_ephem
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
+from ..common.numerics import MIN_SAMPLES, VECTOR_COMPONENTS
 from ..common.vector import quaternion_to_rotation_matrix
 from ..config import MissionConfig
 from .attitude import AttitudeExecutionError, AttitudeState, AttitudeTrajectory
@@ -30,7 +31,6 @@ from .momentum import (
 )
 from .slew import Slew
 
-_MIN_ORBIT_SAMPLES = 2
 _MAX_CERTIFICATION_DEPTH = 18
 
 
@@ -105,8 +105,8 @@ class MomentumBudget:
         self.times = self.orbit.times
         self.positions = self.orbit.positions_eci_km
         if (
-            len(self.times) < _MIN_ORBIT_SAMPLES
-            or self.positions.shape != (len(self.times), 3)
+            len(self.times) < MIN_SAMPLES
+            or self.positions.shape != (len(self.times), VECTOR_COMPONENTS)
             or not np.isfinite(self.times).all()
             or not np.isfinite(self.positions).all()
             or np.any(np.diff(self.times) <= 0)

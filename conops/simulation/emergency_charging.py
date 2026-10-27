@@ -162,6 +162,7 @@ class EmergencyCharging:
             ephem,
             self.solar_panel,
             self.constraint,
+            science_attitude=False,
             drive_state=drive_state,
         )
 
