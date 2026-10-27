@@ -500,11 +500,23 @@ class TargetQueue:
         dec: float,
         roll: float | None,
         slew_estimator: Callable[[Pointing], TargetSlewEstimate] | None,
+        utime: float | None = None,
     ) -> None:
         if slew_estimator is None:
             assert self.acs_config is not None
+            table = getattr(self.acs_config, "thermal_settling", None)
+            thermal = isinstance(table, list) and bool(table)
             if self.acs_config.direction_dependent_slew:
-                target.slewtime = target.calc_slewtime(ra, dec, roll)
+                target.slewtime = (
+                    target.calc_slewtime(ra, dec, roll, utime=utime)
+                    if thermal
+                    else target.calc_slewtime(ra, dec, roll)
+                )
+            elif thermal:
+                # The roll and time serve the thermal settle only.
+                target.slewtime = target.calc_slewtime(
+                    ra, dec, lastroll=roll, utime=utime
+                )
             else:
                 target.slewtime = target.calc_slewtime(ra, dec)
             if issubclass(type(target), Pointing) and target.uses_mounted_attitude():
@@ -1007,6 +1019,7 @@ class TargetQueue:
                 or target.uses_mounted_attitude() is True
                 or recorder_room_gb is not None
                 else None,
+                utime=utime,
             )
 
             # A target must start collecting by its deadline.

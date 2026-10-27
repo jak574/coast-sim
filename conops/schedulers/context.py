@@ -279,6 +279,10 @@ class SchedulingContext:
             )
         cached = self._slew_cache.get(key) if key is not None else None
         if cached is not None:
+            if self.config.spacecraft_bus.attitude_control.thermal_settling:
+                retimed = cached.model_copy()
+                retimed.retime(slewstart)
+                return retimed
             return cached.model_copy(
                 update={
                     "slewrequest": slewstart,

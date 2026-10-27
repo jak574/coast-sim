@@ -304,7 +304,11 @@ class AttitudeTrajectory(BaseModel):
             raise AttitudeExecutionError(
                 "Slew duration cannot contain its physical trajectory"
             )
-        configured = limits.settle_time
+        # The slew carries its own settle once its time is calculated: the
+        # thermal settling table's for its Sun-vector change.
+        configured = (
+            limits.settle_time if slew.settle_seconds is None else slew.settle_seconds
+        )
         if not isfinite(configured) or configured < 0:
             raise AttitudeExecutionError("Settling time must be finite and nonnegative")
         settle = configured if any(leg.angle > 0 for leg in legs) else 0.0

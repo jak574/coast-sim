@@ -6,6 +6,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from ..common import ChargeState, normalize_acs_mode, unixtime2date
+from ..config.acs import AttitudeControlSystem
 from ..config.config import MissionConfig
 from ..config.data_storage import DataStorage
 from ..config.observation_categories import ObservationCategories
@@ -13,6 +14,7 @@ from ..config.observation_groups import ObservationGroups
 from ..simulation.acs import ACS
 from ..simulation.coverage import StationCoverage
 from ..simulation.passes import PassTimes
+from ..simulation.slew_requirements import SlewClassSummary, summarise_plan
 from ..targets import Plan, PlanEntry, Pointing
 from ..targets.activity import CHARGE_OBSID
 from .plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
@@ -269,6 +271,26 @@ class DITLStats:
             )
         return rows
 
+    def slew_class_summary(self) -> list[SlewClassSummary]:
+        """The run's slews against the ACS's slew requirement classes: one
+        row per class with its slews, the longest and how many broke the
+        allowance, and a row for slews wider than the widest class. Empty
+        without a table."""
+        acs = getattr(
+            getattr(self.config, "spacecraft_bus", None), "attitude_control", None
+        )
+        requirements = getattr(acs, "slew_requirements", None)
+        if (
+            not isinstance(acs, AttitudeControlSystem)
+            or not isinstance(requirements, list)
+            or not requirements
+        ):
+            # No table, or a test double's configuration.
+            return []
+        plan = getattr(self, "plan", None)
+        entries = list(plan) if isinstance(plan, (Plan, list, tuple)) else []
+        return summarise_plan(entries, acs)
+
     def visit_table(
         self, targets: Sequence[Pointing] | None = None, *, per_window: bool = False
     ) -> list[VisitRecord]:
@@ -434,6 +456,27 @@ class DITLStats:
                 print(
                     f"{summary.group:<18} {summary.members:>7} {summary.observed:>8} "
                     f"{summary.visits:>6} {summary.science_hours:>9.2f} {budget}"
+                )
+        classes = self.slew_class_summary()
+        if classes:
+            print("\n" + "-" * 70)
+            print("SLEWS BY REQUIREMENT CLASS")
+            print("-" * 70)
+            print(
+                f"{'Class':<18} {'Up to deg':>9} {'Allowed s':>9} {'Slews':>6} "
+                f"{'Longest s':>9} {'Over':>5}"
+            )
+            print("-" * 70)
+            for slew_class in classes:
+                limits = (
+                    f"{slew_class.max_great_circle_deg:>9.1f} {slew_class.max_seconds:>9.0f}"
+                    if slew_class.max_great_circle_deg is not None
+                    and slew_class.max_seconds is not None
+                    else "        -         -"
+                )
+                print(
+                    f"{slew_class.name:<18} {limits} {slew_class.slews:>6} "
+                    f"{slew_class.longest_seconds:>9.0f} {slew_class.violations:>5}"
                 )
         visits = [
             r for r in self.visit_table(per_window=True) if r.window_start is not None

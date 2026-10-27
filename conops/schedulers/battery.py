@@ -690,11 +690,22 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
             return self._deltas_held(begin, profile), angles
         deltas = []
         utime = self._first_step(begin)
+        # The steps are the grid's from the first: eclipse is read along it.
+        k = self.index(utime)
+        on_grid = (
+            len(self.grid) > 0 and abs(float(self.grid[k]) - utime) < TIME_TOLERANCE_S
+        )
         for mode, attitude, modes in profile:
             watts, angles = self._step_generation(utime, mode, attitude, angles)
-            draw = self._watts(mode, self.in_eclipse(utime), modes) - watts
+            eclipse = (
+                bool(self.eclipse[k])
+                if on_grid and k < len(self.eclipse)
+                else self.in_eclipse(utime)
+            )
+            draw = self._watts(mode, eclipse, modes) - watts
             deltas.append(draw * self.step_size / 3600.0)
             utime += self.step_size
+            k += 1
         return tuple(deltas), angles
 
     def _deltas_held(self, begin: float, profile: _Profile) -> tuple[float, ...]:

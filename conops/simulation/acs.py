@@ -725,7 +725,17 @@ class ACS:
             "SLEW",
             f"{unixtime2date(utime)}: Starting slew from RA={self.ra:.2f} Dec={self.dec:.2f} "
             f"to RA={slew.endra:.2f} Dec={slew.enddec:.2f} "
-            f"(duration: {slew.slewtime:.1f}s, distance: {slewdist:.1f} deg)",
+            f"(duration: {slew.slewtime:.1f}s, distance: {slewdist:.1f} deg"
+            + (
+                f", Sun moves {slew.sun_vector_change_deg:.1f} deg, "
+                f"settle {slew.settle_seconds:.0f}s)"
+                if slew.settle_seconds is not None
+                and isinstance(
+                    self.config.spacecraft_bus.attitude_control.thermal_settling, list
+                )
+                and self.config.spacecraft_bus.attitude_control.thermal_settling
+                else ")"
+            ),
         )
 
         self.current_slew = slew

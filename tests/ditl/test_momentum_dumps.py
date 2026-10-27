@@ -624,6 +624,25 @@ class TestWithEnforcement:
 
 
 class TestOneDumpAnswersACall:
+    def test_a_dump_added_or_ended_clears_the_pending_call(self) -> None:
+        """A dump called for at the planning level while an observation ran
+        is answered by any dump that follows, whether the forecast asked for
+        it before the next visit or the call itself placed it: no second
+        dump follows the first to unload nothing."""
+        config = _config(
+            capacity_n_m_s=CAPACITY,
+            planning_level=0.6,
+            thruster_dump=ThrusterDumpConfig(duration_seconds=120.0),
+        )
+        ditl = create_ditl(config, [_held(config)], BEGIN, END)
+        assert isinstance(ditl, QueueDITL)
+        ditl.step_size = STEP
+        ditl._dump_pending = True
+        ditl._add_dump(BEGIN.timestamp() + 600.0)
+        assert not ditl._dump_pending
+        dumps = [a for a in ditl.activities if a.desaturation]
+        assert len(dumps) == 1
+
     def test_no_dump_follows_another_at_once(self) -> None:
         config = _config(
             capacity_n_m_s=CAPACITY,

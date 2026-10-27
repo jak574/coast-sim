@@ -1330,7 +1330,17 @@ class PriorityScheduler:
                 "step_size": self.ctx.step_size,
             },
         )
+        self._log_slew_requirements(self.plan)
         return self.plan
+
+    def _log_slew_requirements(self, plan: Plan) -> None:
+        """Log slews that exceed their configured duration allowances."""
+        from ..simulation.slew_requirements import check_plan
+
+        for violation in check_plan(plan, self.config.spacecraft_bus.attitude_control):
+            self._log(
+                violation.utime, f"Slew requirement: {violation}", violation.obsid
+            )
 
     def _place_requests(self, requests: Sequence[_Request]) -> None:
         """Place snapshots of the highest-ranked request at their earliest fit.
@@ -2234,8 +2244,12 @@ class PriorityScheduler:
             entry.slewtime = int(slew.slewtime)
             entry.slew_rate_fraction = float(slew.rate_fraction)
             entry.slewdist = float(slew.slewdist)
+            entry.great_circle_deg = float(slew.great_circle_deg)
+            entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
+            entry.settle_seconds = float(slew.settle_seconds or 0.0)
         if block.activity is not None:
-            # A zero-length connection follows the settled hold's start.
+            # Keep real ingress before the hold; a zero-length connection
+            # follows the settled hold's start.
             if slew.slewtime == 0:
                 block.entry.begin = block.ready
                 block.slew = slew.model_copy(
@@ -3535,7 +3549,9 @@ class PriorityScheduler:
         )
         if distance <= 0 or rate <= 0:
             return 0.0
-        settle = float(acs.settle_time)
+        settle = min(
+            [float(acs.settle_time), *(s.settle_seconds for s in acs.thermal_settling)]
+        )
         return float(scheduled_slew_time(distance / rate + settle))
 
     def _visibility_needed_at(self, slew: Slew) -> float:
@@ -3702,6 +3718,19 @@ class PriorityScheduler:
                 begin=begin,
                 slewtime=int(slewtime),
                 slewdist=float(step_slew.slewdist) if step_slew is not None else 0.0,
+                great_circle_deg=(
+                    float(step_slew.great_circle_deg) if step_slew is not None else 0.0
+                ),
+                sun_vector_change_deg=(
+                    float(step_slew.sun_vector_change_deg)
+                    if step_slew is not None
+                    else 0.0
+                ),
+                settle_seconds=(
+                    float(step_slew.settle_seconds or 0.0)
+                    if step_slew is not None
+                    else 0.0
+                ),
                 end=end,
                 collection_begin=step_begin,
                 collection_end=step_end,
@@ -3739,6 +3768,9 @@ class PriorityScheduler:
             begin=float(slew.slewstart),
             slewtime=int(slew.slewtime),
             slewdist=float(slew.slewdist),
+            great_circle_deg=float(slew.great_circle_deg),
+            sun_vector_change_deg=float(slew.sun_vector_change_deg),
+            settle_seconds=float(slew.settle_seconds or 0.0),
             end=steps[-1].end,
             collection_begin=collection_begin,
             collection_end=steps[-1].collection_end,
@@ -3783,6 +3815,9 @@ class PriorityScheduler:
             begin=float(slew.slewstart),
             slewtime=int(slew.slewtime),
             slewdist=float(slew.slewdist),
+            great_circle_deg=float(slew.great_circle_deg),
+            sun_vector_change_deg=float(slew.sun_vector_change_deg),
+            settle_seconds=float(slew.settle_seconds or 0.0),
             end=end,
             collection_begin=collection_begin,
             collection_end=collection_end,
@@ -4122,6 +4157,9 @@ class PriorityScheduler:
             begin=float(slew.slewstart),
             slewtime=int(slew.slewtime),
             slewdist=float(slew.slewdist),
+            great_circle_deg=float(slew.great_circle_deg),
+            sun_vector_change_deg=float(slew.sun_vector_change_deg),
+            settle_seconds=float(slew.settle_seconds or 0.0),
             end=hold_end,
             obsid=self._next_charge_obsid,
             obstype=ObsType.CHARGE,

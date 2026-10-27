@@ -378,6 +378,8 @@ attitude held before it, and each request is tried from many starts a step apart
 The scheduling context keeps what repeats: where a held attitude first violates a
 mode over a span, by the span; and, with the quaternion slew algorithm, the path of
 each slew between two attitudes, predicted once and shifted to each new start.
+With a thermal settling table, the cached path is reused and the settle is
+recomputed for the new start.
 A constraint-avoiding path is decided at the slew's start rounded to the
 ephemeris step, so it is predicted once per pair of attitudes and step and retimed
 within the step, and the samples along each arc it checks are evaluated in one call
@@ -958,8 +960,9 @@ The priority-first plan's snapshots in each chunk are the solver's starting hint
 adjusted where the model's approximate slews need it, so the solver starts from a
 feasible solution. Each chunk finishes before the priority-first plan's next slew and
 leaves the exposure that plan collects later to it, so the rest of that plan can
-always follow. Because the model approximates slews (each target's roll is chosen
-before solving), each chunk's order is decoded with the scheduler's exact checks, as in
+always follow. The model chooses each target's roll before solving and, with a
+thermal settling table, estimates each slew's settle using the Sun at the chunk's
+origin. The scheduler decodes each chunk's order with exact slew checks, as in
 local search. It is kept if, followed by the rest of the priority-first plan, it
 scores at least as well as that plan does from the same point; otherwise, or if the
 solver found no solution in its time, the priority-first plan's snapshots for the

@@ -316,6 +316,15 @@ Entry Fields
    * - ``slewdist``
      - float
      - Angular slew distance in degrees.
+   * - ``great_circle_deg``
+     - float
+     - Great-circle angle between the pointings the slew joins, in degrees.
+   * - ``sun_vector_change_deg``
+     - float
+     - How far the slew moves the Sun's direction in the body frame, in degrees; zero without a thermal settling table.
+   * - ``settle_seconds``
+     - float
+     - The settle ``slewtime`` includes, in seconds.
    * - ``ss_min``
      - float
      - Minimum Sun-spacecraft separation angle encountered (degrees).

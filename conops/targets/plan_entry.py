@@ -23,6 +23,7 @@ from rust_ephem.constraints import ConstraintConfig
 
 from ..common import givename, unixtime2date, unixtime_from
 from ..common.enums import ACSMode, ObsType
+from ..common.ephemeris import sun_vector_change_deg
 from ..common.vector import (
     attitude_to_quat,
     quat_to_attitude,
@@ -38,6 +39,7 @@ from ..config import (
     Telescope,
 )
 from ..config.acs import scheduled_slew_time
+from ..config.observation_categories import ObservationCategories
 from ..config.constraint import (
     attitude_constraint_names_for_scopes,
     mounted_science_attitude_constraint_names,
@@ -155,6 +157,9 @@ class PlanEntry(BaseModel):
             "insaa",
             "roll",
             "slewdist",
+            "great_circle_deg",
+            "sun_vector_change_deg",
+            "settle_seconds",
             "done",
             "exposure",
             "exporig",
@@ -342,6 +347,16 @@ class PlanEntry(BaseModel):
         default_factory=lambda: ([], []), exclude=True
     )
     slewdist: float = 0.0
+    great_circle_deg: float = 0.0
+    """The great-circle angle between the pointings the entry's slew joins,
+    in degrees, beside ``slewdist``, the rotation flown; what a slew
+    requirement class is written in."""
+    sun_vector_change_deg: float = 0.0
+    """How far the entry's slew moves the Sun's direction in the body frame,
+    in degrees; what the thermal settling table is written in. Zero without
+    a table."""
+    settle_seconds: float = 0.0
+    """The settle the entry's ``slewtime`` includes, in seconds."""
     ss_min: float = 1000
     ss_max: float = 1e6
     _exptime: float | None = PrivateAttr(default=None)
@@ -1062,11 +1077,16 @@ class PlanEntry(BaseModel):
         lastra: float,
         lastdec: float,
         lastroll: float | None = None,
+        utime: float | None = None,
     ) -> int:
         """Calculate time to slew from the prior pointing or attitude.
 
         Scalar slew limits support legacy RA/Dec-only callers. Direction-dependent
-        limits require the complete starting RA/Dec/roll attitude.
+        limits require the complete starting RA/Dec/roll attitude. With a
+        thermal settling table the settle is the table's for the Sun-vector
+        change of the slew at ``utime``, when the time and both rolls are
+        known, and the table's longest otherwise; a category that skips the
+        thermal settle takes ``settle_time``.
         """
 
         # Slew endpoints are physical body attitudes even when the science
@@ -1101,13 +1121,57 @@ class PlanEntry(BaseModel):
                 enddec,
                 endroll,
             )
-            slewtime = scheduled_slew_time(
+        else:
+            rotation_axis_body = None
+        settle = self._thermal_settle(
+            (lastra, lastdec, lastroll), (endra, enddec, endroll), utime
+        )
+        if settle is None:
+            # The calls a configuration without a table saw before.
+            if rotation_axis_body is None:
+                return scheduled_slew_time(limits.slew_time(self.slewdist))
+            return scheduled_slew_time(
                 limits.slew_time(self.slewdist, rotation_axis_body)
             )
-        else:
-            slewtime = scheduled_slew_time(limits.slew_time(self.slewdist))
+        if self.slewdist <= 0.0 or np.isnan(self.slewdist):
+            return 0
+        return scheduled_slew_time(
+            limits.motion_time(self.slewdist, rotation_axis_body) + settle
+        )
 
-        return slewtime
+    def _thermal_settle(
+        self,
+        start: tuple[float, float, float | None],
+        end: tuple[float, float, float],
+        utime: float | None,
+    ) -> float | None:
+        """The thermal settling table's settle for a slew between the
+        attitudes at ``utime``; None where ``settle_time`` applies: without
+        a table, or for an observation whose category skips the thermal
+        settle. Without the time or either roll, the table's longest."""
+        acs = self.acs_config
+        table = getattr(acs, "thermal_settling", None)
+        if acs is None or not isinstance(table, list) or not table:
+            return None
+        categories = getattr(self.config, "observation_categories", None)
+        if isinstance(
+            categories, ObservationCategories
+        ) and categories.skips_thermal_settling(int(self.obsid)):
+            return None
+        ephem = self.ephem
+        startroll = start[2]
+        if (
+            utime is None
+            or ephem is None
+            or startroll is None
+            or startroll == -1.0
+            or end[2] == -1.0
+        ):
+            return acs.max_settle_seconds
+        change = sun_vector_change_deg(
+            ephem, utime, (start[0], start[1], float(startroll)), end
+        )
+        return acs.settle_seconds(change)
 
     def predict_slew(
         self,

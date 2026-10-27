@@ -155,6 +155,24 @@ class PlanExecutionValidator:
         mismatches.extend(self.unplanned_execution_mismatches())
         return mismatches
 
+    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
+        """The plan's slews that take longer than their requirement class
+        allows, where the ACS configures slew requirement classes; empty
+        without them. Not part of :meth:`validate`: a report on the ACS
+        model against the requirements, not a plan-execution fault."""
+        from ..simulation.slew_requirements import check_plan
+
+        return [
+            PlanExecutionMismatch(
+                utime=violation.utime,
+                message=f"slew_requirement: {violation}",
+                obsid=violation.obsid,
+            )
+            for violation in check_plan(
+                self.plan, self.config.spacecraft_bus.attitude_control
+            )
+        ]
+
     def attitude_constraint_mismatches(self) -> list[PlanExecutionMismatch]:
         """Report samples whose attitude violated a constraint scoped to their mode.
 

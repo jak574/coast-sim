@@ -15,7 +15,8 @@ segment, between contacts, where its collection starts, and every segment's
 peak volume is kept within the planning limit, so the solver trades high-data
 science against low-data science directly.
 
-The model approximates slews (each target's roll is chosen before solving),
+The model approximates slews (each target's roll is chosen before solving, and
+the thermal settle of each slew is for the Sun where it is at the chunk's origin),
 so each chunk's order is decoded with the scheduler's exact checks before the next
 chunk is solved from where it leaves the spacecraft. Every plan therefore
 executes as planned.
@@ -35,7 +36,8 @@ import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict
 
 from ..common import ACSMode
-from ..common.vector import attitude_to_quat, quaternion_deltas
+from ..common.ephemeris import sun_direction
+from ..common.vector import attitude_to_quat, quaternion_deltas, scbodyvectors
 from ..config import MissionConfig
 from ..config.acs import scheduled_slew_time
 from ..simulation.slew import Slew
@@ -1445,7 +1447,7 @@ class CpSatScheduler(LocalSearchScheduler):
         if not any(task.optional for task in tasks):
             return []
 
-        slews = self._slews(tasks)
+        slews = self._slews(tasks, origin_time)
         for k, task in enumerate(tasks):
             if task.optional:
                 # The shortest slew in: the model errs on the side of letting
@@ -2208,21 +2210,55 @@ class CpSatScheduler(LocalSearchScheduler):
                 spans.append(_Span((obsid, n), (lo, hi), rate))
         return spans
 
-    def _slews(self, tasks: Sequence[_Task]) -> npt.NDArray[np.int64]:
-        """Seconds of each task-to-task slew, including the ACS settling time."""
+    def _slews(
+        self, tasks: Sequence[_Task], origin_time: float | None = None
+    ) -> npt.NDArray[np.int64]:
+        """Seconds of the scheduled slew from each task to each other task.
+
+        With a thermal settling table, each slew settles for the change it
+        makes to the Sun's direction in the body frame, the Sun where it is
+        at ``origin_time``, unless the task's category skips the thermal
+        settle; without one, every slew settles for the ACS's settle time,
+        as a slew the scheduler's exact checks fly does.
+        """
         acs = self.config.spacecraft_bus.attitude_control
+        categories = self.config.observation_categories
+        ephem = self.config.constraint.ephem
+        sun = (
+            sun_direction(ephem, origin_time)
+            if acs.thermal_settling and ephem is not None and origin_time is not None
+            else None
+        )
         size = len(tasks)
         result = np.zeros((size, size), dtype=np.int64)
         if size == 0:
             return result
-        # Compute every pair's rotation in the body frame at once.
+        # The geometry of every pair at once: the rotation from each task's
+        # departure attitude to each arrival attitude, and the angle the Sun
+        # moves by in the body frame between them.
         outs = [before.attitude_out for before in tasks]
         ins = [after.attitude_in for after in tasks]
         distances, axes = quaternion_deltas(
             np.array([attitude_to_quat(*a) for a in outs], dtype=np.float64),
             np.array([attitude_to_quat(*a) for a in ins], dtype=np.float64),
         )
-        cache: dict[tuple[float, tuple[float, float, float]], int] = {}
+        changes: npt.NDArray[np.float64] | None = None
+        if sun is not None:
+            tiled = np.tile(np.asarray(sun, dtype=np.float64), (size, 1))
+            sun_out = scbodyvectors(np.radians(np.array(outs, dtype=np.float64)), tiled)
+            sun_in = scbodyvectors(np.radians(np.array(ins, dtype=np.float64)), tiled)
+            sun_out /= np.linalg.norm(sun_out, axis=1)[:, np.newaxis]
+            sun_in /= np.linalg.norm(sun_in, axis=1)[:, np.newaxis]
+            changes = np.degrees(np.arccos(np.clip(sun_out @ sun_in.T, -1.0, 1.0)))
+        settles = [
+            changes is not None
+            and not (
+                after.obsid is not None
+                and categories.skips_thermal_settling(after.obsid)
+            )
+            for after in tasks
+        ]
+        cache: dict[tuple[float, tuple[float, float, float], float | None], int] = {}
         for i in range(size):
             for j in range(size):
                 if i == j:
@@ -2233,10 +2269,19 @@ class CpSatScheduler(LocalSearchScheduler):
                     float(axes[i, j, 1]),
                     float(axes[i, j, 2]),
                 )
-                key = (distance, axis)
+                change = (
+                    float(changes[i, j])
+                    if settles[j] and changes is not None and distance > 0.0
+                    else None
+                )
+                key = (distance, axis, change)
                 seconds = cache.get(key)
                 if seconds is None:
-                    seconds = scheduled_slew_time(acs.slew_time(distance, axis))
+                    seconds = scheduled_slew_time(
+                        acs.slew_time(distance, axis)
+                        if change is None
+                        else acs.slew_time(distance, axis, change)
+                    )
                     cache[key] = seconds
                 result[i, j] = seconds
         return result

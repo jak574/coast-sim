@@ -383,6 +383,30 @@ The :class:`~conops.config.AttitudeControlSystem` defines slew performance and p
 * ``max_slew_rate_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z slew-rate limits in deg/s
 * ``slew_accuracy`` (float): Pointing accuracy after slew completion in degrees
 * ``settle_time`` (float): Time to settle after slew completion in seconds
+* ``slew_requirements`` (list of :class:`~conops.config.SlewRequirement`, optional): the
+  mission's slew requirement classes, each a ``name``, the widest slew of the class as
+  the great-circle angle between the pointings it joins (``max_great_circle_deg``) and
+  the most such a slew may take, settled (``max_seconds``). A check on the slews the ACS
+  model flies, not a constraint on them: each plan entry records the great-circle angle
+  of its slew (``great_circle_deg``) beside the rotation flown (``slewdist``), which the
+  roll lengthens; the planners log a slew that takes longer than its class allows, a
+  run reports them with ``slew_requirement_mismatches()`` apart from the plan's
+  execution mismatches, and ``print_statistics`` summarises the slews by class with the
+  longest of each and how many broke the allowance
+* ``thermal_settling`` (list of :class:`~conops.config.ThermalSettlingStep`, optional): the
+  settle after a slew by how far the slew moves the Sun's direction in the body frame,
+  since the structure settles thermally after the Sun moves across it. Each step covers
+  changes up to ``max_sun_vector_change_deg`` and gives ``settle_seconds``; a slew takes
+  the settle of the first step wide enough for its change, or the last step's beyond the
+  table. Empty, the settle is ``settle_time`` for every slew. With a table the ACS model's
+  slews and the planners' record the change (``sun_vector_change_deg``) and the settle
+  (``settle_seconds``) on each plan entry and in the slew log; dispatch's slew estimate at
+  selection, the queue's own estimate and the sequential planner's use the same settle, so
+  target selection and the battery and recorder ledgers see the slew's full time, the
+  settle counted at the arrival attitude; an estimate made without the time or a roll takes
+  the table's longest settle. A category with ``skip_thermal_settling`` takes
+  ``settle_time`` (see `observation_categories`_). Bounds on a slew's duration allow for
+  the table's longest settle.
 * ``max_roll_from_optimum_deg`` (float, optional): How far a roll a target asks for
   (``roll_deg`` or ``roll_offset_deg`` on the :class:`~conops.targets.Pointing`) may
   differ from the power-optimal roll, in degrees either way. An offset beyond it is
@@ -1769,6 +1793,11 @@ Each :class:`~conops.config.ObservationCategory` also carries:
   keeps the category's snapshots between repoints (see :doc:`communications`)
 * ``interruptible`` (bool, default ``True``): Whether a Target of Opportunity may cut
   short the category's observations (see :doc:`target_of_opportunity`)
+* ``skip_thermal_settling`` (bool, default ``False``): Whether a slew into one of the
+  category's observations settles for the ACS's ``settle_time`` rather than the thermal
+  settling table's time for its Sun-vector change (see ``thermal_settling`` under
+  `spacecraft_bus`_), for a category that accepts degraded data, such as a Target of
+  Opportunity
 
 Observation groups
 ~~~~~~~~~~~~~~~~~~

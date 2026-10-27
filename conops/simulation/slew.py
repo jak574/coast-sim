@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from ..common import roll_over_angle, separation, unixtime2date
 from ..common.enums import ObsType, SlewAlgorithm
+from ..common.ephemeris import sun_vector_change_deg
 from ..common.numerics import ATTITUDE_TOLERANCE_DEG
 from ..common.vector import (
     _batch_quat_to_attitudes,
@@ -23,8 +24,9 @@ from ..common.vector import (
     quaternion_slew_path,
 )
 from ..config import AttitudeControlSystem, Constraint, MissionConfig, SpacecraftFrame
-from ..config.acs import scheduled_slew_time
+from ..config.acs import ThermalSettlingStep, scheduled_slew_time
 from ..config.constants import DTOR
+from ..config.observation_categories import ObservationCategories
 
 if TYPE_CHECKING:
     from ..targets import PlanEntry
@@ -67,6 +69,13 @@ class Slew(BaseModel):
     endroll: float = 0.0
     slewtime: float = 0.0
     slewdist: float = 0.0
+    sun_vector_change_deg: float = 0.0
+    """How far the Sun's direction moves in the body frame between the
+    start and end attitudes, in degrees; computed with a thermal settling
+    table, zero without one."""
+    settle_seconds: float | None = None
+    """The settle the slew's time includes, from the thermal settling table
+    or the ACS's ``settle_time``; None until the time is calculated."""
     slewpath: tuple[list[float], list[float]] = Field(default_factory=lambda: ([], []))
     obstype: ObsType = ObsType.PPT
     obsid: int = 0
@@ -215,7 +224,8 @@ class Slew(BaseModel):
     @property
     def great_circle_deg(self) -> float:
         """The great-circle angle between the pointings the slew joins, in
-        degrees; ``slewdist`` measures the rotation flown, including roll."""
+        degrees: what a slew requirement is written in, where ``slewdist`` is
+        the rotation flown, which the roll lengthens."""
         start = (self.startra, self.startdec, self.startroll)
         end = (self.endra, self.enddec, self.endroll)
         frame = getattr(getattr(self.config, "spacecraft_bus", None), "frame", None)
@@ -234,6 +244,33 @@ class Slew(BaseModel):
     def roll(self, utime: float) -> float:
         """Return roll angle at the given time during the slew."""
         return self.slew_roll(utime)
+
+    def sun_vector_change(self) -> float:
+        """The angle between the Sun's directions in the body frame at the
+        start and end attitudes, in degrees, with the Sun where it is at the
+        slew's start."""
+        assert self.ephem is not None, "Ephemeris must be set for the Sun vector"
+        return sun_vector_change_deg(
+            self.ephem,
+            float(self.slewstart),
+            (self.startra, self.startdec, self.startroll),
+            (self.endra, self.enddec, self.endroll),
+        )
+
+    def _thermal_settling_table(self) -> list[ThermalSettlingStep]:
+        """The thermal settling steps that apply to this slew: none without
+        a table, for a test double's configuration, or for a slew into an
+        observation whose category skips the thermal settle."""
+        acs = self.acs_config
+        table = getattr(acs, "thermal_settling", None)
+        if not isinstance(table, list) or not table:
+            return []
+        categories = getattr(self.config, "observation_categories", None)
+        if isinstance(
+            categories, ObservationCategories
+        ) and categories.skips_thermal_settling(int(self.obsid)):
+            return []
+        return table
 
     def attitude(self, utime: float) -> tuple[float, float, float]:
         """Return the complete executed attitude from one trajectory evaluation."""
@@ -416,17 +453,16 @@ class Slew(BaseModel):
                 "slew_acceleration_body": None,
             }
         )
+        settle_bound = max(slowest.settle_time, slowest.max_settle_seconds)
         if not all(
             np.isfinite(value) and value > 0.0
             for value in (slowest.max_slew_rate, slowest.slew_acceleration)
-        ) or not (np.isfinite(slowest.settle_time) and slowest.settle_time >= 0.0):
+        ) or not (np.isfinite(settle_bound) and settle_bound >= 0.0):
             raise ValueError("Cannot bound slew duration with invalid kinematic limits")
         # Directional floating-point arithmetic can cross an integer boundary
         # before execution rounds up; reserve that extra second as well.
         return (
-            scheduled_slew_time(
-                segments * slowest.motion_time(180.0) + slowest.settle_time
-            )
+            scheduled_slew_time(segments * slowest.motion_time(180.0) + settle_bound)
             + 1
         )
 
@@ -451,24 +487,67 @@ class Slew(BaseModel):
             raise ValueError(
                 f"Invalid slew distance: {distance} (start={self.startra},{self.startdec} end={self.endra},{self.enddec})"
             )
+        return self._time_along_path()
 
+    def retime(self, slewstart: float) -> float:
+        """Time the slew again from ``slewstart`` along the path it has.
+
+        A quaternion slew's path does not depend on when it starts; its
+        settle does, where a thermal settling table follows the Sun. A
+        scheduler trying many starts for the same pair of attitudes
+        predicts the path once and retimes it for each start, which gives
+        the slew ``calc_slewtime`` would from that start.
+        """
+        self.slewrequest = slewstart
+        self.slewstart = slewstart
+        return self._time_along_path()
+
+    def _time_along_path(self) -> float:
+        """The slew's settle and duration from its predicted path and its start."""
+        distance = self.slewdist
         # Calculate slew time using AttitudeControlSystem
         assert self.acs_config is not None, (
             "ACS config must be set to calculate slew time"
         )
         limits = self.motion_limits
+        # The settle depends on how far the slew moves the Sun in the body
+        # frame when a thermal settling table is configured. A test double's
+        # configuration has no table.
+        acs = limits
+        table = self._thermal_settling_table()
+        self.sun_vector_change_deg = self.sun_vector_change() if table else 0.0
+        if distance <= 0.0:
+            self.settle_seconds = 0.0
+        elif table:
+            self.settle_seconds = acs.settle_seconds(self.sun_vector_change_deg)
+        elif isinstance(acs.settle_time, (int, float)):
+            self.settle_seconds = float(acs.settle_time)
+        else:
+            # A test double's configuration: the executor uses its limits.
+            self.settle_seconds = None
         if len(self._slew_segments) > 1:
             if distance <= 0.0:
                 self.slewtime = 0
             else:
                 motion_time = sum(
-                    limits.motion_time(segment.distance_deg, segment.axis_body)
+                    acs.motion_time(segment.distance_deg, segment.axis_body)
                     for segment in self._slew_segments
                 )
-                self.slewtime = scheduled_slew_time(motion_time + limits.settle_time)
+                settle = (
+                    acs.settle_time
+                    if self.settle_seconds is None
+                    else self.settle_seconds
+                )
+                self.slewtime = scheduled_slew_time(motion_time + settle)
+        elif table:
+            self.slewtime = scheduled_slew_time(
+                acs.slew_time(
+                    distance, self._rotation_axis_body, self.sun_vector_change_deg
+                )
+            )
         else:
             self.slewtime = scheduled_slew_time(
-                limits.slew_time(distance, self._rotation_axis_body)
+                acs.slew_time(distance, self._rotation_axis_body)
             )
 
         self.slewend = self.slewstart + self.slewtime

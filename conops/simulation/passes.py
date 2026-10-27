@@ -515,10 +515,12 @@ class Pass(BaseModel):
             raise ValueError("ACS config must be set to calculate slew time")
 
         acs_config = self.config.spacecraft_bus.attitude_control
+        table = getattr(acs_config, "thermal_settling", None)
+        thermal = isinstance(table, list) and bool(table)
         # This scalar shortcut is equivalent to Slew.calc_slewtime() only for
         # quaternion slews. Constraint-avoiding and future slew algorithms keep
         # the full path unless their scalar equivalence has been proven.
-        if acs_config.slew_algorithm == SlewAlgorithm.QUATERNION:
+        if acs_config.slew_algorithm == SlewAlgorithm.QUATERNION and not thermal:
             slewdist, rotation_axis_body = _cached_pass_attitude_delta(
                 (ra, dec, roll), (target_ra, target_dec, target_roll)
             )
@@ -534,6 +536,11 @@ class Pass(BaseModel):
         slew.enddec = target_dec
         slew.endroll = target_roll
         slew.slewstart = utime
+        if thermal:
+            slew.obstype = ObsType.GSP
+            slew.obsid = self.obsid
+            if self.ephem is not None:
+                slew.ephem = self.ephem
         return slew.calc_slewtime()
 
     def time_to_slew(

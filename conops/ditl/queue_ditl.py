@@ -22,7 +22,7 @@ from ..common import (
     whole_steps,
 )
 from ..common.enums import ACSCommandType, SlewAlgorithm
-from ..common.ephemeris import position_vectors
+from ..common.ephemeris import position_vectors, sun_vector_change_deg
 from ..common.numerics import TIME_TOLERANCE_S
 from ..common.vector import (
     attitude_to_quat,
@@ -2280,6 +2280,12 @@ class QueueDITL(DITLMixin, DITLStats):
         """Return plan/ACS mismatches over exported science and contact intervals."""
         return self._plan_validator().validate()
 
+    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
+        """The slews of the executed plan that took longer than their
+        requirement class allows (``attitude_control.slew_requirements``);
+        empty without a table. A report, not a fault: the run completes."""
+        return self._plan_validator().slew_requirement_mismatches()
+
     def _assert_plan_matches_execution(self) -> None:
         """Raise if the exported plan doesn't match executed telemetry, logging the first mismatch."""
         mismatches = self.validate_plan_matches_execution()
@@ -2691,12 +2697,20 @@ class QueueDITL(DITLMixin, DITLStats):
         update_end: bool = False,
         preserve_collection_window: bool = False,
     ) -> None:
-        """Copy slew timing and physical attitude onto a plan entry."""
+        """Copy slew timing and physical attitude onto a plan entry.
+
+        Execution may shorten a predicted slew. Preserve the admitted science
+        bounds when syncing it: an early arrival must not enlarge collection,
+        while a late arrival can still reduce the science that fits.
+        """
         collection_begin, collection_end = entry.collection_begin, entry.collection_end
         entry.begin = int(slew.slewstart)
         entry.slewtime = int(round(slew.slewtime))
         entry.slew_rate_fraction = slew.rate_fraction
         entry.slewdist = float(slew.slewdist)
+        entry.great_circle_deg = float(slew.great_circle_deg)
+        entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
+        entry.settle_seconds = float(slew.settle_seconds or 0.0)
         entry.slewpath = slew.slewpath
         if entry.uses_mounted_attitude():
             entry.spacecraft_attitude = (
@@ -2785,6 +2799,9 @@ class QueueDITL(DITLMixin, DITLStats):
             entry.begin = int(slew.slewstart)
             entry.slewtime = int(round(slew.slewtime))
             entry.slewdist = float(slew.slewdist)
+            entry.great_circle_deg = float(slew.great_circle_deg)
+            entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
+            entry.settle_seconds = float(slew.settle_seconds or 0.0)
             entry.roll = float(slew.endroll)
 
     def _sync_slew_metadata(self, slew: Slew) -> None:
@@ -3382,6 +3399,9 @@ class QueueDITL(DITLMixin, DITLStats):
         )
         if slew is not None:
             entry.slewdist = float(slew.slewdist)
+            entry.great_circle_deg = float(slew.great_circle_deg)
+            entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
+            entry.settle_seconds = float(slew.settle_seconds or 0.0)
         entry.obsid = gspass.obsid
         entry.obstype = ObsType.GSP
         entry.ss_min = 0
@@ -4449,8 +4469,16 @@ class QueueDITL(DITLMixin, DITLStats):
             body_roll,
         )
         attitude_control = self.config.spacecraft_bus.attitude_control
+        sun_change = self._selection_sun_vector_change(
+            target,
+            execution_time,
+            (startra, startdec, startroll),
+            (endra, enddec, body_roll),
+        )
         slewtime = scheduled_slew_time(
             attitude_control.slew_time(slewdist, rotation_axis_body)
+            if sun_change is None
+            else attitude_control.slew_time(slewdist, rotation_axis_body, sun_change)
         )
         mounted_telescope = (
             issubclass(type(target), PlanEntry) and target.uses_mounted_attitude()
@@ -4463,6 +4491,24 @@ class QueueDITL(DITLMixin, DITLStats):
             if mounted_telescope
             else None,
         )
+
+    def _selection_sun_vector_change(
+        self,
+        target: Pointing,
+        execution_time: float,
+        start: tuple[float, float, float],
+        end: tuple[float, float, float],
+    ) -> float | None:
+        """How far the slew into a candidate moves the Sun in the body frame,
+        for the thermal settling table; None where ``settle_time`` applies:
+        without a table, or for a category that skips the thermal settle."""
+        attitude_control = self.config.spacecraft_bus.attitude_control
+        table = getattr(attitude_control, "thermal_settling", None)
+        if not isinstance(table, list) or not table:
+            return None
+        if self.config.observation_categories.skips_thermal_settling(int(target.obsid)):
+            return None
+        return sun_vector_change_deg(self.ephem, execution_time, start, end)
 
     def _point_moving_target(
         self,

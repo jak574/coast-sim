@@ -79,6 +79,15 @@ class ObservationCategory(ConfigModel):
             "where they differ from the payload's; None takes the payload's"
         ),
     )
+    skip_thermal_settling: bool = Field(
+        default=False,
+        description=(
+            "Whether a slew into one of the category's observations settles for "
+            "the ACS's settle_time rather than the thermal settling table's time "
+            "for its Sun-vector change: for a category that accepts degraded "
+            "data, such as a Target of Opportunity"
+        ),
+    )
     antenna_repoints: Literal["allowed", "reported", "forbidden"] = Field(
         default="allowed",
         description=(
@@ -171,6 +180,12 @@ class ObservationCategories(ConfigModel):
             obsid_max=10000000,
             color=self.default_color,
         )
+
+    def skips_thermal_settling(self, obsid: int) -> bool:
+        """Whether a slew into an observation of ``obsid`` settles for the
+        ACS's settle_time rather than the thermal settling table's time (see
+        :attr:`ObservationCategory.skip_thermal_settling`)."""
+        return self.get_category(obsid).skip_thermal_settling
 
     def antenna_repoints(self, obsid: int) -> str:
         """What an antenna repoint during an observation of ``obsid`` means:
