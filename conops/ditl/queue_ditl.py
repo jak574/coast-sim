@@ -1,5 +1,5 @@
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1176,6 +1176,21 @@ class QueueDITL(DITLMixin, DITLStats):
 
     # ── Scheduled activities ──────────────────────────────────────────────
 
+    def _unstarted_activities(self) -> Iterator[ScheduledActivity]:
+        """Activities still eligible for this run, with their original IDs.
+
+        A sliding block expires only after its latest possible end. Keep the
+        source list intact so filtering a partial run never renumbers activities
+        or discards ones needed by a later interval.
+        """
+        return (
+            activity
+            for activity in self.activities
+            if activity.begin > self._activity_started
+            and activity.begin < self.uend
+            and activity.latest_start + activity.duration_seconds > self.ustart
+        )
+
     def _manage_activities(
         self, utime: float, ra: float, dec: float, roll: float
     ) -> bool:
@@ -1193,11 +1208,7 @@ class QueueDITL(DITLMixin, DITLStats):
         if self._active_activity is None:
             self._call_for_desaturation(utime)
             due = next(
-                (
-                    a
-                    for a in self.activities
-                    if a.begin <= utime and a.begin > self._activity_started
-                ),
+                (a for a in self._unstarted_activities() if a.begin <= utime),
                 None,
             )
             if due is not None:
@@ -1253,9 +1264,7 @@ class QueueDITL(DITLMixin, DITLStats):
         tracker = self._stored_momentum_tracker
         if level is None or tracker is None:
             return
-        if any(
-            a.desaturation and a.begin > self._activity_started for a in self.activities
-        ):
+        if any(a.desaturation for a in self._unstarted_activities()):
             return
         stored = tracker.stored_momentum_norm_n_m_s
         capacity = (
@@ -1792,8 +1801,8 @@ class QueueDITL(DITLMixin, DITLStats):
         return next(
             (
                 a.latest_start
-                for a in self.activities
-                if a.latest_start > after and a.begin > self._activity_started
+                for a in self._unstarted_activities()
+                if a.latest_start > after
             ),
             None,
         )
@@ -1804,9 +1813,8 @@ class QueueDITL(DITLMixin, DITLStats):
         return next(
             (
                 a
-                for a in self.activities
+                for a in self._unstarted_activities()
                 if a.begin <= utime < a.latest_start
-                and a.begin > self._activity_started
             ),
             None,
         )

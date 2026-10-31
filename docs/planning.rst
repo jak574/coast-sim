@@ -226,6 +226,11 @@ How a plan is built
    entered through fault management alone. :func:`~conops.targets.activity.periodic_activities`
    builds a list of activities at a fixed interval from a first start, a count of them
    or as many as begin by a time, each with the same modes, data, ``fixed`` and slide.
+   For a partial dispatch run, an activity is expired when its latest start plus
+   its duration is at or before the run's beginning, and it is not executed.
+   Activities starting at or after the run's end do not block dispatch either.
+   Activity obsids are assigned from the full input list and remain unchanged
+   when the run's interval excludes earlier activities.
    A thruster momentum dump is an activity
    dispatch calls for itself, when the stored momentum reaches the planning level of
    the wheels' capacity (see the stored momentum under :doc:`configuration`), and
