@@ -268,6 +268,19 @@ How a plan is built
    reconstruct earlier attitude, recorder contents or momentum: the run's
    configured initial conditions still apply. A saved plan carries the settled
    hold bounds when an exact earlier reservation is available.
+   ``ScheduledActivity.attitude`` can request an explicit body pose with
+   :class:`~conops.config.activity_attitude.ActivityAttitude`. Its default
+   ``kind="inherited"`` keeps the existing inherited/safe-hold policy. A
+   ``kind="fixed"`` pose supplies ``ra_deg``, ``dec_deg`` and ``roll_deg`` in the
+   same GCRS physical body-attitude convention as plan entries. This fixes the
+   pose; the separate ``fixed`` activity flag fixes its start time.
+   Dispatch prepares the required ingress as its start window approaches. The
+   planners reserve that ingress before the full hold, searching a sliding
+   window for a feasible time at the requested pose. An unsafe required pose
+   is reported explicitly rather than replaced with another attitude. Replans
+   retain the validated pose and hold, and the next observation departs directly
+   from it. ``periodic_activities`` accepts the same ``attitude`` argument;
+   ``Program`` JSON preserves it.
    Activity entries store ``activity_hold_begin`` and ``activity_hold_end`` for
    that full hold, while ``begin`` and ``end`` bound the portion in this run.
    ``activity_partial`` reports missing time at either boundary;
