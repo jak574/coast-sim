@@ -487,6 +487,8 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
             float(entry.ra),
             float(entry.dec),
             float(entry.roll),
+            entry.activity_mode,
+            entry.activity_hold_begin,
             after,
             rest,
             path_start,
@@ -511,7 +513,7 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         elif obstype == ObsType.CHARGE:
             mode = ACSMode.CHARGING
         elif obstype == ObsType.ACTIVITY:
-            mode = ACSMode.DESAT if entry.desaturation else ACSMode.IDLE
+            mode = entry.activity_mode
         else:
             self._addition_cache[key] = None
             return None
@@ -568,6 +570,12 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
                 step_mode = ACSMode.PASS if mode is ACSMode.PASS else ACSMode.SLEWING
             elif utime >= end:
                 step_mode = ACSMode.SLEWING
+            elif (
+                obstype == ObsType.ACTIVITY
+                and entry.activity_hold_begin is not None
+                and utime < entry.activity_hold_begin
+            ):
+                step_mode = ACSMode.IDLE
             else:
                 step_mode = mode
             return (

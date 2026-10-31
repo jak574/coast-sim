@@ -32,6 +32,7 @@ from .momentum import (
 from .slew import Slew
 
 _MAX_CERTIFICATION_DEPTH = 18
+"""Bound on recursive subdivision when certifying a momentum interval."""
 
 
 class MomentumLimitError(AttitudeExecutionError):
