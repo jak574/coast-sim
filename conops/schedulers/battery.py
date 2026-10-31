@@ -18,9 +18,9 @@ whenever they are lit, whatever the spacecraft is doing, so every span is
 counted at the attitude held through it: a slew along its path, an
 observation or a charge at its attitude, a contact along its tracking
 profile, and idle time at the attitude the spacecraft is left in. Charging
-is an addition too: the schedulers put a charging entry, pointing the panels
-at the Sun, into every idle sunlit stretch a charge fits as they build the
-plan, and the walk counts what those entries put back (see
+is an addition too: the schedulers reserve a charging entry, pointing the panels
+at the Sun, only where the full forecast needs one, and the walk counts its net
+benefit along with both transition slews (see
 :meth:`~conops.schedulers.PriorityScheduler.schedule`). The ledger knows the
 horizon's sunlit runs, the charging attitude in each and what it generates
 step by step, which is what the schedulers place charges from. The segments
