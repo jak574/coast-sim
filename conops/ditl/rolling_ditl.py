@@ -812,38 +812,6 @@ class RollingHorizonDITL(DITL):
                 used,
             )
             options["allocation_bonus"] = self.allocation_bonus
-        # The first committed fragment fixes when an activity actually started.
-        activity_starts: dict[int, float] = {}
-        for entry in leading:
-            if entry_obstype(entry) == ObsType.ACTIVITY:
-                obsid = int(entry.obsid)
-                activity_starts[obsid] = min(
-                    activity_starts.get(obsid, float(entry.begin)), float(entry.begin)
-                )
-        activities = []
-        for activity in self.activities:
-            assert activity.obsid is not None
-            actual_start = activity_starts.get(activity.obsid)
-            if activity.begin < self.ustart:
-                actual_start = activity.begin  # Already running before this simulation.
-            begin = max(start, activity.begin)
-            # A queued request still needs its full duration, even if overdue.
-            duration = activity.duration_seconds
-            if actual_start is not None:
-                duration -= begin - actual_start
-            if duration <= 0:
-                continue  # Already completed by the committed entries.
-            activities.append(
-                activity.model_copy(
-                    update={
-                        "begin": begin,
-                        "duration_seconds": duration,
-                        # Data is added once, when the activity first starts.
-                        "data_gb": activity.data_gb if actual_start is None else 0.0,
-                        "slide_seconds": max(0.0, activity.latest_start - begin),
-                    }
-                )
-            )
         self._last_seed_entries = 0
         if (
             self.start_plan is not None
@@ -854,6 +822,9 @@ class RollingHorizonDITL(DITL):
             self._last_seed_entries = len(seed)
             if seed.entries:
                 options["start_plan"] = seed
+        reserved_activities = {
+            e.obsid for e in leading if e.obstype == ObsType.ACTIVITY
+        }
         scheduler = self.scheduler(
             self.config,
             # Finished and held targets too: the scheduler does not place
@@ -876,7 +847,16 @@ class RollingHorizonDITL(DITL):
             start_drive_state=start_drive_state,
             passes=self._run_passes,
             coverage=self.coverage,
-            activities=activities,
+            activities=[
+                a
+                for a in self.activities
+                if a.begin >= start
+                or (
+                    utime == self.ustart
+                    and a.latest_start + a.duration_seconds > start
+                    and a.obsid not in reserved_activities
+                )
+            ],
             **options,  # type: ignore[arg-type]
         )
         entries = scheduler.schedule().entries
@@ -1155,7 +1135,7 @@ class RollingHorizonDITL(DITL):
         unloads = sorted(
             float(e.end)
             for e in committed
-            if e.desaturation and utime < float(e.end) <= start
+            if e.desaturation and e.activity_finishes and utime < float(e.end) <= start
         )
         ahead = np.asarray(momentum, dtype=np.float64)
         cursor = utime
