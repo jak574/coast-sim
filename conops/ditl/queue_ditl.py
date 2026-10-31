@@ -2015,7 +2015,7 @@ class QueueDITL(DITLMixin, DITLStats):
         """
         if self.ppt is None or self.ppt.collection_end is None:
             return
-        timing = self._timing_for(self.ppt)
+        timing = self._ppt_timing(self.ppt)
         deadline = self._next_charge_science_deadline(utime + self.step_size)
         if deadline is None or deadline >= self.ppt.end:
             return
