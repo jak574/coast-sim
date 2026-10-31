@@ -820,6 +820,9 @@ class RollingHorizonDITL(DITL):
             self._last_seed_entries = len(seed)
             if seed.entries:
                 options["start_plan"] = seed
+        reserved_activities = {
+            e.obsid for e in leading if e.obstype == ObsType.ACTIVITY
+        }
         scheduler = self.scheduler(
             self.config,
             # Finished and held targets too: the scheduler does not place
@@ -842,7 +845,16 @@ class RollingHorizonDITL(DITL):
             start_drive_state=start_drive_state,
             passes=self._run_passes,
             coverage=self.coverage,
-            activities=[a for a in self.activities if a.begin >= start],
+            activities=[
+                a
+                for a in self.activities
+                if a.begin >= start
+                or (
+                    utime == self.ustart
+                    and a.latest_start + a.duration_seconds > start
+                    and a.obsid not in reserved_activities
+                )
+            ],
             **options,  # type: ignore[arg-type]
         )
         entries = scheduler.schedule().entries
@@ -1121,7 +1133,7 @@ class RollingHorizonDITL(DITL):
         unloads = sorted(
             float(e.end)
             for e in committed
-            if e.desaturation and utime < float(e.end) <= start
+            if e.desaturation and e.activity_finishes and utime < float(e.end) <= start
         )
         ahead = np.asarray(momentum, dtype=np.float64)
         cursor = utime

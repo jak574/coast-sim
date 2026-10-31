@@ -266,6 +266,7 @@ class QueueDITL(DITLMixin, DITLStats):
         its length, and no observation starts before it ends."""
         self._active_activity: ScheduledActivity | None = None
         self._activity_started: float = 0.0
+        self._activity_hold_begin: float = 0.0
         self._activity_end: float = 0.0
         self._activity_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._activity_waiting: ScheduledActivity | None = None
@@ -1730,7 +1731,6 @@ class QueueDITL(DITLMixin, DITLStats):
         self.acs.end_science_observation(utime)
         if activity.desaturation:
             self.acs.begin_desaturation()
-        self._add_activity_data(float(activity.data_gb), activity)
         self._active_activity = activity
         self._activity_started = utime
         self._activity_attitude = attitude
@@ -1740,11 +1740,21 @@ class QueueDITL(DITLMixin, DITLStats):
             self._activity_waiting is activity or activity.begin < self._activity_end
         )
         self._activity_waiting = None
-        self._activity_end = (
-            utime + activity.duration_seconds if delayed else activity.end
+        assumed_start = activity.hold_start_for_run(self.ustart)
+        resumed = utime == self.ustart and assumed_start < self.ustart
+        if resumed:
+            self._activity_hold_begin = assumed_start
+        elif delayed or activity.begin < self.ustart:
+            self._activity_hold_begin = utime
+        else:
+            self._activity_hold_begin = activity.begin
+        self._activity_end = self._activity_hold_begin + activity.duration_seconds
+        if not resumed:
+            self._add_activity_data(float(activity.data_gb), activity)
+        description = (
+            f"Scheduled activity {activity.name} {'resumes' if resumed else 'begins'}"
         )
-        description = f"Scheduled activity {activity.name} begins"
-        if delayed:
+        if delayed and not resumed:
             description += f", {utime - activity.begin:.0f}s after its start"
         self.log.log_event(
             utime=utime,
@@ -1761,6 +1771,10 @@ class QueueDITL(DITLMixin, DITLStats):
             self.config, self._activity_attitude, begin=self._activity_started
         )
         entry.end = min(utime, self._activity_end)
+        entry.activity_hold_begin = self._activity_hold_begin
+        entry.activity_hold_end = self._activity_end
+        if self._activity_hold_begin < self._activity_started:
+            entry.fixed_data_gb = 0.0
         # Recorded when it ends, after any contact that began inside it: the
         # plan is kept in order of beginning.
         entries = self.plan.entries
@@ -1771,16 +1785,20 @@ class QueueDITL(DITLMixin, DITLStats):
         self.log.log_event(
             utime=utime,
             event_type="ACTIVITY",
-            description=f"Scheduled activity {activity.name} ends",
+            description=(
+                f"Scheduled activity {activity.name} "
+                f"{'ends' if entry.activity_finishes else 'stops before completion'}"
+            ),
             obsid=activity.obsid,
             acs_mode=self.acs.acsmode,
         )
         self._active_activity = None
         if activity.desaturation:
             self.acs.end_desaturation()
-            self._unload_stored_momentum(utime, activity.obsid)
-            # The wheels are empty: nothing called for before the dump stands.
-            self._dump_pending = False
+            if entry.activity_finishes:
+                self._unload_stored_momentum(utime, activity.obsid)
+                # The wheels are empty: nothing called for before the dump stands.
+                self._dump_pending = False
 
     def _ppt_deadline(self, target: Pointing | None = None) -> float | None:
         """The latest time the observation may begin collecting: its visit
