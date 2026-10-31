@@ -9,7 +9,7 @@ from conops.common import ACSMode, ObsType
 from conops.common.enums import SlewAlgorithm
 from conops.config import AttitudeControlSystem, ObservationTiming
 from conops.simulation.passes import Pass
-from conops.targets import PlanEntry, Pointing
+from conops.targets import ObservationSequence, PlanEntry, Pointing, SequenceStep
 
 
 @pytest.fixture
@@ -41,10 +41,14 @@ def test_no_collection_in_other_operational_modes(timed_ditl, mode):
 
 def test_data_generation_and_remaining_exposure_use_collection_seconds(timed_ditl):
     timed_ditl.config.science_generated = Mock(
-        side_effect=lambda collected, science=None: collected * 0.1
+        side_effect=lambda collected, science=None, instrument_modes=None: (
+            collected * 0.1
+        )
     )
     timed_ditl._handle_data_management(160, ACSMode.SCIENCE)
-    timed_ditl.config.science_generated.assert_called_once_with(27, science={})
+    timed_ditl.config.science_generated.assert_called_once_with(
+        27, science={}, instrument_modes={}
+    )
     assert timed_ditl.ppt.exptime == 168
     assert timed_ditl.data_generated_gb[-1] == pytest.approx(2.7)
     timed_ditl._handle_data_management(388, ACSMode.SCIENCE)
@@ -104,6 +108,52 @@ def test_charge_cannot_retroactively_erase_collection(timed_ditl):
     timed_ditl._next_charge_science_deadline = Mock(return_value=225)
     with pytest.raises(ValueError, match="Recharge interrupts observation"):
         timed_ditl._reserve_pending_charge_cleanup(220)
+
+
+@pytest.mark.parametrize(
+    ("index", "time", "deadline", "expected_collection"),
+    [(0, 120, 180, 0), (0, 220, 280, 60), (1, 220, 400, 55)],
+)
+def test_recharge_uses_the_current_sequence_steps_budgets(
+    timed_ditl, index, time, deadline, expected_collection
+):
+    """Intermediate steps owe no teardown; the last owes no repeated setup.
+
+    Spacecraft's recharge during the first step's ingress raised because the guard
+    charged that step the category's cleanup, reserved only after the last step.
+    """
+    timing = ObservationTiming(setup_seconds=43, cleanup_seconds=85, handoff_seconds=40)
+    timed_ditl.config.payload.observation_timing = timing
+    parent = Pointing(
+        obsid=140002,
+        own_timing=timing,
+        sequence=ObservationSequence(
+            steps=[
+                SequenceStep(name="IFS", duration_seconds=600),
+                SequenceStep(name="WCC", duration_seconds=600),
+            ]
+        ),
+    )
+    step = parent.step_pointing(index)
+    step.begin, step.end, step.slewtime = 100, 1000, 50
+    assert step.step_timing is not None
+    step.set_collection_window(step.step_timing)
+    previous_begin = step.collection_begin
+    timed_ditl.ppt = step
+    timed_ditl.plan.append(step.model_copy())
+    timed_ditl._next_charge_science_deadline = Mock(return_value=deadline)
+
+    timed_ditl._reserve_pending_charge_cleanup(time)
+
+    assert step.end == timed_ditl.plan[-1].end == deadline
+    assert step.collection_begin == min(previous_begin, deadline)
+    assert step.collection_end == deadline - step.step_timing.post_collection_seconds
+    assert timed_ditl.plan[-1].collection_begin == step.collection_begin
+    assert timed_ditl.plan[-1].collection_end == step.collection_end
+    assert (
+        timed_ditl._collection_seconds_for_step(time, ACSMode.SCIENCE)
+        == expected_collection
+    )
 
 
 def test_unanticipated_interrupt_fails_closed(timed_ditl):

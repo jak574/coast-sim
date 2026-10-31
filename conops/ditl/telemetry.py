@@ -66,8 +66,14 @@ class Housekeeping(BaseModel):
         quat_y: Attitude quaternion vector component (y)
         quat_z: Attitude quaternion vector component (z)
         gravity_gradient_torque_body_n_m: Gravity-gradient torque in body coordinates (N m)
+        disturbance_torques_body_n_m: Each tracked torque source's body torque, by name (N m)
+        disturbance_torque_body_n_m: The tracked sources' total body torque (N m)
+        geomagnetic_field_body_t: The geomagnetic field in body coordinates (T), where used
+        atmosphere_density_kg_m3: The atmosphere's density (kg/m³), where drag is tracked
         stored_momentum_body_n_m_s: Accumulated stored momentum in body coordinates (N m s)
         stored_momentum_norm_n_m_s: Norm of accumulated stored momentum (N m s)
+        actuator_momentum_body_n_m_s: What the wheels hold in body coordinates, the stored momentum less the body's own while it turns (N m s)
+        actuator_momentum_norm_n_m_s: Norm of what the wheels hold (N m s)
     """
 
     timestamp: datetime = Field(description="UTC timestamp")
@@ -108,6 +114,16 @@ class Housekeeping(BaseModel):
         if self.solar_array_drive_angles is None:
             return None
         return [entry.angle_deg for entry in self.solar_array_drive_angles]
+
+    instrument_modes: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "The mode each instrument with modes is in at this timestep, by "
+            "name: the observation's for the instruments it uses, IDLE or a "
+            "mode named like the ACS mode for the rest; None when no "
+            "instrument defines modes"
+        ),
+    )
 
     power_usage: float | None = Field(
         default=None, description="Total power usage in W"
@@ -241,11 +257,36 @@ class Housekeeping(BaseModel):
     )
     actuator_momentum_body_n_m_s: list[float] | None = Field(
         default=None,
-        description="Rigid actuator demand including maneuver momentum, in body axes (N m s)",
+        description=(
+            "What the wheels hold in body coordinates [x, y, z], in N m s: the "
+            "stored momentum less the body's own, I·ω, while it turns"
+        ),
     )
     actuator_momentum_norm_n_m_s: float | None = Field(
         default=None,
-        description="Norm of rigid actuator momentum demand (N m s)",
+        description="Norm of what the wheels hold, in N m s",
+    )
+    disturbance_torques_body_n_m: dict[str, list[float]] | None = Field(
+        default=None,
+        description=(
+            "Each tracked torque source's torque in body coordinates [x, y, z], "
+            "in N m, by source name"
+        ),
+    )
+    disturbance_torque_body_n_m: list[float] | None = Field(
+        default=None,
+        description="The tracked torque sources' total in body coordinates, in N m",
+    )
+    geomagnetic_field_body_t: list[float] | None = Field(
+        default=None,
+        description=(
+            "The geomagnetic field in body coordinates [x, y, z], in tesla, "
+            "where a tracked source uses it"
+        ),
+    )
+    atmosphere_density_kg_m3: float | None = Field(
+        default=None,
+        description="The atmosphere's density at the sample, in kg/m³, where drag is tracked",
     )
 
     @classmethod
@@ -352,6 +393,11 @@ class HousekeepingList(list[Housekeeping]):
     def acs_mode(self) -> list[ACSMode | int | None]:
         """Get ACS mode values from all housekeeping records."""
         return [hk.acs_mode for hk in self]
+
+    @property
+    def instrument_modes(self) -> list[dict[str, str] | None]:
+        """Get the instrument modes from all housekeeping records."""
+        return [hk.instrument_modes for hk in self]
 
     @property
     def panel_illumination(self) -> list[float | None]:
@@ -537,6 +583,36 @@ class HousekeepingList(list[Housekeeping]):
     def stored_momentum_norm_n_m_s(self) -> list[float | None]:
         """Get stored-momentum norms from all records."""
         return [hk.stored_momentum_norm_n_m_s for hk in self]
+
+    @property
+    def actuator_momentum_body_n_m_s(self) -> list[list[float] | None]:
+        """Get the body-frame momentum the wheels hold from all records."""
+        return [hk.actuator_momentum_body_n_m_s for hk in self]
+
+    @property
+    def actuator_momentum_norm_n_m_s(self) -> list[float | None]:
+        """Get the norms of what the wheels hold from all records."""
+        return [hk.actuator_momentum_norm_n_m_s for hk in self]
+
+    @property
+    def disturbance_torques_body_n_m(self) -> list[dict[str, list[float]] | None]:
+        """Get each source's body-frame torque, by name, from all records."""
+        return [hk.disturbance_torques_body_n_m for hk in self]
+
+    @property
+    def disturbance_torque_body_n_m(self) -> list[list[float] | None]:
+        """Get the sources' total body-frame torque from all records."""
+        return [hk.disturbance_torque_body_n_m for hk in self]
+
+    @property
+    def geomagnetic_field_body_t(self) -> list[list[float] | None]:
+        """Get the body-frame geomagnetic field from all records."""
+        return [hk.geomagnetic_field_body_t for hk in self]
+
+    @property
+    def atmosphere_density_kg_m3(self) -> list[float | None]:
+        """The atmosphere's density at each sample, in kg/m³, where drag is tracked."""
+        return [hk.atmosphere_density_kg_m3 for hk in self]
 
 
 class Telemetry(BaseModel):

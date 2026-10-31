@@ -19,7 +19,7 @@ classifiers = [
 description = "COASTSim: ConOps Astronomical Space Telescope Simulator" # Optional
 dynamic = ["version"]
 maintainers = [
-    { name = "Jamie A. Kennea", email = "jamie@cosmicfrontier.org" }, # Optional
+    { name = "Jamie A. Kennea", email = "jamie@pompey.org" }, # Optional
 ]
 name = "coast-sim" # Required
 readme = "README.md" # Optional
@@ -67,9 +67,18 @@ dev = [
     "plotly-stubs>=0.0.6",
     "ortools>=9.15",
 ]
-test = ["pytest>=8", "pytest-cov>=7", "ortools>=9.15"]
+test = [
+    "pytest>=8",
+    "pytest-cov>=7",
+    "pytest-xdist>=3.8",
+    "ortools>=9.15",
+    "pymsis>=0.13",
+    "ppigrf>=2.0",
+]
 # The CP-SAT scheduler (CpSatScheduler).
 cpsat = ["ortools>=9.15"]
+# The NRLMSIS atmosphere and the IGRF field for stored-momentum tracking.
+momentum = ["pymsis>=0.13", "ppigrf>=2.0"]
 docs = [
     "sphinx>=7.0",
     "sphinx-rtd-theme>=2.0",
@@ -83,7 +92,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 # orbit_visualizer lives in its own repo (orbit-visualizer) — exclude it here
-exclude = ["orbit_visualizer*"]
+exclude = ["orbit_visualizer*", "stubs*"]
 
 [tool.setuptools.package-data]
 "conops" = ["data/*.csv"]
@@ -101,11 +110,16 @@ write_to = "conops/_version.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-#addopts = "-q"
+addopts = "-n auto --dist=worksteal"
 
 
 [tool.ruff]
 line-length = 88
 target-version = "py310"
-lint.select = ["E", "W", "F", "N", "C"]
+# Frozen benchmark inputs and diagnostic probes are generated artifacts.
+extend-exclude = ["out"]
+lint.select = ["E", "W", "F", "N", "C", "PLR2004"]
+# Magic-value comparisons are forbidden in the package; tests, scripts and
+# examples compare against the literal values they set up.
+lint.per-file-ignores = { "tests/**" = ["PLR2004"], "scripts/**" = ["PLR2004"], "examples/**" = ["PLR2004"], "docs/**" = ["PLR2004"] }
 lint.ignore = ["C901", "N815", "N801", "C408", "E501"]

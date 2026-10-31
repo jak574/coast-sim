@@ -1,6 +1,7 @@
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -10,8 +11,21 @@ from pydantic import Field, PrivateAttr, field_validator, model_validator
 from ..common import dtutcfromtimestamp
 from ..common.enums import ACSMode
 from ..common.ephemeris import position_vectors
+from ..common.numerics import (
+    FULL_TURN_DEG,
+    NEGLIGIBLE_NORM,
+    ROUNDOFF,
+    VECTOR_COMPONENTS,
+)
+from ..common.vector import scbodyvectors
 from ._base import ConfigModel
 from .geometry import PanelGeometry
+
+if TYPE_CHECKING:
+    from .frame import SpacecraftFrame
+
+_ARRAY_DIMENSIONS = 2
+"""Sun vectors come as one row of three components per sample."""
 
 
 def _unit_vector(
@@ -100,7 +114,7 @@ class SingleAxisSolarArrayDrive(ConfigModel):
             raise ValueError("SADA angles and rate must be finite")
         if self.min_angle_deg >= self.max_angle_deg:
             raise ValueError("min_angle_deg must be less than max_angle_deg")
-        if self.max_angle_deg - self.min_angle_deg > 360.0:
+        if self.max_angle_deg - self.min_angle_deg > FULL_TURN_DEG:
             raise ValueError("single-axis SADA travel cannot exceed 360 degrees")
         if not self.min_angle_deg <= self.initial_angle_deg <= self.max_angle_deg:
             raise ValueError("initial_angle_deg must lie within the drive travel")
@@ -134,7 +148,11 @@ class SingleAxisSolarArrayDrive(ConfigModel):
         """Vectorized form of :meth:`optimal_angle` for Sun-vector candidates."""
         normal = _unit_vector(reference_normal, field_name="panel normal")
         sun = np.asarray(sun_body, dtype=np.float64)
-        if sun.ndim != 2 or sun.shape[1] != 3 or not np.all(np.isfinite(sun)):
+        if (
+            sun.ndim != _ARRAY_DIMENSIONS
+            or sun.shape[1] != VECTOR_COMPONENTS
+            or not np.all(np.isfinite(sun))
+        ):
             raise ValueError("Sun body vectors must have shape (N, 3) and be finite")
         sun_magnitudes = np.linalg.norm(sun, axis=1)
         if np.any(sun_magnitudes <= 0.0):
@@ -186,7 +204,7 @@ class SingleAxisSolarArrayDrive(ConfigModel):
         # When the Sun is parallel to the drive axis, or the reference normal
         # is parallel to it, rotation cannot change illumination. Hold the
         # current physical angle instead of commanding an arbitrary endpoint.
-        flat_objective = np.hypot(cosine_coefficient, sine_coefficient) <= 1e-12
+        flat_objective = np.hypot(cosine_coefficient, sine_coefficient) <= ROUNDOFF
         return np.where(flat_objective, reference, best_angles)
 
     def step_toward(
@@ -287,6 +305,9 @@ class SolarPanel(ConfigModel):
 
     # Class-level eclipse constraint (stateless, shared across all instances)
     _eclipse_constraint = rust_ephem.EclipseConstraint()
+    _eclipse_source: Callable[[], Sequence[tuple[float, float]]] | None = PrivateAttr(
+        default=None
+    )
 
     name: str = Field(
         default="Panel", description="Name/identifier for the solar panel"
@@ -438,6 +459,11 @@ class SolarPanel(ConfigModel):
                 ephemeris=ephem, target_ra=0.0, target_dec=0.0, times=time
             )
             eclipse_flags = np.array(result.constraint_array, dtype=bool)
+        given = np.array(
+            [_in_given_eclipse(self._eclipse_source, t.timestamp()) for t in time],
+            dtype=bool,
+        )
+        eclipse_flags = np.asarray(eclipse_flags | given, dtype=bool)
         not_in_eclipse = ~eclipse_flags
 
         # Preserve the legacy ideal-gimbal shortcut, including support for
@@ -485,6 +511,19 @@ class SolarPanel(ConfigModel):
 _ECLIPSE_PANEL_CACHE: SolarPanel | None = None
 
 
+def _in_given_eclipse(
+    source: Callable[[], Sequence[tuple[float, float]]] | None, utime: float
+) -> bool:
+    """Whether ``utime`` falls in an interval the source gives as eclipse."""
+    if source is None:
+        return False
+    intervals = source()
+    # A test double's constraint gives no list.
+    if not isinstance(intervals, (list, tuple)):
+        return False
+    return any(start <= utime < end for start, end in intervals)
+
+
 def _get_eclipse_constraint() -> rust_ephem.EclipseConstraint:
     """Get the eclipse constraint, using SolarPanel's for test compatibility."""
     global _ECLIPSE_PANEL_CACHE
@@ -502,9 +541,15 @@ def create_solar_panel_vector(
     cant_x: float | None = None,
     cant_y: float | None = None,
     azimuth_deg: float | None = None,
+    frame: "SpacecraftFrame | None" = None,
 ) -> tuple[float, float, float]:
     """
     Create a unit normal vector for a solar panel based on mount type and cant angles.
+
+    The mount types and cant axes are in the canonical frame, boresight +X and
+    the Sun's side +Y; with ``frame``, the bus's :class:`SpacecraftFrame`, the
+    vector is returned in the mission's body frame, so a 'boresight' panel
+    faces the frame's boresight and a 'sidemount' panel its Sun's side.
 
     Supports both new and old style parameter configurations for backward compatibility.
     Only one parameter style may be used at a time - either old style OR new style, not both.
@@ -588,7 +633,7 @@ def create_solar_panel_vector(
         y_final = y_after_x
         z_final = -base_x * np.sin(theta_y) + z_after_x * np.cos(theta_y)
 
-        return (x_final, y_final, z_final)
+        return _in_frame((x_final, y_final, z_final), frame)
 
     else:
         # Use new style parameters
@@ -634,7 +679,17 @@ def create_solar_panel_vector(
         else:
             raise ValueError(f"Unknown mount type: {mount}")
 
-        return (x, y, z)
+        return _in_frame((x, y, z), frame)
+
+
+def _in_frame(
+    vector: tuple[float, float, float], frame: "SpacecraftFrame | None"
+) -> tuple[float, float, float]:
+    """A canonical-frame vector in the body frame ``frame`` declares, or as
+    it is without one."""
+    if frame is None or frame.is_identity:
+        return (float(vector[0]), float(vector[1]), float(vector[2]))
+    return frame.body_vector(vector)
 
 
 class _PanelGeometry:
@@ -662,7 +717,7 @@ class _PanelGeometry:
             normal,
             magnitudes,
             out=normal.copy(),
-            where=magnitudes > 1e-15,
+            where=magnitudes > NEGLIGIBLE_NORM,
         )
         self.max_power = max_power
         self.efficiency = efficiency
@@ -698,6 +753,9 @@ class SolarPanelSet(ConfigModel):
 
     # Cached panel geometry for vectorized calculations
     _geometry_cache: _PanelGeometry | None = PrivateAttr(default=None)
+    _eclipse_source: Callable[[], Sequence[tuple[float, float]]] | None = PrivateAttr(
+        default=None
+    )
     _geometry_cache_key: (
         tuple[tuple[bool, tuple[float, float, float], float, float], ...] | None
     ) = PrivateAttr(default=None)
@@ -853,7 +911,11 @@ class SolarPanelSet(ConfigModel):
     ) -> npt.NDArray[np.float64]:
         """Purely score body-frame Sun candidates at one drive-state snapshot."""
         sun = np.asarray(sun_body, dtype=np.float64)
-        if sun.ndim != 2 or sun.shape[1] != 3 or not np.all(np.isfinite(sun)):
+        if (
+            sun.ndim != _ARRAY_DIMENSIONS
+            or sun.shape[1] != VECTOR_COMPONENTS
+            or not np.all(np.isfinite(sun))
+        ):
             raise ValueError("Sun body vectors must have shape (N, 3) and be finite")
         magnitudes = np.linalg.norm(sun, axis=1)
         if np.any(magnitudes <= 0.0):
@@ -948,6 +1010,67 @@ class SolarPanelSet(ConfigModel):
         )
         return power
 
+    def power_held_at(
+        self,
+        times: Sequence[float],
+        attitudes: Sequence[tuple[float, float, float]],
+        ephem: rust_ephem.Ephemeris,
+        in_eclipse: Sequence[bool],
+    ) -> npt.NDArray[np.float64]:
+        """The power generated at each of ``times`` holding the matching
+        attitude of ``attitudes``, in degrees, with no drive advanced: what
+        :meth:`power` gives sample by sample, computed together, with
+        ``in_eclipse`` saying which samples are in eclipse. A set with a
+        driven panel is scored sample by sample, as the drive's angle at
+        each sample is its own."""
+        count = len(times)
+        power = np.zeros(count, dtype=np.float64)
+        panels = self.panels
+        if not panels or sum(panel.max_power for panel in panels) <= 0.0:
+            return power
+        if any(panel.single_axis_drive is not None for panel in panels):
+            for k, (utime, (ra, dec, roll)) in enumerate(
+                zip(times, attitudes, strict=True)
+            ):
+                power[k] = float(self.power(utime, ra, dec, ephem, roll=roll))
+            return power
+        lit = np.flatnonzero(~np.asarray(in_eclipse, dtype=bool))
+        if len(lit) == 0:
+            return power
+        times_lit = [float(times[int(k)]) for k in lit]
+        indices = np.array(
+            [ephem.index(dtutcfromtimestamp(utime)) for utime in times_lit], dtype=int
+        )
+        sunvec = (
+            position_vectors(ephem, "sun")[indices]
+            - position_vectors(ephem, "gcrs")[indices]
+        )
+        held = np.deg2rad(
+            np.asarray([attitudes[int(k)] for k in lit], dtype=np.float64)
+        )
+        sun_body = scbodyvectors(held, sunvec)
+        magnitude = np.linalg.norm(sun_body, axis=1)
+        unit = np.flatnonzero(magnitude > 0.0)
+        if len(unit) == 0:
+            return power
+        normalized = sun_body[unit] / magnitude[unit, np.newaxis]
+        geom = self._get_geometry()
+        illumination = normalized @ geom.normal.T
+        illumination = np.where(geom.gimbled[np.newaxis, :], 1.0, illumination)
+        illumination = np.maximum(illumination, 0.0)
+        power[lit[unit]] = illumination @ (geom.max_power * geom.efficiency)
+        return power
+
+    def take_eclipse_intervals_from(
+        self, source: Callable[[], Sequence[tuple[float, float]]]
+    ) -> None:
+        """Take the intervals given as eclipse from ``source``, read whenever
+        illumination is evaluated, so the constraint's list is seen as it
+        stands; each panel takes them too."""
+        self._eclipse_source = source
+        for panel in self.panels:
+            panel._eclipse_source = source
+
     def _sun_body_and_eclipse(
         self,
         time: datetime | float,
@@ -961,7 +1084,7 @@ class SolarPanelSet(ConfigModel):
 
         dt = dtutcfromtimestamp(time) if isinstance(time, (int, float)) else time
         idx = ephem.index(dt)
-        in_eclipse = bool(
+        in_eclipse = _in_given_eclipse(self._eclipse_source, dt.timestamp()) or bool(
             _get_eclipse_constraint().in_constraint(
                 ephemeris=ephem, target_ra=0.0, target_dec=0.0, time=dt
             )

@@ -47,6 +47,31 @@ def _run(ditl: QueueDITL | DITL | RollingHorizonDITL) -> None:
 
 
 class TestDispatch:
+    def test_a_target_can_name_a_plain_instrument(self) -> None:
+        """A plain instrument has no mounting, so the queued target keeps its
+        name and its science coordinates are the body attitude."""
+        from conops.config import Instrument
+
+        config, targets = _setup(SchedulerConfig())
+        config.payload.instruments = [
+            Instrument(name="Camera"),
+            Telescope(name="Scope", boresight=(0.0, 0.0, 1.0)),
+        ]
+        targets[0].instrument_name = "Camera"
+
+        ditl = create_ditl(config, targets[:1], BEGIN, END)
+
+        assert isinstance(ditl, QueueDITL)
+        queued = ditl.queue.targets[0]
+        assert queued.instrument_name == "Camera"
+        assert queued.science_telescope() is None
+        assert not queued.uses_mounted_attitude()
+        assert queued.target_body_attitude(0.0) == (
+            targets[0].ra,
+            targets[0].dec,
+            0.0,
+        )
+
     def test_queues_every_target_with_its_settings(self) -> None:
         config, targets = _setup(SchedulerConfig())
         targets[0].deadline = T0 + 30 * MIN
@@ -252,6 +277,31 @@ class TestPlanned:
         assert ditl.plan.metadata is not None
         assert ditl.plan.metadata["scheduler"] == "cp_sat"
         _run(ditl)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("ortools") is None, reason="needs OR-Tools"
+    )
+    def test_a_configured_deterministic_budget_repeats_the_plan(self) -> None:
+        """The notebooks set the planner through the configuration: the
+        deterministic budget set there, with one worker and a seed, gives
+        the same plan twice."""
+        plans = []
+        for _ in range(2):
+            config, targets = _setup(
+                SchedulerConfig(
+                    mode=SchedulerMode.PLANNED,
+                    kind=SchedulerKind.CP_SAT,
+                    solver_time_limit=30,
+                    solver_deterministic_time=0.5,
+                    workers=1,
+                    seed=1,
+                )
+            )
+            ditl = create_ditl(config, targets, BEGIN, END)
+            plans.append(
+                [(int(e.obsid), float(e.begin), float(e.end)) for e in ditl.plan]
+            )
+        assert plans[0] and plans[0] == plans[1]
 
     def test_without_passes_the_plan_has_none(self) -> None:
         config, targets = _setup(

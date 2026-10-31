@@ -16,7 +16,8 @@ from ..common import (
 )
 from ..common.enums import ACSCommandType
 from ..common.ephemeris import position_vectors
-from ..common.vector import attitude_to_quat
+from ..common.numerics import ANGLE_TOLERANCE_DEG
+from ..common.vector import attitude_to_quat, quaternion_attitude_delta
 from ..config import AttitudeConstraintScope, MissionConfig
 from ..config.constraint import (
     all_attitude_constraint_name,
@@ -24,6 +25,7 @@ from ..config.constraint import (
     attitude_constraint_scope_label,
 )
 from ..simulation.acs_command import ACSCommand
+from ..simulation.coverage import StationCoverage
 from ..simulation.momentum_budget import MomentumLimitError
 from ..simulation.passes import Pass
 from ..simulation.roll import optimum_body_roll, optimum_instrument_roll
@@ -210,6 +212,23 @@ class DITL(DITLMixin, DITLStats):
         # after DITL initialization remains safe.
         if isinstance(self.plan, Plan):
             self.plan.bind_runtime(self.config, self.ephem)
+            # Plans can also be assigned after construction. Their booked
+            # station passes must survive replay without a new probability draw.
+            booked = self.plan.ground_contacts
+            if booked is not None and (
+                self.coverage is None
+                or booked
+                != [
+                    (span.begin, span.end, span.station)
+                    for span in self.coverage.scheduled_passes
+                ]
+            ):
+                self.coverage = StationCoverage.for_config(
+                    self.config, scheduled_passes=booked
+                )
+            self.plan.ground_contacts = self._booked_ground_contacts()
+            if self.coverage is not None:
+                self.passes = self.coverage.pass_times
 
         self._reset_stored_momentum_tracker()
 
@@ -282,7 +301,7 @@ class DITL(DITLMixin, DITLStats):
                 and self.ppt.collection_begin is None
                 and mode in (ACSMode.SCIENCE, ACSMode.SLEWING)
             ):
-                self.ppt.set_collection_window(self.config.payload.observation_timing)
+                self.ppt.set_collection_window(self._timing_for(self.ppt))
             collection_start, collection_stop = self._collection_interval_for_step(
                 self.utime[i], mode, obsid
             )
@@ -292,7 +311,11 @@ class DITL(DITLMixin, DITLStats):
 
             # Determine the power usage in Watts based on mode from config
             bus_power = self.spacecraft_bus.power(mode, in_eclipse=self.acs.in_eclipse)
-            payload_power = self.payload.power(mode, in_eclipse=self.acs.in_eclipse)
+            payload_power = self.payload.power(
+                mode,
+                in_eclipse=self.acs.in_eclipse,
+                instrument_modes=self._instrument_modes_now(mode, self.utime[i]),
+            )
             power_usage = bus_power + payload_power
 
             # Calculate solar panel illumination and power (more efficient than separate calls)
@@ -454,7 +477,19 @@ class DITL(DITLMixin, DITLStats):
                 else None
             )
             _q = attitude_to_quat(ra, dec, roll)
-            momentum_sample = self._update_stored_momentum(self.utime[i], _pos, _q)
+            momentum_sample = self._update_stored_momentum(
+                self.utime[i], _pos, _q, index=i
+            )
+            active = self._active_entry
+            self._momentum_at_capacity(
+                self.utime[i],
+                (
+                    int(active.obsid)
+                    if active is not None
+                    and active.obstype not in (ObsType.ACTIVITY, ObsType.GSP)
+                    else None
+                ),
+            )
             drive_angles = self._solar_array_drive_telemetry()
             hk = Housekeeping(
                 timestamp=datetime.fromtimestamp(self.utime[i], tz=timezone.utc),
@@ -466,6 +501,7 @@ class DITL(DITLMixin, DITLStats):
                 collection_seconds=collection_seconds,
                 panel_illumination=panel_illumination,
                 solar_array_drive_angles=drive_angles,
+                instrument_modes=self._instrument_modes_telemetry(mode, self.utime[i]),
                 power_usage=power_usage,
                 power_bus=bus_power,
                 power_payload=payload_power,
@@ -526,6 +562,30 @@ class DITL(DITLMixin, DITLStats):
                     if momentum_sample is not None
                     else None
                 ),
+                disturbance_torques_body_n_m=(
+                    {
+                        name: list(torque)
+                        for name, torque in momentum_sample.torques_body_n_m.items()
+                    }
+                    if momentum_sample is not None
+                    else None
+                ),
+                disturbance_torque_body_n_m=(
+                    list(momentum_sample.torque_body_n_m)
+                    if momentum_sample is not None
+                    else None
+                ),
+                geomagnetic_field_body_t=(
+                    list(momentum_sample.geomagnetic_field_body_t)
+                    if momentum_sample is not None
+                    and momentum_sample.geomagnetic_field_body_t is not None
+                    else None
+                ),
+                atmosphere_density_kg_m3=(
+                    momentum_sample.atmosphere_density_kg_m3
+                    if momentum_sample is not None
+                    else None
+                ),
             )
 
             # Check fault management thresholds and red limit constraints
@@ -569,6 +629,12 @@ class DITL(DITLMixin, DITLStats):
                 self.telemetry.data.append(pd)
 
         if (
+            self._active_entry is not None
+            and self._active_entry.obstype == ObsType.ACTIVITY
+            and not self.acs.in_safe_mode
+        ):
+            self._finish_active_entry(self.uend)
+        if (
             self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_enabled
             is True
         ):
@@ -590,6 +656,16 @@ class DITL(DITLMixin, DITLStats):
                 and attitude-rate mismatches. Empty when the plan executed as
                 written.
         """
+        return self._plan_validator().validate()
+
+    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
+        """The slews of the executed plan that took longer than their
+        requirement class allows (``attitude_control.slew_requirements``);
+        empty without a table. A report, not a fault: the run completes."""
+        return self._plan_validator().slew_requirement_mismatches()
+
+    def _plan_validator(self) -> PlanExecutionValidator:
+        """Build a validator over this run's plan and executed telemetry."""
         return PlanExecutionValidator(
             config=self.config,
             plan=self.plan,
@@ -616,7 +692,7 @@ class DITL(DITLMixin, DITLStats):
                 for violation in self._attitude_rate_violations()
             ],
             science_obstypes=PLAN_SCIENCE_OBSTYPES,
-        ).validate()
+        )
 
     def _credit_collection(self, entry: PlanEntry, start: float, stop: float) -> None:
         """Hook called for each step that collects science for ``entry``.
@@ -703,6 +779,8 @@ class DITL(DITLMixin, DITLStats):
             self._entry_passes[id(entry)] = gspass
             planned.append(gspass)
         passrequests.passes = planned
+        if self.coverage is None:
+            self.passes = passrequests
 
     def _execute_plan(self, utime: float) -> bool:
         """Issue the ACS commands that the plan makes due at ``utime``.
@@ -713,6 +791,13 @@ class DITL(DITLMixin, DITLStats):
         if self.acs.in_safe_mode:
             return False
         changed = False
+        if (
+            self._active_entry is not None
+            and self._active_entry.safe_hold
+            and self._active_entry.activity_hold_begin is not None
+            and utime >= self._active_entry.activity_hold_begin
+        ):
+            self.acs.begin_safe_hold()
         if (
             self._active_pass is not None
             and self.acs.current_pass is None
@@ -767,6 +852,25 @@ class DITL(DITLMixin, DITLStats):
         elif obstype == ObsType.CHARGE:
             self.acs.cancel_pending_slews(entry.obsid)
             self.acs.request_end_battery_charge(utime)
+        elif obstype == ObsType.ACTIVITY:
+            self.acs.cancel_pending_slews(entry.obsid)
+            entry.end = min(float(entry.end), utime)
+            self.log.log_event(
+                utime=utime,
+                event_type="ACTIVITY",
+                description=(
+                    f"Scheduled activity {entry.name} "
+                    f"{'ends' if entry.activity_finishes else 'stops before completion'}"
+                ),
+                obsid=entry.obsid,
+                acs_mode=self.acs.acsmode,
+            )
+            if entry.safe_hold:
+                self.acs.end_safe_hold()
+            if entry.desaturation:
+                self.acs.end_desaturation()
+                if entry.activity_finishes:
+                    self._unload_stored_momentum(utime, entry.obsid)
         else:
             self.acs.cancel_pending_slews(entry.obsid)
             self.acs.end_science_observation()
@@ -788,6 +892,8 @@ class DITL(DITLMixin, DITLStats):
             self.acs.request_battery_charge(
                 utime, entry.ra, entry.dec, entry.roll, entry.obsid
             )
+        elif obstype == ObsType.ACTIVITY:
+            self._command_activity_entry(entry, utime)
         else:
             self.log.log_event(
                 utime=utime,
@@ -801,6 +907,45 @@ class DITL(DITLMixin, DITLStats):
             return False
         self._active_entry = entry
         return True
+
+    def _command_activity_entry(self, entry: PlanEntry, utime: float) -> None:
+        """Hold the entry's attitude in IDLE for the activity, slewing to it
+        first where the spacecraft is elsewhere."""
+        self.acs.end_science_observation()
+        if entry.desaturation:
+            self.acs.begin_desaturation()
+        if entry.activity_hold_begin is None:
+            entry.activity_hold_begin = float(entry.begin) + entry.slewtime
+        if entry.activity_hold_end is None:
+            entry.activity_hold_end = float(entry.end)
+        if entry.safe_hold and utime >= entry.activity_hold_begin:
+            self.acs.begin_safe_hold()
+        resumed = entry.activity_hold_begin < self.ustart
+        entry.begin = max(float(entry.begin), self.ustart)
+        entry.end = min(float(entry.end), self.uend)
+        if resumed:
+            entry.fixed_data_gb = 0.0
+        else:
+            self._add_activity_data(float(entry.fixed_data_gb), entry)
+        distance, _ = quaternion_attitude_delta(
+            self.acs.ra, self.acs.dec, self.acs.roll, entry.ra, entry.dec, entry.roll
+        )
+        if distance > ANGLE_TOLERANCE_DEG:
+            self.acs._enqueue_slew(
+                entry.ra,
+                entry.dec,
+                entry.obsid,
+                utime,
+                obstype=ObsType.IDLE,
+                roll=entry.roll,
+            )
+        self.log.log_event(
+            utime=utime,
+            event_type="ACTIVITY",
+            description=f"Scheduled activity {entry.name} {'resumes' if resumed else 'begins'}",
+            obsid=entry.obsid,
+            acs_mode=self.acs.acsmode,
+        )
 
     def _command_science_entry(self, entry: PlanEntry, utime: float) -> None:
         """Slew to a science entry's target attitude."""
@@ -907,8 +1052,9 @@ class DITL(DITLMixin, DITLStats):
             ra, dec, roll = acquired
             if (
                 angular_separation(ra, dec, entry.track_start_ra, entry.track_start_dec)
-                <= 1e-6
-                and abs((roll - entry.track_start_roll + 180.0) % 360.0 - 180.0) <= 1e-6
+                <= ANGLE_TOLERANCE_DEG
+                and abs((roll - entry.track_start_roll + 180.0) % 360.0 - 180.0)
+                <= ANGLE_TOLERANCE_DEG
             ):
                 return profile
         return None

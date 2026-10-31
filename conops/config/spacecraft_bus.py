@@ -6,9 +6,11 @@ from ._base import ConfigModel
 from .acs import AttitudeControlSystem
 from .communications import CommunicationsSystem
 from .data_generator import HousekeepingData
+from .frame import SpacecraftFrame
 from .power import PowerDraw
 from .radiator import DefaultRadiatorConfiguration, RadiatorConfiguration
 from .star_tracker import DefaultStarTrackerConfiguration, StarTrackerConfiguration
+from .surfaces import SurfaceModel
 from .thermal import Heater
 
 # Allow roughly eight significant digits of input precision. This is a
@@ -28,6 +30,13 @@ class SpacecraftBus(ConfigModel):
     ) = Field(
         default=None,
         description="Spacecraft inertia tensor about its center of mass in body coordinates, in kg m².",
+    )
+    frame: SpacecraftFrame = Field(
+        default_factory=SpacecraftFrame,
+        description=(
+            "The body axes the science boresight and the Sun's side lie along; "
+            "the default is boresight +X, Sun's side +Y"
+        ),
     )
     power_draw: PowerDraw = Field(
         default_factory=PowerDraw,
@@ -54,6 +63,14 @@ class SpacecraftBus(ConfigModel):
     radiators: RadiatorConfiguration = Field(
         default_factory=DefaultRadiatorConfiguration,
         description="Body-mounted radiator configuration",
+    )
+    surfaces: SurfaceModel | None = Field(
+        default=None,
+        description=(
+            "The spacecraft's surfaces about its centre of mass, for the "
+            "torques of sunlight and drag; None builds a placeholder from the "
+            "bus, panels and telescopes when those torques are tracked"
+        ),
     )
 
     @field_validator("inertia_tensor_body_kg_m2", mode="before")
@@ -101,13 +118,16 @@ class SpacecraftBus(ConfigModel):
         gravity_gradient_enabled = getattr(
             stored_momentum, "gravity_gradient_enabled", False
         )
+        slew_momentum_enabled = getattr(stored_momentum, "slew_momentum_enabled", False)
         if (
             gravity_gradient_enabled is True
             or getattr(stored_momentum, "capacity_enabled", False) is True
+            or slew_momentum_enabled is True
         ) and getattr(self, "inertia_tensor_body_kg_m2", None) is None:
             raise ValueError(
                 "inertia_tensor_body_kg_m2 is required when gravity-gradient "
-                "momentum tracking or momentum capacity enforcement is enabled"
+                "momentum tracking, momentum capacity enforcement or slew momentum "
+                "is enabled"
             )
         return self
 

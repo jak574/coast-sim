@@ -12,7 +12,7 @@ Overview
 
 The primary models are:
 
-* :class:`~conops.targets.PlanEntry` — a single observation or ground-station-pass entry.
+* :class:`~conops.targets.PlanEntry` — a spacecraft activity, such as an observation or ground-station tracking.
 * :class:`~conops.targets.Plan` — the top-level plan, including its entries, file metadata,
   and optional execution timeseries.
 
@@ -66,11 +66,13 @@ passed to the constructor or assigned before :meth:`~conops.ditl.ditl.DITL.calc`
 
 :class:`~conops.ditl.ditl.DITL` commands every entry when its ``begin`` is reached:
 science entries (``PPT``, ``AT``, ``TOO``) slew to the target and collect until ``end``;
-ground-station entries (``GSP``) slew onto the pass tracking profile, start the contact at
+ground-station tracking entries (``GSP``) slew onto the pass tracking profile, start the contact at
 ``contact_begin`` and end it at ``end``; charging entries (``CHARGE``) charge until ``end``.
 Passes are predicted from the configured ground stations and matched to ``GSP`` entries by
 station and contact window; passes not in the plan are skipped.  Entries
-of any other type are logged and skipped.
+of any other type are logged and skipped. Booked pass windows that require no
+spacecraft tracking are stored in ``ground_contacts`` and used for downlink
+without adding activities to the spacecraft timeline.
 
 Executing a plan saved by :class:`~conops.ditl.queue_ditl.QueueDITL` with the same
 configuration and ephemeris reproduces that run's timeline.  To list where execution differed
@@ -211,6 +213,12 @@ Metadata Fields
    * - ``num_entries``
      - int
      - Total number of entries in the file.
+   * - ``ground_contacts``
+     - array | null
+     - Booked passes that require no spacecraft tracking, as
+       ``[begin_unix_seconds, end_unix_seconds, station_code]`` rows. An empty
+       array reserves no station time. If absent, bookings are predicted from
+       the configuration. Saved bookings are replayed without a new scheduling draw.
    * - ``attitude_timeseries_file``
      - string | null
      - Filename (no path) of the sibling attitude-timeseries JSON file written alongside
@@ -308,6 +316,15 @@ Entry Fields
    * - ``slewdist``
      - float
      - Angular slew distance in degrees.
+   * - ``great_circle_deg``
+     - float
+     - Great-circle angle between the pointings the slew joins, in degrees.
+   * - ``sun_vector_change_deg``
+     - float
+     - How far the slew moves the Sun's direction in the body frame, in degrees; zero without a thermal settling table.
+   * - ``settle_seconds``
+     - float
+     - The settle ``slewtime`` includes, in seconds.
    * - ``ss_min``
      - float
      - Minimum Sun-spacecraft separation angle encountered (degrees).
@@ -395,7 +412,7 @@ Entry Fields
 Ground Station Pass (GSP) Entries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Ground station pass entries (``obstype="GSP"``) represent commanded communication windows
+Ground station pass entries (``obstype="GSP"``) represent spacecraft tracking activities
 with ground stations. Unlike science observations, these entries capture the reservation
 and execution of data downlink passes.
 
@@ -740,6 +757,64 @@ Load the sidecar through :class:`~conops.targets.OrbitStateTimeseriesSchema`:
        )
        orbit_states = OrbitStateTimeseriesSchema.model_validate(raw)
        print(f"Loaded {orbit_states.num_samples} orbit-state samples")
+
+Programs
+--------
+
+A :class:`~conops.targets.Program` is what a run schedules, as a ``Plan`` is what a run
+executed: one JSON file holding the request pool, the Targets of Opportunity with their
+triggers, the scheduled activities and the observation groups, written for a window.
+
+* ``requests``: the requests, each a :class:`~conops.targets.Pointing` or a
+  :class:`~conops.targets.MovingPointing`, read back as its own class by its ``kind``.
+  :meth:`~conops.targets.Program.save` writes a request without its execution fields
+  (:attr:`~conops.targets.PlanEntry.EXECUTION_FIELDS`: ``begin``, ``end``, ``slewtime``,
+  ``roll``, ``done`` and the rest a run fills in), so a request written is the request,
+  not a run's state; a moving target's track is written when it was given or looked up
+  before the save, and a body's with no track is looked up at the run.
+* ``toos``: :class:`~conops.targets.TOORequest` records, each any request plus its
+  ``submit_time``, ``deadline`` and whether it may ``interrupt``; the flat fields a ToO
+  was once given still build a plain pointing. The ``executed`` flag is run state and is
+  not written.
+* ``activities``: the :class:`~conops.targets.ScheduledActivity` records;
+  :func:`~conops.targets.periodic_activities` remains the way to build a series.
+* ``observation_groups``: the :class:`~conops.config.ObservationGroups`; a group names
+  request obsids and belongs to the program, and :meth:`~conops.targets.Program.bind`
+  gives them to the configuration, where a run reads them.
+* ``begin`` and ``end``: the window the program is written for; every time in the file is
+  absolute (ISO-8601 on disk, Unix seconds in memory, as ``Plan`` writes them).
+* ``version``, ``coast_sim_version``, ``created_at``, ``name``, ``description`` and the
+  roll convention fields, as ``Plan`` has them.
+
+.. code-block:: python
+
+   from conops import create_ditl
+   from conops.targets import Program
+
+   program = Program(begin=begin, end=end, requests=requests, toos=toos,
+                     activities=activities, observation_groups=groups)
+   program.save("program.json")
+
+   loaded = Program.load("program.json")
+   ditl = create_ditl(config, program=loaded)   # binds, queues, submits the ToOs
+
+``create_ditl(config, program=...)`` takes the place of ``targets=`` and ``activities=``
+and registers the ToOs itself; a planned run refuses a program with ToOs, since a plan
+cannot take them. ``QueueDITL.submit_too`` and ``RollingHorizonDITL.submit_too`` accept
+a ``TOORequest`` as well as the flat fields.
+
+Typed entries
+~~~~~~~~~~~~~
+
+Every entry carries a ``kind``: ``entry`` for a plain :class:`~conops.targets.PlanEntry`,
+``pointing`` and ``moving_pointing`` for the request classes. ``Plan.load``,
+``Program.load`` and ``TargetList`` read each entry as the class its ``kind`` names, so a
+plan saved after a run reloads with its entries' classes and their request fields
+(``visit_windows``, ``sequence``, ``earliest_start``, ``deadline``, ``roll_offset_deg``,
+``protect_opening``, ``visits``, a moving target's ``body``), as a plan used as a start
+plan needs. A plan file written before entries carried a ``kind`` holds plain entries.
+A plan's ``start`` and ``end`` are taken from its scheduled entries; a request that was
+never scheduled, with no ``begin`` or ``end``, does not set them.
 
 Backward Compatibility
 ----------------------

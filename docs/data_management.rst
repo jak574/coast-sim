@@ -17,7 +17,8 @@ The data management system consists of three main components:
 
 1. **OnboardRecorder**: Simulates the spacecraft's solid-state recorder (SSR) or data storage device
 2. **DataGeneration**: Models how the bus and each instrument produce data, and how targets change it
-3. **Downlink Operations**: Simulates data transfer during ground station passes
+3. **Downlink Operations**: Simulates data transfer during scheduled ground-station
+   passes (see :doc:`communications`)
 
 These components work together seamlessly in DITL simulations to track data flow throughout
 the spacecraft's operations.
@@ -80,7 +81,8 @@ The recorder provides three alert levels based on fill fraction:
 
 **Data Removal**
 
-During ground station passes, data is removed from the recorder to simulate downlink:
+During scheduled ground-station passes, data is removed from the recorder to
+simulate downlink:
 
 .. code-block:: python
 
@@ -302,8 +304,9 @@ Ground Station Pass Plan Entries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Starting with version 0.2.0, :class:`~conops.ditl.queue_ditl.QueueDITL` automatically
-creates plan entries for commanded ground station passes. These ``GSP`` (Ground Station Pass)
-entries appear in the exported observation plan alongside science observations.
+creates ``GSP`` (Ground Station Pass) entries for passes that require spacecraft
+tracking. These activities appear alongside science observations in the exported
+plan. Bookings that require no spacecraft tracking are stored in ``ground_contacts``.
 
 **Pass Deconfliction**
 
@@ -736,6 +739,12 @@ are fixed, so an empty store's unused bandwidth remains unused. A station has
 one active downlink in this model. ``downlinks: []`` explicitly means no downlink;
 ``null`` means the path is unresolved. Stations absent from the list provide no
 data removal, though they may still provide uplink contacts.
+
+Calibration and activity frame sizes are fixed amounts. Their named instruments
+route them through ``instrument_science``; a calibration step without its own
+modes inherits the observation's instruments. The instruments must identify one
+store for each fixed amount. Use separate entries or budget steps when frames
+belong to different stores. An activity naming no instrument uses the bus store.
 
 Dispatch, priority, local-search and CP-SAT scheduling check every store's own
 planning limit. Rolling replanning carries a mapping of store names to projected

@@ -7,9 +7,11 @@ eclipses, and ground station passes.
 
 from datetime import datetime, timezone
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.patches import Patch
 
 from conops.ditl.ditl import DITL
 from conops.ditl.queue_ditl import QueueDITL
@@ -17,6 +19,14 @@ from conops.ditl.queue_ditl import QueueDITL
 from ...common import ACSMode, ObsType
 from ...config import ObservationCategories
 from ...config.visualization import VisualizationConfig
+from ...simulation.coverage import StationCoverage
+from ..contacts import (
+    ContactBar,
+    contact_alphas,
+    contact_bars,
+    run_window,
+    station_colors,
+)
 
 # Mapping of matplotlib color names to CSS color names that Plotly accepts
 MATPLOTLIB_TO_PLOTLY_COLORS = {
@@ -153,6 +163,7 @@ def plot_ditl_timeline(
     # Always include these rows
     timeline_rows.append(("Observations", None, None))
     timeline_rows.append(("Slewing", None, None))
+    timeline_rows.append(("Activities", None, None))
     timeline_rows.append(("Charging", None, None))
     timeline_rows.append(("Safe Mode", None, None))
 
@@ -239,6 +250,32 @@ def plot_ditl_timeline(
                     facecolors=color,
                 )
 
+    # Sequence steps are hatched over their observation bars.
+    step_segments = _extract_sequence_steps(ditl, t_start, offset_hours)
+    if step_segments:
+        ax.broken_barh(
+            step_segments,
+            (obs_y_pos, bar_height),
+            facecolor="none",
+            edgecolor="black",
+            hatch="//",
+            linewidth=0.5,
+            label="Sequence Step",
+        )
+
+    # Antenna repoints during observations, marked where they happen.
+    repoint_times = _extract_repoints(ditl, t_start, offset_hours)
+    if repoint_times:
+        ax.plot(
+            repoint_times,
+            [obs_y_pos + bar_height] * len(repoint_times),
+            linestyle="none",
+            marker="v",
+            markersize=6,
+            color="tab:red",
+            label="Antenna Repoint",
+        )
+
     # Extract and plot slews
     slew_segments = _extract_slews(ditl, t_start, offset_hours)
     if slew_segments:
@@ -248,6 +285,24 @@ def plot_ditl_timeline(
             (slew_y_pos, bar_height),
             facecolor="tab:grey",
             label="Slew and Settle",
+        )
+
+    # Scheduled activities, momentum dumps apart from the rest.
+    dumps, activities = _extract_activities(ditl, t_start, offset_hours)
+    activity_y_pos = row_positions["Activities"]
+    if dumps:
+        ax.broken_barh(
+            dumps,
+            (activity_y_pos, bar_height),
+            facecolor="tab:purple",
+            label="Momentum Dump",
+        )
+    if activities:
+        ax.broken_barh(
+            activities,
+            (activity_y_pos, bar_height),
+            facecolor="tab:olive",
+            label="Activity",
         )
 
     # Extract and plot charging mode observations
@@ -308,6 +363,24 @@ def plot_ditl_timeline(
             label="Ground Contact",
         )
 
+    # Usable links during ground-station passes, coloured by station. On
+    # a long run each bar is an hour, as dark as its fraction in contact.
+    contacts = _extract_contacts(ditl, t_start, offset_hours)
+    contact_handles: list[Patch] = []
+    if contacts:
+        colors = station_colors(bar.station for bar in contacts)
+        alphas = dict(zip(contacts, contact_alphas(contacts)))
+        contact_y_pos = row_positions["Ground Contact"]
+        for station, color in colors.items():
+            bars = [bar for bar in contacts if bar.station == station]
+            ax.broken_barh(
+                [(bar.start, bar.duration) for bar in bars],
+                (contact_y_pos, bar_height),
+                facecolors=[mcolors.to_rgba(color, alpha=alphas[bar]) for bar in bars],
+                label="_nolegend_",
+            )
+            contact_handles.append(Patch(color=color, label=f"Contact: {station}"))
+
     # Set up axes with labels and tick positions
     # Y-ticks should be at the center of each bar for the grid lines to cut through
     y_labels = [row[0] for row in timeline_rows]
@@ -328,7 +401,8 @@ def plot_ditl_timeline(
 
     # Add legend and configure it via typed Legend methods to avoid
     # version-specific Axes.legend overload issues in static type checking.
-    legend = ax.legend()
+    handles, _ = ax.get_legend_handles_labels()
+    legend = ax.legend(handles=[*handles, *contact_handles])
     legend.set_loc("upper center")
     legend.set_bbox_to_anchor((0.5, -0.2))
     legend.set_ncols(4)
@@ -372,7 +446,7 @@ def _extract_observations(
     }
 
     for ppt in ditl.plan:
-        if ppt.obstype == ObsType.GSP:
+        if ppt.obstype in (ObsType.GSP, ObsType.ACTIVITY):
             continue
 
         # Calculate observation start and duration
@@ -388,6 +462,49 @@ def _extract_observations(
         observations[category.name].append((obs_start, obs_duration))
 
     return observations
+
+
+def _extract_sequence_steps(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
+    """The steps of sequence visits, as (start, duration) in hours."""
+    segments = []
+    for ppt in ditl.plan:
+        if ppt.step is None or ppt.obstype in (ObsType.GSP, ObsType.ACTIVITY):
+            continue
+        start = (ppt.begin + ppt.slewtime - t_start) / 3600 - offset_hours
+        duration = (ppt.end - (ppt.begin + ppt.slewtime)) / 3600
+        if duration > 0:
+            segments.append((start, duration))
+    return segments
+
+
+def _extract_activities(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Scheduled activities as (start, duration) in hours: thruster
+    momentum dumps, and the rest."""
+    dumps: list[tuple[float, float]] = []
+    others: list[tuple[float, float]] = []
+    for ppt in ditl.plan:
+        if ppt.obstype != ObsType.ACTIVITY:
+            continue
+        start = (ppt.begin - t_start) / 3600 - offset_hours
+        duration = (ppt.end - ppt.begin) / 3600
+        if duration <= 0:
+            continue
+        (dumps if ppt.desaturation else others).append((start, duration))
+    return dumps, others
+
+
+def _extract_repoints(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[float]:
+    """When the antenna repointed during an observation, in hours."""
+    repoints = getattr(ditl, "repoints_in_observations", None)
+    if not isinstance(repoints, list):
+        return []
+    return [(float(at) - t_start) / 3600 - offset_hours for at, _, _ in repoints]
 
 
 def _extract_slews(
@@ -565,10 +682,26 @@ def _extract_eclipses(
     return eclipse_segments
 
 
+def _extract_contacts(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[ContactBar]:
+    """Usable link spans for passes without spacecraft tracking.
+
+    Tracking activities are plotted by ``_extract_ground_passes``.
+    """
+    coverage = getattr(ditl, "coverage", None)
+    if not isinstance(coverage, StationCoverage):
+        return []
+    window = run_window(ditl)
+    if window is None:
+        return []
+    return contact_bars(coverage, window[0], window[1], t_start, offset_hours)
+
+
 def _extract_ground_passes(
     ditl: QueueDITL | DITL, t_start: float, offset_hours: float
 ) -> list[tuple[float, float]]:
-    """Extract ground station pass times from ACS pass list."""
+    """Extract spacecraft tracking intervals from the ACS pass list."""
     if not hasattr(ditl, "acs") or ditl.acs is None:
         return []
 

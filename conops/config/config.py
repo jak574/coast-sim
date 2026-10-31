@@ -14,9 +14,12 @@ from .constraint import AttitudeConstraintScope, Constraint, DefaultConstraint
 from .data_generator import ScienceData
 from .data_storage import DataStorage, RecorderView
 from .fault_management import FaultManagement
+from .frame import SpacecraftFrame
 from .groundstation import GroundStationRegistry
-from .instrument import Payload
+from .instrument import Payload, Telescope
 from .observation_categories import ObservationCategories
+from .observation_groups import ObservationGroups
+from .observation_timing import ObservationTiming
 from .recorder import OnboardRecorder
 from .scheduler import SchedulerConfig
 from .solar_panel import SolarPanelSet
@@ -48,6 +51,7 @@ def _default_attitude_constraint_scopes() -> dict[str, list[AttitudeConstraintSc
             AttitudeConstraintScope.POWER_GENERATION,
         ],
         ACSMode.IDLE.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
+        ACSMode.DESAT.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
     }
 
 
@@ -166,6 +170,13 @@ class MissionConfig(ConfigModel):
         default_factory=ObservationCategories.default_categories,
         description="Observation Categories. Defines categories for different observation types with ID ranges",
     )
+    observation_groups: ObservationGroups = Field(
+        default_factory=ObservationGroups,
+        description=(
+            "Observation Groups. Named sets of targets observed under one window "
+            "and one time budget, and preferred one after another"
+        ),
+    )
     visualization: VisualizationConfig = Field(
         default_factory=VisualizationConfig,
         exclude=True,
@@ -233,6 +244,81 @@ class MissionConfig(ConfigModel):
         | None,
     ) -> dict[str, list[AttitudeConstraintScope]]:
         return _normalize_attitude_constraint_scopes(value)
+
+    @model_validator(mode="after")
+    def _telescopes_take_the_bus_frame(self) -> MissionConfig:
+        """A telescope given no mounting of its own points along the bus
+        frame's boresight, with its zero-roll reference completing the
+        frame; one given a mounting, or a legacy boresight, keeps it."""
+        bus = getattr(self, "spacecraft_bus", None)
+        frame = getattr(bus, "frame", None)
+        payload = getattr(self, "payload", None)
+        # A test double's configuration has no frame or payload.
+        if not isinstance(frame, SpacecraftFrame) or frame.is_identity:
+            return self
+        instruments = getattr(payload, "instruments", None)
+        if not isinstance(instruments, list):
+            return self
+        for instrument in instruments:
+            if isinstance(instrument, Telescope) and (
+                "mounting" not in instrument.model_fields_set
+            ):
+                instrument.mounting = frame.mounting
+        return self
+
+    @model_validator(mode="after")
+    def _panels_see_the_given_eclipses(self) -> MissionConfig:
+        """The solar panels take the intervals the constraint gives as
+        eclipse, read as the constraint's list stands."""
+        constraint = getattr(self, "constraint", None)
+        take = getattr(
+            getattr(self, "solar_panel", None), "take_eclipse_intervals_from", None
+        )
+        # A test double's constraint or panels take nothing.
+        if callable(take) and isinstance(constraint, Constraint):
+            take(constraint.eclipse_intervals_unix)
+        return self
+
+    @model_validator(mode="after")
+    def _budget_steps_name_known_modes(self) -> MissionConfig:
+        """The calibration steps of every timing budget name instruments the
+        payload has, in modes they define, allowed at once."""
+        payload = getattr(self, "payload", None)
+        check = getattr(payload, "check_request", None)
+        # A test double's payload or categories check nothing.
+        if not callable(check):
+            return self
+        timings = [getattr(payload, "observation_timing", None)]
+        categories = getattr(self, "observation_categories", None)
+        if isinstance(categories, ObservationCategories):
+            timings.extend(
+                category.observation_timing for category in categories.categories
+            )
+        for timing in timings:
+            if not isinstance(timing, ObservationTiming):
+                continue
+            for step in (*timing.setup_steps, *timing.cleanup_steps):
+                if step.instrument_modes:
+                    check(step.instrument_modes)
+        return self
+
+    def observation_timing_for(self, obsid: int) -> ObservationTiming:
+        """The setup, cleanup and handoff budgets of the observation ``obsid``:
+        its category's where that sets them, else the payload's."""
+        timing = self.observation_categories.get_category(int(obsid)).observation_timing
+        return timing if timing is not None else self.payload.observation_timing
+
+    def observation_timings(self) -> list[ObservationTiming]:
+        """Every timing an observation can have: the payload's and each
+        category's own."""
+        return [
+            self.payload.observation_timing,
+            *(
+                category.observation_timing
+                for category in self.observation_categories.categories
+                if category.observation_timing is not None
+            ),
+        ]
 
     def attitude_constraint_scopes_for_mode(
         self, mode: ACSMode | int
@@ -476,6 +562,7 @@ class MissionConfig(ConfigModel):
         self,
         collection_seconds: float,
         science: Mapping[str, ScienceData] | None = None,
+        instrument_modes: Mapping[str, str] | None = None,
     ) -> float:
         """Science data an observation generates, having collected for some seconds.
 
@@ -485,11 +572,15 @@ class MissionConfig(ConfigModel):
             collection_seconds: Seconds of science the observation collected.
             science: The observed target's science data, keyed by instrument
                 name.
+            instrument_modes: The mode each instrument is in during the
+                observation, by name; None: every instrument generates.
 
         Returns:
             float: Data generated in Gigabits.
         """
-        return self.payload.science_generated(collection_seconds, science)
+        return self.payload.science_generated(
+            collection_seconds, science, instrument_modes
+        )
 
     def data_generated(
         self,
@@ -498,6 +589,7 @@ class MissionConfig(ConfigModel):
         mode: ACSMode | None = None,
         collection_seconds: float | None = None,
         science: Mapping[str, ScienceData] | None = None,
+        instrument_modes: Mapping[str, str] | None = None,
     ) -> float:
         """Data an observation generates over an interval.
 
@@ -520,7 +612,7 @@ class MissionConfig(ConfigModel):
             collection_seconds = duration_seconds
         return self.housekeeping_generated(
             duration_seconds, mode=mode
-        ) + self.science_generated(collection_seconds, science)
+        ) + self.science_generated(collection_seconds, science, instrument_modes)
 
     @classmethod
     def from_json_file(cls, filepath: str) -> MissionConfig:
