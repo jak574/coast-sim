@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..common import ACSMode, ObsType
+from ..common.numerics import ATTITUDE_TOLERANCE_DEG
 from ..common.vector import quaternion_attitude_delta
 from .attitude import Attitude, AttitudeState, AttitudeTrajectory
 from .momentum_budget import MomentumForecast
@@ -277,7 +278,7 @@ class MomentumObservationPlanner:
                 # momentum-limited escape remains possible at the next tick.
                 if (
                     quaternion_attitude_delta(*initial.attitude, ra, dec, roll)[0]
-                    <= 1e-8
+                    <= ATTITUDE_TOLERANCE_DEG
                 ):
                     continue
                 result = self.recovery(initial, momentum, (ra, dec, roll))
