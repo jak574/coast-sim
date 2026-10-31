@@ -233,6 +233,11 @@ How a plan is built
    Activities starting at or after the run's end do not block dispatch either.
    Activity obsids are assigned from the full input list and remain unchanged
    when the run's interval excludes earlier activities.
+   An activity reserved within a rolling planning horizon keeps its full hold
+   even when it ends beyond that horizon. Replans commit the remaining hold
+   with the activity, so science cannot use its tail and its data is not
+   generated again. The physical simulation end and the ephemeris end still
+   bound the hold; an internal planning cutoff does not.
    A thruster momentum dump is an activity
    dispatch calls for itself, when the stored momentum reaches the planning level of
    the wheels' capacity (see the stored momentum under :doc:`configuration`), and

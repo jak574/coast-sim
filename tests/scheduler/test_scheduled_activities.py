@@ -280,6 +280,39 @@ class TestPlanning:
         ).schedule()
         assert _activities(plan) == []
 
+    @pytest.mark.parametrize("fixed", [False, True])
+    @pytest.mark.parametrize("limit", ["run", "ephemeris"])
+    def test_an_activity_tail_stops_at_the_physical_boundary(
+        self, fixed, limit
+    ) -> None:
+        """An internal cutoff may be crossed; the run and ephemeris may not."""
+        config = _config(3)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        activity = ScheduledActivity(
+            name="Long hold",
+            begin=T0 + 90 * MIN,
+            duration_seconds=2 * HOUR,
+            slide_seconds=0 if fixed else 10 * MIN,
+            fixed=fixed,
+        )
+        run_hours = 2.25 if limit == "run" else 4
+        scheduler = PriorityScheduler(
+            config,
+            [],
+            BEGIN,
+            BEGIN + timedelta(hours=2),
+            simulation_end=BEGIN + timedelta(hours=run_hours),
+            step_size=STEP,
+            include_passes=False,
+            activities=[activity],
+        )
+        [entry] = _activities(scheduler.schedule())
+        assert float(entry.begin) == activity.begin
+        assert float(entry.end) == T0 + min(run_hours, 3) * HOUR
+        [block] = scheduler.timeline
+        assert block.end == float(entry.end)
+
     def test_a_sliding_activity_due_at_the_horizon_end_is_left_out(self) -> None:
         """A sliding block is reserved from its latest start; at or past the
         horizon's end that reservation would have no length, and the plan
@@ -674,6 +707,101 @@ class TestRolling:
         assert len(entries) > 1
         assert sum(e.fixed_data_gb for e in entries) == 1.5
         assert ditl.recorder.current_volume_gb == pytest.approx(1.5)
+
+    @pytest.mark.parametrize("fixed", [False, True])
+    @pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+    def test_activity_crossing_a_planning_horizon_is_kept_whole(
+        self, fixed, kind, tmp_path
+    ) -> None:
+        """A planning cutoff is not the end of an activity already reserved.
+
+        The 01:30–02:30 hold crosses the first 02:00 horizon. A replan commits
+        it before it begins and another runs inside it; neither may shorten it
+        to 02:00, repeat its data, or place science in its remaining half hour.
+        """
+        config = _config(6)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        activity = ScheduledActivity(
+            name="Across horizon",
+            begin=T0 + 90 * MIN,
+            duration_seconds=HOUR,
+            slide_seconds=0 if fixed else 10 * MIN,
+            fixed=fixed,
+            data_gb=1.5,
+        )
+        if kind == "priority":
+            scheduler, options = PriorityScheduler, {}
+        elif kind == "local_search":
+            scheduler, options = LocalSearchScheduler, {"time_limit": 0.0}
+        else:
+            pytest.importorskip("ortools")
+            from conops.schedulers import CpSatScheduler
+
+            scheduler, options = (
+                CpSatScheduler,
+                {
+                    "time_limit": 0.0,
+                    "solver_time_limit": 2.0,
+                    "solver_deterministic_time": 0.05,
+                    "workers": 1,
+                    "seed": 1,
+                },
+            )
+        captured = []
+        schedule = scheduler.schedule
+
+        def record(builder):
+            plan = schedule(builder)
+            captured.append(Plan.model_validate_json(plan.model_dump_json()))
+            for block in builder.timeline:
+                if block.entry.obsid == ACTIVITY_OBSID:
+                    assert block.end == float(block.entry.end)
+            return plan
+
+        ditl = RollingHorizonDITL(
+            config,
+            [
+                _target(
+                    config,
+                    100,
+                    *PATCH[0],
+                    minutes=60,
+                    snapshot=20,
+                    earliest_start=T0 + 2 * HOUR,
+                )
+            ],
+            begin=BEGIN,
+            end=BEGIN + timedelta(hours=6),
+            horizon=timedelta(hours=2),
+            replan_interval=timedelta(hours=1),
+            commit_lead_time=timedelta(minutes=40),
+            scheduler=scheduler,
+            scheduler_options=options,
+            include_passes=False,
+            activities=[activity],
+        )
+        ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
+        with patch.object(scheduler, "schedule", record):
+            assert ditl.calc()
+
+        [initial] = _activities(captured[0])
+        [entry] = _activities(ditl.plan)
+        assert (float(initial.begin), float(initial.end)) == (
+            activity.begin,
+            activity.end,
+        )
+        assert (float(entry.begin), float(entry.end)) == (activity.begin, activity.end)
+        assert ditl.validate_plan_matches_execution() == []
+        science = _science(ditl.plan)
+        assert science
+        assert all(float(e.begin) >= activity.end for e in science)
+        events = [e for e in ditl.log if e.event_type == "ACTIVITY"]
+        assert [e.time for e in events] == [activity.begin, activity.end]
+        ditl._add_activity_data.assert_called_once()
+        restored = Plan.load(ditl.plan.save(tmp_path / "plan.json"))
+        [loaded] = _activities(restored)
+        assert float(loaded.end) - float(loaded.begin) == HOUR
 
     def test_each_plan_reserves_the_activities(self) -> None:
         config = _config(HOURS)
