@@ -2,7 +2,7 @@
 planners and executed by both simulations."""
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -10,12 +10,14 @@ from conops import DITL, QueueDITL, create_ditl
 from conops.common import ObsType
 from conops.common.enums import ACSMode
 from conops.config import MissionConfig
+from conops.config.scheduler import SchedulerMode
 from conops.ditl import RollingHorizonDITL
 from conops.schedulers import LocalSearchScheduler, PriorityScheduler, SchedulingContext
 from conops.targets import (
     ACTIVITY_OBSID,
     Plan,
     Pointing,
+    Program,
     ScheduledActivity,
     assign_obsids,
 )
@@ -388,6 +390,109 @@ class TestDispatch:
         for earlier, following in zip(entries, entries[1:]):
             assert float(following.begin) >= float(earlier.end)
             assert float(following.end) - float(following.begin) == 300
+
+
+class TestPartialRun:
+    @pytest.mark.parametrize("mode", list(SchedulerMode))
+    @pytest.mark.parametrize("reload", [False, True])
+    def test_expired_activities_are_not_executed_or_renumbered(
+        self, tmp_path, mode, reload
+    ) -> None:
+        config = _config(4)
+        config.scheduler.mode = mode
+        start, stop = BEGIN + timedelta(hours=2), BEGIN + timedelta(hours=4)
+        live = ScheduledActivity(
+            name="In run",
+            begin=T0 + 3 * HOUR,
+            duration_seconds=10 * MIN,
+            data_gb=1.5,
+        )
+        activities = [
+            ScheduledActivity(
+                name="After run",
+                begin=T0 + 4 * HOUR,
+                duration_seconds=10 * MIN,
+            ),
+            live,
+            ScheduledActivity(
+                name="Expired",
+                begin=T0 + HOUR,
+                duration_seconds=10 * MIN,
+                data_gb=20,
+            ),
+            ScheduledActivity(
+                name="Ends at begin",
+                begin=T0 + 90 * MIN,
+                duration_seconds=30 * MIN,
+            ),
+            ScheduledActivity(
+                name="Slide ends at begin",
+                begin=T0 + 80 * MIN,
+                duration_seconds=10 * MIN,
+                slide_seconds=30 * MIN,
+            ),
+        ]
+        program = Program(
+            begin=T0,
+            end=T0 + 4 * HOUR,
+            activities=activities,
+        )
+        if reload:
+            program = Program.load(program.save(tmp_path / "program.json"))
+        before = program.model_dump(mode="json")
+        [expected] = [a for a in assign_obsids(activities) if a.name == live.name]
+        ditl = create_ditl(config, program=program, begin=start, end=stop)
+        ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
+
+        assert ditl.calc()
+
+        [entry] = _activities(ditl.plan)
+        assert (entry.name, entry.obsid) == (live.name, expected.obsid)
+        assert (float(entry.begin), float(entry.end)) == (live.begin, live.end)
+        assert ditl.validate_plan_matches_execution() == []
+        ditl._add_activity_data.assert_called_once()
+        volume, recorded = ditl._add_activity_data.call_args.args
+        assert volume == live.data_gb and recorded.obsid == expected.obsid
+        assert program.model_dump(mode="json") == before
+
+    def test_direct_dispatch_ignores_an_expired_activity(self) -> None:
+        config = _config(4)
+        ditl = QueueDITL(
+            config=config,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(hours=4),
+            activities=[
+                ScheduledActivity(
+                    name="Expired",
+                    begin=T0 + HOUR,
+                    duration_seconds=10 * MIN,
+                )
+            ],
+        )
+        assert ditl.calc()
+        assert _activities(ditl.plan) == []
+        assert not any(e.event_type == "ACTIVITY" for e in ditl.log)
+        assert ditl.validate_plan_matches_execution() == []
+
+    def test_an_open_slide_window_is_still_pending(self) -> None:
+        config = _config(4)
+        ditl = QueueDITL(
+            config=config,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(hours=4),
+            activities=[
+                ScheduledActivity(
+                    name="Still open",
+                    begin=T0 + HOUR,
+                    duration_seconds=10 * MIN,
+                    slide_seconds=2 * HOUR,
+                )
+            ],
+        )
+        assert ditl._setup_simulation_timing()
+        pending = ditl._activity_pending(ditl.ustart)
+        assert pending is not None and pending.name == "Still open"
+        assert ditl._next_activity_begin(ditl.ustart) == T0 + 3 * HOUR
 
 
 def _slow_slew_run(
