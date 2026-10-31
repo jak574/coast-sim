@@ -238,6 +238,24 @@ How a plan is built
    with the activity, so science cannot use its tail and its data is not
    generated again. The physical simulation end and the ephemeris end still
    bound the hold; an internal planning cutoff does not.
+   In a partial run, dispatch and the planners resume a fixed activity that
+   began earlier, holding only until its original end. Without earlier execution
+   state, a sliding activity whose window is still open begins a whole hold at
+   the run's start; if the window has closed, the run assumes the latest
+   permitted start and resumes its remaining hold. These assumptions do not
+   reconstruct earlier attitude, recorder contents or momentum: the run's
+   configured initial conditions still apply. A saved plan carries the settled
+   hold bounds when an exact earlier reservation is available.
+   Activity entries store ``activity_hold_begin`` and ``activity_hold_end`` for
+   that full hold, while ``begin`` and ``end`` bound the portion in this run.
+   ``activity_partial`` reports missing time at either boundary;
+   ``activity_finishes`` says whether the interval reaches the full hold's end.
+   A resumed activity logs ``resumes`` and has no new ``fixed_data_gb``; its
+   start data is not generated again. A hold cut short at the run end logs
+   ``stops before completion``. A partial dump unloads the wheels only if its
+   remaining hold reaches the full end, in execution and in both the planner's
+   and rolling replan's momentum forecasts. Older plans without hold metadata
+   continue to use their entry bounds as the full hold bounds.
    A thruster momentum dump is an activity
    dispatch calls for itself, when the stored momentum reaches the planning level of
    the wheels' capacity (see the stored momentum under :doc:`configuration`), and

@@ -1044,7 +1044,10 @@ class PriorityScheduler:
                 if gspass.requires_tracking:
                     self._place_pass(gspass)
         for activity in sorted([*self.activities, *self.dumps], key=lambda a: a.begin):
-            if activity.begin < self.ctx.uend and activity.end > self.ctx.ustart:
+            if (
+                activity.begin < self.ctx.uend
+                and activity.latest_start + activity.duration_seconds > self.ctx.ustart
+            ):
                 self._place_activity(activity)
         # After the passes and activities, as the science was placed: each
         # kept block keeps its slew and re-slews what now follows it.
@@ -2242,7 +2245,7 @@ class PriorityScheduler:
         activity = block.activity
         if activity is None:
             return
-        begin = activity.begin
+        begin = max(activity.begin, self.ctx.ustart)
         if previous_end is not None:
             begin = max(begin, self.ctx.ceil_step(previous_end))
         latest = block.latest_ready if block.latest_ready is not None else block.ready
@@ -2251,6 +2254,8 @@ class PriorityScheduler:
         block.end = self._activity_end(activity, begin)
         block.entry.begin = begin
         block.entry.end = block.end
+        block.entry.activity_hold_begin = begin
+        block.entry.activity_hold_end = begin + activity.duration_seconds
 
     def _activity_end(self, activity: ScheduledActivity, begin: float) -> float:
         """Keep a reserved activity whole across an internal planning cutoff.
@@ -2269,6 +2274,10 @@ class PriorityScheduler:
         each activity already on the timeline that is under way then, as
         one due while another is under way begins when that one ends."""
         ready = activity.latest_start
+        if activity.begin < self.ctx.ustart <= activity.latest_start:
+            # With no earlier execution state, an open slide window starts
+            # a new whole hold at the partial run's beginning.
+            ready = self.ctx.ustart
         for block in self.timeline:
             if (
                 block.is_activity
@@ -2287,15 +2296,9 @@ class PriorityScheduler:
         for the activity's length is not used; the plan then leaves the
         activity out and says so.
         """
-        begin = max(activity.begin, self.ctx.ustart)
-        end = activity.end
-        # An activity under way at the plan's start put its data on the
-        # recorder when it began; its continuation here adds none.
-        continuation = activity.begin < self.ctx.ustart
-        activity = activity.model_copy(
-            update={"begin": begin, "duration_seconds": end - begin}
-        )
-        ready = self._activity_ready(activity)
+        hold_begin = activity.hold_start_for_run(self.ctx.simulation_start.timestamp())
+        resumed = hold_begin < self.ctx.ustart
+        ready = max(self._activity_ready(activity), self.ctx.ustart)
         if ready >= self.ctx.uend:
             # Its reservation would have no length inside the horizon: the
             # block is left out, as one that cannot be reached is, and the
@@ -2309,8 +2312,10 @@ class PriorityScheduler:
             return
         # A reservation beginning within the horizon keeps its tail for the
         # next rolling plan, bounded by the physical run and ephemeris end.
-        end = self._activity_end(activity, ready)
-        if ready > activity.latest_start:
+        end = self._activity_end(activity, hold_begin if resumed else ready)
+        if end <= ready:
+            return
+        if ready > activity.latest_start and not resumed:
             self._log(
                 activity.begin,
                 f"Activity {activity.name} is due during another activity and "
@@ -2329,7 +2334,10 @@ class PriorityScheduler:
         )
         mode = ACSMode.DESAT if activity.desaturation else ACSMode.IDLE
         violation = self.ctx.first_hold_violation(
-            attitude, activity.begin, self.ctx.ceil_step(end), mode
+            attitude,
+            max(activity.begin, self.ctx.ustart),
+            self.ctx.ceil_step(end),
+            mode,
         )
         if violation is not None:
             self._log(
@@ -2340,14 +2348,17 @@ class PriorityScheduler:
             )
             return
         entry = activity.plan_entry(self.config, attitude)
-        if continuation:
+        if resumed:
+            entry.begin = ready
             entry.fixed_data_gb = 0.0
+        entry.activity_hold_begin = hold_begin if resumed else ready
+        entry.activity_hold_end = entry.activity_hold_begin + activity.duration_seconds
         # An activity that may slide, or that waits for another, is reserved
         # from its latest start to its latest end, so science before it may
         # run into its window and nothing is placed where it may still be;
         # its entry begins after what precedes it, at its start at the
         # earliest, when the plan is finished.
-        late = activity.slides or ready > activity.latest_start
+        late = (activity.slides or ready > activity.latest_start) and not resumed
         entry.end = end
         block = _Block(
             entry=entry,
