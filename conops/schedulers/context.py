@@ -7,27 +7,23 @@ ACS mode, which ground passes are available) using the same models
 therefore execute as planned, step for step.
 """
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 
 import numpy as np
 import rust_ephem
 
-from ..common import ACSMode, ObsType, dtutcfromtimestamp
+from ..common import ACSMode, ObsType
 from ..common.enums import SlewAlgorithm
-from ..common.numerics import MIN_SAMPLES
 from ..config import AttitudeControlSystem, MissionConfig
 from ..config.constraint import attitude_constraint_name_for_scopes
-from ..config.observation_timing import ObservationTiming, timing_for
 from ..ditl.ditl_log import DITLLog
 from ..simulation.acs import ACS
 from ..simulation.attitude import AttitudeExecutionError, AttitudeTrajectory
-from ..simulation.coverage import StationCoverage, cut_windows
 from ..simulation.passes import Pass, PassTimes
-from ..simulation.roll import optimum_body_roll, optimum_roll
-from ..simulation.safe_hold import power_positive_attitudes
+from ..simulation.roll import optimum_roll
 from ..simulation.slew import Slew
-from ..targets import PlanEntry, Pointing, ScheduledActivity
+from ..targets import PlanEntry
 
 Attitude = tuple[float, float, float]
 """Spacecraft body attitude: RA, Dec and roll in degrees."""
@@ -66,11 +62,9 @@ class SchedulingContext:
         simulation_start: datetime | None = None,
         simulation_end: datetime | None = None,
         passes: Sequence[Pass] | None = None,
-        coverage: StationCoverage | None = None,
     ) -> None:
         self._passes: list[Pass] | None = list(passes) if passes is not None else None
         """The run's predicted ground passes, when the caller has them."""
-        self._coverage = coverage
         ephem = config.constraint.ephem
         if ephem is None:
             raise ValueError("config.constraint.ephem must be set to plan")
@@ -81,12 +75,6 @@ class SchedulingContext:
         config.spacecraft_bus.radiators.set_ephem(ephem)
         self.config = config
         self.ephem: rust_ephem.Ephemeris = ephem
-        # Nothing can be planned, or checked, past the ephemeris's last
-        # sample: a horizon that reaches further ends there.
-        last_sample = ephem.timestamp[-1]
-        self.ephem_end = float(last_sample.timestamp())
-        if end.timestamp() > self.ephem_end:
-            end = last_sample
         self.begin = begin
         self.end = end
         self.ustart = begin.timestamp()
@@ -99,77 +87,20 @@ class SchedulingContext:
         self.step_size = int(step_size if step_size is not None else ephem.step_size)
         if self.step_size <= 0:
             raise ValueError("step_size must be positive")
-        bound = ObservationTiming.bound(config.observation_timings())
-        self.setup_seconds = float(bound.setup_seconds)
-        """The longest setup any observation can have: a bound where the
-        observation is not known. :meth:`setup_for` gives an observation's own."""
-        self.post_collection_seconds = float(bound.post_collection_seconds)
-        """The longest cleanup and handoff any observation can have."""
-        self._own_timings: dict[int, ObservationTiming] = {}
-        """Targets' own budgets, by obsid, in place of their categories'."""
+        timing = config.payload.observation_timing
+        self.setup_seconds = float(timing.setup_seconds)
+        self.post_collection_seconds = float(timing.post_collection_seconds)
         self._initial_acs: ACS | None = None
         self._initial_attitudes: list[Attitude] = []
-        self._activity_attitudes: dict[tuple[str, float, float], Attitude] = {}
-        # A quaternion slew's path does not depend on when it starts, so one
-        # slew per attitude pair is predicted and retimed for each start: its
-        # settle follows the Sun where a thermal settling table is configured.
-        # A constraint-avoiding path is decided at the slew's start rounded
-        # to the ephemeris step, so it is predicted once per pair and step.
-        self._slew_cache: dict[
-            tuple[Attitude, Attitude, ObsType, int, float, float | None], Slew
-        ] = {}
-        attitude_control = config.spacecraft_bus.attitude_control
-        self._time_independent_paths = (
-            attitude_control.slew_algorithm == SlewAlgorithm.QUATERNION
+        # Quaternion slews do not depend on when they start, so one slew per
+        # attitude pair is computed and re-timed for each start.
+        self._slew_cache: dict[tuple[Attitude, Attitude, ObsType, int], Slew] = {}
+        self._time_independent_slews = (
+            config.spacecraft_bus.attitude_control.slew_algorithm
+            == SlewAlgorithm.QUATERNION
         )
-        self.slew_rate_fractions: dict[int, float] = {}
-        """The fraction of the configured slew rates the slew into each
-        target is flown at, by obsid, where a planner found its momentum
-        does not fit the wheels at full rate; full rate where unset."""
-        self._avoiding_paths = (
-            attitude_control.slew_algorithm == SlewAlgorithm.CONSTRAINT_AVOIDING
-        )
-        self._window_cache: dict[
-            tuple[int, float, float, str | None, str | None], list[tuple[float, float]]
-        ] = {}
-        """Targets' visibility windows by obsid, pointing, step and
-        instrument: a visit's step pointings are asked for again at every
-        selection of a window."""
-        self._hold_cache: dict[
-            tuple[Attitude, float, float, ACSMode], float | None
-        ] = {}
-        """Where a held attitude first violates a mode over a span, by the
-        span: a gap is searched for many requests, each from the attitude
-        held before it."""
 
     # ── Step grid ─────────────────────────────────────────────────────────
-
-    def activity_attitudes(
-        self, activity: ScheduledActivity, begin: float, end: float
-    ) -> Iterator[Attitude]:
-        """Resolve explicit requests over the entire physical hold."""
-        fixed = activity.attitude.fixed_pointing
-        if fixed is not None:
-            yield fixed
-        elif activity.attitude.kind == "power_positive":
-            yield from power_positive_attitudes(
-                self.config,
-                activity.attitude,
-                begin,
-                end,
-                activity.hold_mode,
-                activity.instrument_modes,
-            )
-
-    def activity_attitude(
-        self, activity: ScheduledActivity, begin: float, end: float
-    ) -> Attitude:
-        key = (activity.model_dump_json(), begin, end)
-        if key not in self._activity_attitudes:
-            self._activity_attitudes[key] = next(
-                self.activity_attitudes(activity, begin, end)
-            )
-        return self._activity_attitudes[key]
 
     def ceil_step(self, utime: float) -> float:
         """Return the first grid step at or after ``utime``."""
@@ -182,11 +113,8 @@ class SchedulingContext:
         return self.origin + float(steps) * self.step_size
 
     def steps(self, begin: float, end: float) -> np.ndarray:
-        """Return the grid steps in ``[begin, end)``, within the ephemeris:
-        a slew or a hold that reaches past its last sample is checked up to
-        it, since the ephemeris has nothing beyond."""
+        """Return the grid steps in ``[begin, end)``."""
         first = self.ceil_step(begin)
-        end = min(end, self.ephem_end + 1e-6)
         if first >= end:
             return np.empty(0)
         return np.arange(first, end, self.step_size, dtype=float)
@@ -211,39 +139,7 @@ class SchedulingContext:
             self._initial_attitudes.append((float(ra), float(dec), float(roll)))
         return self._initial_attitudes[index]
 
-    def idle_hold_candidates(self, near: Attitude, utime: float) -> Iterator[Attitude]:
-        """Deterministic alternative attitudes for a whole safe hold.
-
-        Share dispatch's candidate directions and rolls. The caller checks
-        the entire hold and the actual ingress path, not just this epoch.
-        """
-        yield self.initial_attitude(utime)
-        acs = ACS(config=self.config, log=DITLLog())
-        acs.ephem = self.ephem
-        acs.ra, acs.dec, acs.roll = near
-        for ra, dec in acs._idle_safe_attitude_candidates(utime):
-            preferred = optimum_body_roll(
-                ra,
-                dec,
-                utime,
-                self.ephem,
-                self.config.solar_panel,
-                self.config.constraint,
-                science_attitude=False,
-            )
-            rolls = (
-                [preferred]
-                if self.config.constraint.ignore_roll
-                else acs._idle_safe_roll_candidates(preferred)
-            )
-            for roll in rolls:
-                yield (ra, dec, roll)
-
-    def science_rest(self, entry: PlanEntry) -> tuple[float, Attitude]:
-        """The actual resting handoff after a fixed or tracked observation."""
-        return science_rest(entry, self.config.spacecraft_bus.attitude_control)
-
-    def optimum_roll(self, target: PlanEntry, utime: float) -> float:
+    def instrument_roll(self, target: PlanEntry, utime: float) -> float:
         """Return the power-optimal instrument roll for a target at ``utime``."""
         return optimum_roll(
             target.ra,
@@ -253,32 +149,6 @@ class SchedulingContext:
             self.config.solar_panel,
             self.config.constraint,
             telescope=target.science_telescope(),
-        )
-
-    def instrument_roll(self, target: PlanEntry, utime: float) -> float:
-        """The instrument roll a target is observed at, at ``utime``: the
-        power-optimal roll, or the roll the target asks for (see
-        :meth:`Pointing.requested_roll`). An absolute roll beyond the ACS
-        limit from the optimum gives the optimum here; :meth:`roll_allowed`
-        says whether the target can be observed at that time at all."""
-        optimum = self.optimum_roll(target, utime)
-        if not isinstance(target, Pointing):
-            # A plan entry, or a test double, has no roll request.
-            return optimum
-        roll = target.requested_roll(
-            optimum,
-            self.config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg,
-        )
-        return optimum if roll is None else float(roll)
-
-    def roll_allowed(self, target: PlanEntry, utime: float) -> bool:
-        """Whether the roll ``target`` asks for is within the ACS limit of the
-        power-optimal roll at ``utime``; True without a request."""
-        if not isinstance(target, Pointing):
-            return True
-        limit = self.config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg
-        return (
-            target.requested_roll(self.optimum_roll(target, utime), limit) is not None
         )
 
     def slew(
@@ -291,51 +161,25 @@ class SchedulingContext:
         obsid: int = 0,
     ) -> Slew:
         """Return the slew ACS would fly between two attitudes from ``slewstart``."""
-        fraction = self.slew_rate_fractions.get(int(obsid), 1.0)
-        key: tuple[Attitude, Attitude, ObsType, int, float, float | None] | None = None
-        if self._time_independent_paths:
-            key = (start, end, obstype, obsid, fraction, None)
-        elif self._avoiding_paths:
-            # The path's constraint checks are made at the start rounded to
-            # the ephemeris step (see Slew._predict_slew_constraint_avoiding).
-            key = (
-                start,
-                end,
-                obstype,
-                obsid,
-                fraction,
-                self.ephem.timestamp[
-                    self.ephem.index(dtutcfromtimestamp(slewstart))
-                ].timestamp(),
-            )
-        cached = self._slew_cache.get(key) if key is not None else None
+        key = (start, end, obstype, obsid)
+        cached = self._slew_cache.get(key) if self._time_independent_slews else None
         if cached is not None:
-            retimed = cached.model_copy()
-            retimed.retime(slewstart)
-            return retimed
-        # Built without validation: validating a slew validates the mission
-        # configuration it holds again, which costs more than the slew, and
-        # a scheduler builds tens of thousands. The fields a validated slew
-        # derives from its configuration are given directly.
-        slew = Slew.model_construct(
-            config=self.config,
-            ephem=self.ephem,
-            constraint=self.config.constraint,
-            acs_config=self.config.spacecraft_bus.attitude_control,
-            slewrequest=slewstart,
-            slewstart=slewstart,
-            startra=start[0],
-            startdec=start[1],
-            startroll=start[2],
-            endra=end[0],
-            enddec=end[1],
-            endroll=end[2],
-            obstype=obstype,
-            obsid=obsid,
-            rate_fraction=fraction,
-        )
+            return cached.model_copy(
+                update={
+                    "slewrequest": slewstart,
+                    "slewstart": slewstart,
+                    "slewend": slewstart + cached.slewtime,
+                }
+            )
+        slew = Slew(config=self.config)
+        slew.slewrequest = slewstart
+        slew.slewstart = slewstart
+        slew.startra, slew.startdec, slew.startroll = start
+        slew.endra, slew.enddec, slew.endroll = end
+        slew.obstype = obstype
+        slew.obsid = obsid
         slew.calc_slewtime()
-        if key is not None:
+        if self._time_independent_slews:
             self._slew_cache[key] = slew
             return slew.model_copy()
         return slew
@@ -379,37 +223,27 @@ class SchedulingContext:
         self, attitude: Attitude, begin: float, end: float, mode: ACSMode
     ) -> float | None:
         """Return the first step in ``[begin, end)`` where a held attitude violates ``mode``."""
-        key = (attitude, begin, end, mode)
-        if key in self._hold_cache:
-            return self._hold_cache[key]
-        violation = None
-        times = [float(utime) for utime in self.steps(begin, end)]
-        with self.config.constraint.held_over(times):
-            for utime in times:
-                if self.attitude_violation(attitude, utime, mode) is not None:
-                    violation = utime
-                    break
-        self._hold_cache[key] = violation
-        return violation
+        for utime in self.steps(begin, end):
+            if self.attitude_violation(attitude, float(utime), mode) is not None:
+                return float(utime)
+        return None
 
     def first_science_violation(
         self, entry: PlanEntry, attitude: Attitude, begin: float, end: float
     ) -> float | None:
         """Return the first step in ``[begin, end)`` where observing ``entry`` is not allowed."""
-        times = [float(utime) for utime in self.steps(begin, end)]
-        with self.config.constraint.held_over(times):
-            for utime in times:
-                if self.science_violation(entry, attitude, utime) is not None:
-                    return utime
+        for utime in self.steps(begin, end):
+            if self.science_violation(entry, attitude, float(utime)) is not None:
+                return float(utime)
         return None
 
     def first_slew_violation(self, slew: Slew, mode: ACSMode) -> float | None:
         """Return the first step during a slew where its path violates ``mode``."""
-        times = [float(utime) for utime in self.steps(slew.slewstart, slew.slewend)]
-        for utime, sample in zip(times, slew.attitudes(times), strict=True):
+        for utime in self.steps(slew.slewstart, slew.slewend):
+            sample = slew.attitude(float(utime))
             attitude = (float(sample[0]), float(sample[1]), float(sample[2]))
-            if self.attitude_violation(attitude, utime, mode) is not None:
-                return utime
+            if self.attitude_violation(attitude, float(utime), mode) is not None:
+                return float(utime)
         return None
 
     def visibility_windows(self, target: PlanEntry) -> list[tuple[float, float]]:
@@ -419,110 +253,25 @@ class SchedulingContext:
         them before checking a specific roll. A mounted instrument's windows
         follow its science line of sight, not the body attitude.
         """
-        key = (
-            int(target.obsid),
-            float(target.ra),
-            float(target.dec),
-            getattr(target, "step", None),
-            target.instrument_name,
-        )
-        cached = self._window_cache.get(key)
-        if cached is not None:
-            return list(cached)
         constraint = (
             target.roll_independent_visibility_constraint()
             if target.constraint is not None
             else self.config.constraint.roll_independent_constraint
         )
         if constraint is None:
-            windows = [(self.ustart, self.uend)]
-        else:
-            result = constraint.evaluate(
-                ephemeris=self.ephem,
-                target_ra=target.ra,
-                target_dec=target.dec,
-                target_roll=None,
-            )
-            windows = [
-                (window.start_time.timestamp(), window.end_time.timestamp())
-                for window in result.visibility
-            ]
-        windows = self.without_repoints(target, windows)
-        self._window_cache[key] = list(windows)
-        return windows
-
-    def without_repoints(
-        self, target: PlanEntry, windows: list[tuple[float, float]]
-    ) -> list[tuple[float, float]]:
-        """``windows`` less the antenna repoints, for a target whose category
-        forbids a repoint during an observation; unchanged otherwise."""
-        coverage = self.coverage
-        if coverage is None or not coverage.repoints:
-            return windows
-        if self.config.observation_categories.antenna_repoints(int(target.obsid)) != (
-            "forbidden"
-        ):
-            return windows
-        return cut_windows(windows, coverage.repoint_cuts(self.ustart, self.uend))
+            return [(self.ustart, self.uend)]
+        result = constraint.evaluate(
+            ephemeris=self.ephem,
+            target_ra=target.ra,
+            target_dec=target.dec,
+            target_roll=None,
+        )
+        return [
+            (window.start_time.timestamp(), window.end_time.timestamp())
+            for window in result.visibility
+        ]
 
     # ── Ground passes ─────────────────────────────────────────────────────
-
-    @property
-    def passes(self) -> list[Pass] | None:
-        """Supplied bookings; None predicts them, while [] books no passes."""
-        return self._passes
-
-    @passes.setter
-    def passes(self, passes: Sequence[Pass] | None) -> None:
-        self._passes = list(passes) if passes is not None else None
-        self._coverage = None
-
-    @property
-    def coverage(self) -> StationCoverage | None:
-        """Link coverage for passes without spacecraft tracking, or None
-        when passes require tracking activities.
-
-        Built from the configuration unless the caller gave it, which takes
-        a while for a long run (see
-        :class:`~conops.simulation.coverage.StationCoverage`).
-        """
-        if self._coverage is None:
-            self._coverage = StationCoverage.for_config(
-                self.config,
-                scheduled_passes=(
-                    [(p.begin, p.end, p.station) for p in self._passes]
-                    if self._passes is not None
-                    else None
-                ),
-            )
-        return self._coverage
-
-    @coverage.setter
-    def coverage(self, coverage: StationCoverage | None) -> None:
-        self._coverage = coverage
-
-    # ── Observation timing ────────────────────────────────────────────────
-
-    def register_timing(self, obsid: int, timing: ObservationTiming) -> None:
-        """Give observation ``obsid`` its own budgets, in place of its
-        category's, and widen the bounds to cover them."""
-        self._own_timings[int(obsid)] = timing
-        self.setup_seconds = max(self.setup_seconds, float(timing.setup_seconds))
-        self.post_collection_seconds = max(
-            self.post_collection_seconds, float(timing.post_collection_seconds)
-        )
-
-    def timing_for(self, obsid: int) -> ObservationTiming:
-        """The setup, cleanup and handoff budgets of observation ``obsid``:
-        its own where registered, else its category's."""
-        own = self._own_timings.get(int(obsid))
-        return own if own is not None else timing_for(self.config, obsid)
-
-    def setup_for(self, obsid: int) -> float:
-        return float(self.timing_for(obsid).setup_seconds)
-
-    def post_collection_for(self, obsid: int) -> float:
-        return float(self.timing_for(obsid).post_collection_seconds)
 
     def predict_passes(self) -> Sequence[Pass]:
         """Predict the ground passes in the horizon, as DITL will when executing.
@@ -538,13 +287,6 @@ class SchedulingContext:
                 gspass
                 for gspass in self._passes
                 if self.ustart <= gspass.begin and gspass.end <= self.uend
-            ]
-        coverage = self.coverage
-        if coverage is not None:
-            return [
-                p
-                for p in coverage.pass_times.passes
-                if self.ustart <= p.begin and p.end <= self.uend
             ]
         passtimes = PassTimes(config=self.config)
         # PassTimes.get counts days from midnight UTC of the start date.
@@ -569,30 +311,6 @@ class SchedulingContext:
         return tracking_rest(
             gspass, profile, acquire, self.config.spacecraft_bus.attitude_control
         )
-
-
-def science_rest(
-    entry: PlanEntry, limits: AttitudeControlSystem
-) -> tuple[float, Attitude]:
-    """Rest after tracking, including the terminal braking used by ACS.
-
-    Only the final tracking interval sets its terminal rate, so rebuilding
-    that interval gives the same stop without replaying the whole visit.
-    """
-    end = float(entry.end)
-    arrival = float(entry.begin) + entry.slewtime
-    step = ACS.TRACK_SAMPLE_SECONDS
-    if not entry.moves or end <= arrival + step:
-        return end, entry.target_body_attitude()
-    previous = arrival + (float(np.ceil((end - arrival) / step)) - 1) * step
-    trajectory = AttitudeTrajectory.tracking(
-        [
-            (previous, entry.target_body_attitude(at=previous)),
-            (end, entry.target_body_attitude(at=end)),
-        ],
-        limits,
-    )
-    return float(trajectory.end), trajectory.state(trajectory.end).attitude
 
 
 def tracking_samples(
@@ -633,7 +351,7 @@ def tracking_rest(
     samples = tracking_samples(gspass, profile, acquire)
     if not samples:
         return None
-    if len(samples) < MIN_SAMPLES:
+    if len(samples) < 2:
         # A single sample is held, not tracked, so there is nothing to brake.
         return float(gspass.end), samples[-1][1]
     try:

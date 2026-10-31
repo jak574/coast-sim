@@ -11,7 +11,6 @@ Core Modules
 
    conops.config
    conops.config.acs
-   conops.config.activity_attitude
    conops.config.communications
    conops.config.data_generator
    conops.config.fault_management
@@ -36,7 +35,6 @@ Core Modules
    conops.simulation
    conops.simulation.acs
    conops.simulation.acs_command
-   conops.simulation.coverage
    conops.simulation.momentum
    conops.simulation.roll
 

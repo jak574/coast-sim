@@ -35,11 +35,6 @@ class IdleSafetyPlanner:
             raise ValueError(
                 "Predictive idle safety requires finite positive slew limits"
             )
-        # The reserve allows for the table's longest settle; a test double's
-        # configuration has only settle_time.
-        settle = acs.max_settle_seconds
-        if not isinstance(settle, (int, float)):
-            settle = acs.settle_time
         # The smallest semiaxis bounds every direction of an ellipsoidal limit,
         # even when the acceleration and rate minima occur on different axes.
         slowest = AttitudeControlSystem(
@@ -47,7 +42,7 @@ class IdleSafetyPlanner:
             slew_acceleration=min(
                 acs.slew_acceleration_body or (acs.slew_acceleration,)
             ),
-            settle_time=settle,
+            settle_time=acs.settle_time,
         )
         self.reserve = float(np.ceil(slowest.slew_time(180.0))) + 2 * self.step
 

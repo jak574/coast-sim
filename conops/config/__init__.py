@@ -1,5 +1,4 @@
-from .acs import AttitudeControlSystem, SlewRequirement, ThermalSettlingStep
-from .activity_attitude import ActivityAttitude
+from .acs import AttitudeControlSystem
 from .battery import Battery
 from .communications import (
     AntennaPointing,
@@ -19,23 +18,19 @@ from .fault_management import (
     FaultState,
     FaultThreshold,
 )
-from .frame import SpacecraftFrame
 from .geometry import PanelGeometry, compute_shadow_fraction
 from .groundstation import GroundStation, GroundStationRegistry
 from .instrument import (
-    ConcurrencyRules,
     Instrument,
-    InstrumentMode,
     InstrumentMounting,
     Payload,
     Telescope,
     TelescopeConfig,
     TelescopeType,
 )
-from .momentum import AtmosphereConfig, StoredMomentumConfig, ThrusterDumpConfig
+from .momentum import StoredMomentumConfig
 from .observation_categories import ObservationCategories, ObservationCategory
-from .observation_groups import ObservationGroup, ObservationGroups
-from .observation_timing import BudgetStep, ObservationTiming
+from .observation_timing import ObservationTiming
 from .power import PowerDraw
 from .radiator import (
     DefaultRadiatorConfiguration,
@@ -67,24 +62,13 @@ from .star_tracker import (
     StarTrackerOrientation,
     create_star_tracker_vector,
 )
-from .surfaces import (
-    Surface,
-    SurfaceModel,
-    box_surfaces,
-    guess_surfaces,
-    panel_surfaces,
-    telescope_surfaces,
-)
 from .targets import TargetConfig
 from .thermal import Heater
 from .visualization import VisualizationConfig
 
 __all__ = [
-    "ActivityAttitude",
     "AntennaPointing",
     "AttitudeControlSystem",
-    "SlewRequirement",
-    "ThermalSettlingStep",
     "AttitudeConstraintScope",
     "BandCapability",
     "Battery",
@@ -113,17 +97,12 @@ __all__ = [
     "GroundStationRegistry",
     "Heater",
     "Instrument",
-    "ConcurrencyRules",
-    "InstrumentMode",
     "InstrumentMounting",
     "Telescope",
     "TelescopeConfig",
     "TelescopeType",
     "ObservationCategories",
     "ObservationCategory",
-    "ObservationGroup",
-    "ObservationGroups",
-    "BudgetStep",
     "ObservationTiming",
     "OnboardRecorder",
     "Payload",
@@ -140,16 +119,7 @@ __all__ = [
     "SolarArrayDriveState",
     "SingleAxisSolarArrayDrive",
     "SpacecraftBus",
-    "SpacecraftFrame",
-    "AtmosphereConfig",
     "StoredMomentumConfig",
-    "Surface",
-    "ThrusterDumpConfig",
-    "SurfaceModel",
-    "box_surfaces",
-    "guess_surfaces",
-    "panel_surfaces",
-    "telescope_surfaces",
     "StarTracker",
     "DefaultStarTrackerConfiguration",
     "StarTrackerConfiguration",

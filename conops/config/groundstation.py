@@ -52,14 +52,10 @@ class GroundStation(ConfigModel):
     def supported_bands(self) -> list[str]:
         return [bc.band for bc in self.bands]
 
-    def get_downlink_rate(
-        self, band: str, range_km: float | None = None
-    ) -> float | None:
-        """The band's downlink rate in Mbps, at ``range_km`` where given (see
-        :meth:`BandCapability.downlink_rate_at`), or None without the band."""
+    def get_downlink_rate(self, band: str) -> float | None:
         for bc in self.bands:
             if bc.band == band:
-                return bc.downlink_rate_at(range_km)
+                return bc.downlink_rate_mbps
         return None
 
     def get_overall_max_downlink(self) -> float | None:
@@ -69,15 +65,13 @@ class GroundStation(ConfigModel):
         return None
 
     def effective_downlink_rate_mbps(
-        self,
-        communications: CommunicationsSystem | None,
-        range_km: float | None = None,
+        self, communications: CommunicationsSystem | None
     ) -> float | None:
         """The downlink rate a spacecraft gets from this station, in Mbps.
 
         See :func:`effective_downlink_rate_mbps`.
         """
-        return effective_downlink_rate_mbps(self, communications, range_km)
+        return effective_downlink_rate_mbps(self, communications)
 
     @property
     def supports_downlink(self) -> bool:
@@ -177,9 +171,7 @@ class GroundStationRegistry(ConfigModel):
 
 
 def effective_downlink_rate_mbps(
-    station: GroundStation,
-    communications: CommunicationsSystem | None,
-    range_km: float | None = None,
+    station: GroundStation, communications: CommunicationsSystem | None
 ) -> float | None:
     """The downlink rate a spacecraft gets from a station, in Mbps.
 
@@ -190,36 +182,13 @@ def effective_downlink_rate_mbps(
     Args:
         station: The ground station.
         communications: The spacecraft's communications system, if any.
-        range_km: The spacecraft-to-station range, where known: each band's
-            rate is then read from its ``downlink_rate_vs_range_km`` table,
-            on either side, where it has one.
     """
     if communications is None:
-        if range_km is None:
-            return station.get_overall_max_downlink()
-        rates = [
-            station.get_downlink_rate(band, range_km) or 0.0
-            for band in station.supported_bands()
-        ]
-        return max(rates) if rates else None
+        return station.get_overall_max_downlink()
     best = 0.0
     for band in station.supported_bands():
-        if range_km is None:
-            gs_rate = station.get_downlink_rate(band) or 0.0
-            sc_rate = communications.get_downlink_rate(band) or 0.0
-        else:
-            gs_rate = station.get_downlink_rate(band, range_km) or 0.0
-            sc_rate = communications.get_downlink_rate(band, range_km) or 0.0
+        gs_rate = station.get_downlink_rate(band) or 0.0
+        sc_rate = communications.get_downlink_rate(band) or 0.0
         if gs_rate > 0.0 and sc_rate > 0.0:
             best = max(best, min(gs_rate, sc_rate))
     return best if best > 0.0 else None
-
-
-def rate_varies_with_range(
-    station: GroundStation, communications: CommunicationsSystem | None
-) -> bool:
-    """Whether any band on either side has a rate-against-range table."""
-    bands = list(station.bands)
-    if communications is not None:
-        bands.extend(communications.band_capabilities)
-    return any(bc.downlink_rate_vs_range_km is not None for bc in bands)

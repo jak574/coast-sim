@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import Field, model_validator
 
 from ._base import ConfigModel
-from .observation_timing import ObservationTiming
 
 
 class ObservationCategory(ConfigModel):
@@ -31,8 +28,6 @@ class ObservationCategory(ConfigModel):
     time_share : float or None
         Fraction of science time allocated to the program, used by the
         completion-deficit merit term.
-    time_budget_seconds : float or None
-        The most science the category's targets may collect over a run.
     """
 
     name: str = Field(description="Category name")
@@ -56,46 +51,10 @@ class ObservationCategory(ConfigModel):
         le=1,
         description="Fraction of science time allocated to the program",
     )
-    time_budget_seconds: float | None = Field(
-        default=None,
-        gt=0,
-        description=(
-            "The most science the category's targets may collect over a run, "
-            "in seconds, counting what they had collected before it: dispatch, "
-            "the planners and the allocator give the category no more. None "
-            "for no cap"
-        ),
-    )
     interruptible: bool = Field(
         default=True,
         description=(
             "Whether a Target of Opportunity may cut short the category's observations"
-        ),
-    )
-    observation_timing: ObservationTiming | None = Field(
-        default=None,
-        description=(
-            "Setup, cleanup and handoff budgets for the category's observations, "
-            "where they differ from the payload's; None takes the payload's"
-        ),
-    )
-    skip_thermal_settling: bool = Field(
-        default=False,
-        description=(
-            "Whether a slew into one of the category's observations settles for "
-            "the ACS's settle_time rather than the thermal settling table's time "
-            "for its Sun-vector change: for a category that accepts degraded "
-            "data, such as a Target of Opportunity"
-        ),
-    )
-    antenna_repoints: Literal["allowed", "reported", "forbidden"] = Field(
-        default="allowed",
-        description=(
-            "What an antenna repoint during one of the category's observations "
-            "means: nothing ('allowed'); it is counted and logged ('reported'); "
-            "or the observation must not contain one ('forbidden'), so the "
-            "schedulers and dispatch place the category's snapshots between "
-            "repoints"
         ),
     )
 
@@ -180,18 +139,6 @@ class ObservationCategories(ConfigModel):
             obsid_max=10000000,
             color=self.default_color,
         )
-
-    def skips_thermal_settling(self, obsid: int) -> bool:
-        """Whether a slew into an observation of ``obsid`` settles for the
-        ACS's settle_time rather than the thermal settling table's time (see
-        :attr:`ObservationCategory.skip_thermal_settling`)."""
-        return self.get_category(obsid).skip_thermal_settling
-
-    def antenna_repoints(self, obsid: int) -> str:
-        """What an antenna repoint during an observation of ``obsid`` means:
-        "allowed", "reported" or "forbidden" (see
-        :attr:`ObservationCategory.antenna_repoints`)."""
-        return self.get_category(obsid).antenna_repoints
 
     def get_all_category_names(self) -> list[str]:
         """Get list of all defined category names including default."""

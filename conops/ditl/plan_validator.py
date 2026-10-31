@@ -8,8 +8,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from ..common import ACSMode, ObsType, angular_separation, unixtime2date
-from ..common.numerics import TIME_TOLERANCE_S
-from ..common.vector import attitude_to_quat, quaternion_attitude_delta
+from ..common.vector import attitude_to_quat
 from ..config import MissionConfig
 from ..simulation.passes import Pass
 from ..targets import Plan, PlanEntry
@@ -149,29 +148,9 @@ class PlanExecutionValidator:
                 mismatches.extend(self._gsp_entry_mismatches(entry, tolerance_deg))
             elif obstype == ObsType.CHARGE and self.check_charges:
                 mismatches.extend(self._charge_entry_mismatches(entry, tolerance_deg))
-            elif obstype == ObsType.ACTIVITY:
-                mismatches.extend(self._activity_entry_mismatches(entry))
         mismatches.extend(self.attitude_constraint_mismatches())
         mismatches.extend(self.unplanned_execution_mismatches())
         return mismatches
-
-    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
-        """The plan's slews that take longer than their requirement class
-        allows, where the ACS configures slew requirement classes; empty
-        without them. Not part of :meth:`validate`: a report on the ACS
-        model against the requirements, not a plan-execution fault."""
-        from ..simulation.slew_requirements import check_plan
-
-        return [
-            PlanExecutionMismatch(
-                utime=violation.utime,
-                message=f"slew_requirement: {violation}",
-                obsid=violation.obsid,
-            )
-            for violation in check_plan(
-                self.plan, self.config.spacecraft_bus.attitude_control
-            )
-        ]
 
     def attitude_constraint_mismatches(self) -> list[PlanExecutionMismatch]:
         """Report samples whose attitude violated a constraint scoped to their mode.
@@ -472,15 +451,11 @@ class PlanExecutionValidator:
                     self._obsid_mismatch(entry, utime, self.obsid[i], "science")
                 )
 
-            if getattr(entry, "moves", False) is True:
-                # A moving target's attitude follows its track.
-                expected_attitude = entry.target_body_attitude(at=utime)
-            else:
-                expected_attitude = entry.spacecraft_attitude or (
-                    entry.ra,
-                    entry.dec,
-                    entry.roll,
-                )
+            expected_attitude = entry.spacecraft_attitude or (
+                entry.ra,
+                entry.dec,
+                entry.roll,
+            )
             error_deg = angular_separation(
                 float(self.ra[i]),
                 float(self.dec[i]),
@@ -536,56 +511,6 @@ class PlanExecutionValidator:
             ):
                 return True
         return False
-
-    def _activity_entry_mismatches(
-        self, entry: PlanEntry
-    ) -> list[PlanExecutionMismatch]:
-        """Check that no science, contact or charge ran during an activity.
-
-        The full stationary interval uses IDLE (SAA allowed), DESAT for dumps,
-        or SAFE for recoverable safe holds. SAFE holds also retain their planned
-        quaternion. Unexpected safe mode violates other stationary holds; legacy
-        and flexible dispatch holds allow idle-safety recovery.
-        """
-        start = float(entry.begin) + max(0.0, float(entry.slewtime))
-        if entry.activity_hold_begin is not None:
-            start = max(start, entry.activity_hold_begin)
-        end = float(entry.end)
-        mismatches: list[PlanExecutionMismatch] = []
-        if end <= start:
-            return mismatches
-        # SAFE engineering holds and DESAT dumps carry their own hold modes.
-        expected = entry.activity_mode
-        wrong = {ACSMode.SCIENCE, ACSMode.PASS, ACSMode.CHARGING}
-        wrong.update({ACSMode.IDLE, ACSMode.DESAT} - {expected})
-        if entry.safe_hold:
-            wrong.add(ACSMode.SAA)
-        if not entry.safe_hold and entry.activity_requires_stationary:
-            wrong.add(ACSMode.SAFE)
-        if entry.activity_requires_stationary:
-            wrong.add(ACSMode.SLEWING)
-        for i in self._window_indices(start, end):
-            mode = self._mode_at_index(i)
-            if mode in wrong:
-                mismatches.append(
-                    self._mode_mismatch(
-                        entry, self.utime[i], mode, expected, "activity"
-                    )
-                )
-            if entry.safe_hold:
-                error, _ = quaternion_attitude_delta(
-                    float(self.ra[i]),
-                    float(self.dec[i]),
-                    float(self.roll[i]),
-                    float(entry.ra),
-                    float(entry.dec),
-                    float(entry.roll),
-                )
-                if error > self._tolerance_deg():
-                    mismatches.append(
-                        self._pointing_mismatch(entry, self.utime[i], error, "activity")
-                    )
-        return mismatches
 
     def _charge_entry_mismatches(
         self, entry: PlanEntry, tolerance_deg: float
@@ -723,8 +648,7 @@ def matching_pass_for_entry(entry: PlanEntry, passes: Sequence[Pass]) -> Pass | 
             <= float(gspass.end) + 1e-6
         )
         end_matches = (
-            contact_end is None
-            or abs(float(gspass.end) - float(contact_end)) <= TIME_TOLERANCE_S
+            contact_end is None or abs(float(gspass.end) - float(contact_end)) <= 1e-6
         )
         if begin_matches and end_matches:
             return gspass

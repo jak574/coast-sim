@@ -11,7 +11,6 @@ from conops import (
     Battery,
     DITLLog,
     EmergencyCharging,
-    Plan,
     Pointing,
     QueueDITL,
     SolarPanel,
@@ -1204,7 +1203,6 @@ class TestQueueDITLEmergencyCharging:
             self.ephem = ephem or Mock()
             self.calculate_field_of_regard = calculate_field_of_regard
             self.acs = Mock()
-            self.plan = Plan()
             self._init_subsystems()
 
         with patch(
@@ -1229,7 +1227,6 @@ class TestQueueDITLEmergencyCharging:
             self.ephem = ephem or Mock()
             self.calculate_field_of_regard = calculate_field_of_regard
             self.acs = Mock()
-            self.plan = Plan()
             self._init_subsystems()
 
         with patch(
@@ -1254,7 +1251,6 @@ class TestQueueDITLEmergencyCharging:
             self.ephem = ephem or Mock()
             self.calculate_field_of_regard = calculate_field_of_regard
             self.acs = Mock()
-            self.plan = Plan()
             self._init_subsystems()
 
         with patch(

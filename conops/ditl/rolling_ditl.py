@@ -7,31 +7,25 @@ from enum import Enum
 
 import numpy as np
 import rust_ephem
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from ..common import ACSMode, ObsType, unixtime_from
-from ..config import MissionConfig, ObservationTiming, ScienceData
+from ..common import ACSMode, ObsType
+from ..config import MissionConfig, ScienceData
 from ..config.data_storage import DataStorage, RecorderView
 from ..config.solar_panel import SolarArrayDriveState
 from ..schedulers.allocator import Allocation, LongRangeAllocator
 from ..schedulers.battery import Addition, BatteryLedger
-from ..schedulers.context import (
-    Attitude,
-    SchedulingContext,
-    science_rest,
-    tracking_rest,
-)
-from ..schedulers.local_search_scheduler import LocalSearchScheduler
+from ..schedulers.context import Attitude, SchedulingContext, tracking_rest
 from ..schedulers.priority_scheduler import PriorityScheduler, StartState
-from ..schedulers.recorder import RecorderAmount, RecorderLedger, combine_amounts
+from ..schedulers.recorder import RecorderLedger
 from ..simulation.passes import Pass
 from ..simulation.slew import Slew
-from ..targets import Plan, PlanEntry, Pointing, ScheduledActivity, assign_obsids
+from ..targets import Plan, PlanEntry, Pointing
 from ..targets.merit import MeritModel
-from ..targets.too import PLAIN_SNAPSHOT_MIN_S, UNBOUNDED_SNAPSHOT_S, TOORequest
 from .ditl import DITL
 from .ditl_log import DITLLog
 from .plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
+from .queue_ditl import TOORequest
 
 
 class ReplanReason(str, Enum):
@@ -57,14 +51,6 @@ class ReplanRecord(BaseModel):
         planning_seconds: Wall-clock time spent building the plan.
         trigger_obsid: The urgent ToO that triggered the replan or interrupt.
         interrupted_obsid: The observation cut short for it, if any.
-        seed_entries: How many entries of the run's start plan seeded the
-            replan's scheduler.
-        solver_statuses: For a CP-SAT plan, the solver's status for each
-            chunk; empty for another scheduler.
-        solver_chunks_used: For each chunk, whether the solver's snapshots
-            were kept over the priority-first plan's.
-        solver_limits: What ended each chunk's search: optimal, the
-            deterministic budget, the wall clock or the solver itself.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -79,45 +65,6 @@ class ReplanRecord(BaseModel):
     planning_seconds: float
     trigger_obsid: int | None = None
     interrupted_obsid: int | None = None
-    seed_entries: int = 0
-    """How many entries of the run's start plan seeded this replan's scheduler."""
-    solver_statuses: list[str] = Field(default_factory=list)
-    """CP-SAT's status for each chunk of the plan; empty for another scheduler."""
-    solver_chunks_used: list[bool] = Field(default_factory=list)
-    """For each chunk, whether the solver's snapshots were kept."""
-    solver_limits: list[str] = Field(default_factory=list)
-    """What ended each chunk's search (see
-    :func:`~conops.schedulers.cpsat_scheduler.search_ending`)."""
-
-
-class _PlanSummary(BaseModel):
-    """What one call of the planner reported: the seed it was given and,
-    for CP-SAT, what the solver did; kept with the plan it belongs to, since
-    a replan may build more than one plan and keep an earlier one."""
-
-    seed_entries: int = 0
-    solver_statuses: list[str] = Field(default_factory=list)
-    solver_chunks_used: list[bool] = Field(default_factory=list)
-    solver_limits: list[str] = Field(default_factory=list)
-
-    @classmethod
-    def of(cls, scheduler: object, seed_entries: int) -> "_PlanSummary":
-        """The summary of a scheduler that has built its plan; a scheduler
-        without CP-SAT reports nothing of the solver."""
-
-        def strings(name: str) -> list[str]:
-            value = getattr(scheduler, name, None)
-            return [str(v) for v in value] if isinstance(value, list) else []
-
-        used = getattr(scheduler, "solver_chunks_used", None)
-        return cls(
-            seed_entries=seed_entries,
-            solver_statuses=strings("solver_statuses"),
-            solver_chunks_used=(
-                [bool(v) for v in used] if isinstance(used, list) else []
-            ),
-            solver_limits=strings("solver_limits"),
-        )
 
 
 class RollingHorizonDITL(DITL):
@@ -139,14 +86,10 @@ class RollingHorizonDITL(DITL):
     rapid replan at once, or an interrupt in a scheduled replan due then.
     The observation running at the commit cutoff is cut there if
     ``allow_interrupts`` is set, the ToO allows it (its ``interrupt`` flag),
-    the observation's category is ``interruptible``, the ToO's value,
-    evaluated now, beats the value frozen onto that observation, the ToO
-    would not begin collecting by its deadline with the observation left
-    whole, the new plan can collect the ToO, and the value frozen onto the
-    ToO's first snapshot in that plan beats the observation's; a ToO the plan
-    collects by its deadline after the observation waits for it, as in
-    dispatch. When several ToOs need a rapid replan at once, they are tried
-    highest-ranked first, and the first that qualifies and can be placed
+    the observation's category is ``interruptible``, and the value frozen
+    onto the ToO's first snapshot in the replacement plan beats the value
+    frozen onto that observation. When several ToOs need a rapid replan at once, they are
+    tried highest-ranked first, and the first that qualifies and can be placed
     interrupts. A ToO that may not interrupt does not take the cut
     observation's place either: it is planned in after the interrupting ToO.
     A rejected attempt leaves no events in the log. Science
@@ -175,7 +118,7 @@ class RollingHorizonDITL(DITL):
             immediate replan.
         allow_interrupts: Whether a rapid replan may cut short the
             observation in progress.
-        include_passes: Whether plans reserve spacecraft tracking activities for passes.
+        include_passes: Whether plans reserve ground-station passes.
         scheduler: Scheduler class that builds each plan:
             :class:`~conops.schedulers.PriorityScheduler` or a subclass such as
             :class:`~conops.schedulers.LocalSearchScheduler` or
@@ -183,10 +126,6 @@ class RollingHorizonDITL(DITL):
         scheduler_options: Extra keyword arguments for the scheduler, such as
             ``{"time_limit": 5.0}`` for a local-search scheduler or
             ``{"solver_time_limit": 10.0}`` for the CP-SAT scheduler.
-        start_plan: A plan each replan starts from, such as the plan a
-            dispatch run executed: the local-search and CP-SAT schedulers
-            improve on the better of it and their own first plan. Each replan
-            is given the entries of it inside the horizon it plans.
         allocator: Long-range allocator over the whole run. If given, each
             replan allocates the remaining exposure again from when the new
             plan starts, and the scheduler plans each request's allocated
@@ -217,12 +156,10 @@ class RollingHorizonDITL(DITL):
         include_passes: bool = True,
         scheduler: type[PriorityScheduler] = PriorityScheduler,
         scheduler_options: Mapping[str, object] | None = None,
-        start_plan: Plan | None = None,
         allocator: LongRangeAllocator | None = None,
         allocation: Allocation | None = None,
         allocation_bonus: float = 0.5,
         calculate_field_of_regard: bool = False,
-        activities: Sequence[ScheduledActivity] = (),
     ) -> None:
         if horizon <= timedelta(0) or replan_interval <= timedelta(0):
             raise ValueError("horizon and replan_interval must be positive")
@@ -239,8 +176,6 @@ class RollingHorizonDITL(DITL):
             calculate_field_of_regard=calculate_field_of_regard,
         )
         self.targets = list(targets)
-        self.activities = assign_obsids(activities)
-        """Fixed-time activities every plan reserves."""
         self.horizon = horizon
         self.replan_interval = replan_interval
         self.commit_lead_time = commit_lead_time
@@ -251,13 +186,6 @@ class RollingHorizonDITL(DITL):
         self.scheduler_options = dict(scheduler_options or {})
         self._run_passes: list[Pass] | None = None
         """The interval's ground passes, predicted once for every plan in it."""
-        self.start_plan = start_plan
-        """A plan each replan starts from, such as a dispatch run's: the
-        entries of it inside the replan's horizon seed the scheduler, for a
-        scheduler that takes a start plan."""
-        self._last_seed_entries = 0
-        self._last_plan = _PlanSummary()
-        """What the last plan built reported (see :class:`_PlanSummary`)."""
         self.allocator = allocator
         self.allocation_bonus = allocation_bonus
         self.allocation: Allocation | None = allocation
@@ -276,17 +204,16 @@ class RollingHorizonDITL(DITL):
 
     def submit_too(
         self,
-        obsid: int | TOORequest,
-        ra: float = 0.0,
-        dec: float = 0.0,
-        merit: float = 0.0,
-        exptime: int = 0,
-        name: str = "",
+        obsid: int,
+        ra: float,
+        dec: float,
+        merit: float,
+        exptime: int,
+        name: str,
         submit_time: float | datetime | None = None,
         deadline: float | datetime | None = None,
         science_data: Mapping[str, ScienceData] | None = None,
         interrupt: bool = True,
-        instrument_modes: Mapping[str, str] | None = None,
     ) -> TOORequest:
         """Submit a Target of Opportunity that joins the target pool when active.
 
@@ -306,33 +233,18 @@ class RollingHorizonDITL(DITL):
             interrupt: Whether it may cut short the observation in progress.
                 If False, a rapid replan for it starts it once that
                 observation ends.
-            instrument_modes: The instruments observing the ToO uses and the
-                mode each is in, by name; None: every instrument with modes,
-                in SCIENCE.
         """
-        if isinstance(obsid, TOORequest):
-            too = obsid
-            self.config.payload.check_request(dict(too.instrument_modes))
-            self.too_register.append(too)
-            return too
-        self.config.payload.check_request(dict(instrument_modes or {}))
-        too = TOORequest.model_validate(
-            {
-                "config": self.config,
-                "obsid": obsid,
-                "ra": ra,
-                "dec": dec,
-                "merit": merit,
-                "exptime": exptime,
-                "name": name,
-                "submit_time": unixtime_from(submit_time)
-                if submit_time is not None
-                else 0.0,
-                "deadline": unixtime_from(deadline) if deadline is not None else None,
-                "science_data": dict(science_data or {}),
-                "interrupt": interrupt,
-                "instrument_modes": dict(instrument_modes or {}),
-            }
+        too = TOORequest(
+            obsid=obsid,
+            ra=ra,
+            dec=dec,
+            merit=merit,
+            exptime=exptime,
+            name=name,
+            submit_time=_unix_time(submit_time) if submit_time is not None else 0.0,
+            deadline=_unix_time(deadline) if deadline is not None else None,
+            science_data=dict(science_data or {}),
+            interrupt=interrupt,
         )
         self.too_register.append(too)
         return too
@@ -358,7 +270,7 @@ class RollingHorizonDITL(DITL):
         one left off: targets keep their collected science, and ToOs already
         in the target pool are neither added again nor re-run.
         """
-        self.plan = Plan(ground_contacts=self._booked_ground_contacts())
+        self.plan = Plan()
         self.replans = []
         self._next_replan = None
         # The passes belong to the interval: a later one predicts its own.
@@ -386,12 +298,7 @@ class RollingHorizonDITL(DITL):
         target = self._target_for(int(entry.obsid))
         if target is None:
             return
-        if entry.calibration:
-            target.record_calibration(stop, stop - start)
-        else:
-            target.record_collection(
-                stop, stop - start, visit=entry.visit, step=self.step_size
-            )
+        target.record_collection(stop, stop - start)
         self._first_collection.setdefault(int(entry.obsid), start)
         for too in self.too_register:
             if too.obsid == entry.obsid:
@@ -411,12 +318,19 @@ class RollingHorizonDITL(DITL):
         for too in self.too_register:
             if id(too) in self._too_targets or too.submit_time > utime:
                 continue
-            target = too.target_for(self.config)
-            assert isinstance(target, Pointing)
-            if target.ss_max >= UNBOUNDED_SNAPSHOT_S and target.exptime is not None:
-                # A plain ToO is planned as one snapshot of its exposure.
-                target.ss_min = min(PLAIN_SNAPSHOT_MIN_S, int(target.exptime))
-                target.ss_max = int(target.exptime)
+            target = Pointing(
+                config=self.config,
+                ra=too.ra,
+                dec=too.dec,
+                obsid=too.obsid,
+                name=too.name,
+                merit=too.merit,
+                ss_min=min(300, too.exptime),
+                ss_max=too.exptime,
+                deadline=too.deadline,
+                science_data=too.science_data,
+            )
+            target.exptime = too.exptime
             self._too_targets[id(too)] = target
             self._too_submitted[id(too)] = max(too.submit_time, self.ustart)
             self.targets.append(target)
@@ -445,9 +359,7 @@ class RollingHorizonDITL(DITL):
             next_effect = (
                 self._plan_start(utime if scheduled else self._next_replan)
                 + Slew.duration_upper_bound(self.config.spacecraft_bus.attitude_control)
-                + ObservationTiming.bound(
-                    self.config.observation_timings()
-                ).setup_seconds
+                + self.config.payload.observation_timing.setup_seconds
                 + self.step_size
             )
             urgent = [
@@ -479,7 +391,7 @@ class RollingHorizonDITL(DITL):
     def _plan_start(self, plan_time: float) -> float:
         """Return when a plan built at ``plan_time`` could take over."""
         cutoff = self._cutoff(plan_time)
-        committed, _ = self._committed_at(cutoff)
+        committed = [e for e in self.plan.entries if float(e.begin) < cutoff]
         start_state = self._start_state(committed, plan_time, cutoff)
         return start_state.time if start_state is not None else cutoff
 
@@ -491,80 +403,6 @@ class RollingHorizonDITL(DITL):
     def _cutoff(self, utime: float) -> float:
         """Return the first step a new plan can change."""
         return self._ceil_step(utime + self.commit_lead_time.total_seconds())
-
-    def _committed_at(self, cutoff: float) -> tuple[list[PlanEntry], list[PlanEntry]]:
-        """The plan's entries a new plan keeps, and those it may drop.
-
-        An entry beginning before ``cutoff`` is kept. So are the remaining
-        steps of a sequence visit one of them belongs to: a visit is taken
-        whole, with nothing inserted inside it, so a replan does not cut it
-        after its current step and leave a visit no later plan redoes. The
-        steps of a visit are consecutive entries of its target that follow
-        the sequence's steps in order; the visit is over once its last step
-        has begun, so a closing step named like the first does not start a
-        new visit.
-        """
-        entries = sorted(self.plan.entries, key=lambda e: float(e.begin))
-        committed: list[PlanEntry] = []
-        dropped: list[PlanEntry] = []
-        visit: tuple[int, int] | None = None
-        """The target of the visit under way and the index of its next step."""
-        for entry in entries:
-            step = entry.step
-            if float(entry.begin) < cutoff:
-                committed.append(entry)
-                visit = self._visit_step(entry, visit) if step is not None else None
-                continue
-            if visit is not None and step is not None and int(entry.obsid) == visit[0]:
-                following = self._visit_step(entry, visit, continuing=True)
-                if following is not None:
-                    # The rest of the visit under way at the cutoff.
-                    committed.append(entry)
-                    visit = following
-                    continue
-            visit = None
-            dropped.append(entry)
-        return committed, dropped
-
-    def _visit_step(
-        self,
-        entry: PlanEntry,
-        visit: tuple[int, int] | None,
-        *,
-        continuing: bool = False,
-    ) -> tuple[int, int] | None:
-        """Where a step entry leaves the visit it belongs to: its target and
-        the index of the step after it in the sequence. The entry continues
-        ``visit`` where it is the same target's and its step comes at or
-        after the next expected one in the sequence's order; otherwise it
-        begins a new visit at its step, or, with ``continuing``, none."""
-        obsid = int(entry.obsid)
-        names = self._step_names(obsid)
-        if names is None:
-            return None
-        expected = visit[1] if visit is not None and visit[0] == obsid else None
-        if expected is not None:
-            position = next(
-                (k for k in range(expected, len(names)) if names[k] == entry.step),
-                None,
-            )
-            if position is not None:
-                return obsid, position + 1
-        if continuing:
-            return None
-        position = next((k for k, name in enumerate(names) if name == entry.step), 0)
-        return obsid, position + 1
-
-    def _step_names(self, obsid: int) -> list[str] | None:
-        """The step names of the sequence of target ``obsid``, in order, or
-        None for a target without a sequence."""
-        for target in self.targets:
-            if int(target.obsid) == obsid:
-                sequence = target.sequence
-                return (
-                    [s.name for s in sequence.steps] if sequence is not None else None
-                )
-        return None
 
     def _replan(
         self, utime: float, reason: ReplanReason, triggers: Sequence[TOORequest]
@@ -581,17 +419,6 @@ class RollingHorizonDITL(DITL):
         planned = None
 
         began = time.perf_counter()
-        # The plan with the observation under way left whole, built once
-        # and before any cut: a ToO it collects by its deadline waits for
-        # the observation, as it does in dispatch, and only a ToO it does
-        # not interrupts.
-        whole_log = DITLLog()
-        whole = (
-            self._plan_after(utime, cutoff, whole_log)
-            if triggers and self.allow_interrupts
-            else None
-        )
-        whole_summary = self._last_plan
         for too in triggers:
             # Each attempt logs privately, so a rejected one leaves no trace
             # in the live log or its store.
@@ -599,21 +426,6 @@ class RollingHorizonDITL(DITL):
             cut = self._interrupt_for(too, utime, cutoff, attempt)
             if cut is None:
                 continue
-            entry, original = cut
-            waited = whole and self._placed(whole[2], too.obsid)
-            if waited is not None and self._collects_by_deadline(waited, too):
-                entry.end, entry.collection_begin, entry.collection_end = original
-                self.log.log_event(
-                    utime=utime,
-                    event_type="TOO",
-                    description=(
-                        f"ToO {too.name} (obsid={too.obsid}) waits for observation "
-                        f"{entry.obsid} under way at the commit cutoff: it is "
-                        "collected by its deadline after it"
-                    ),
-                    obsid=too.obsid,
-                )
-                break
             planned = self._plan_interrupt(too, utime, cutoff, attempt)
             if planned is not None:
                 replacement = self._placed(planned[2], too.obsid)
@@ -621,22 +433,18 @@ class RollingHorizonDITL(DITL):
                 # The planned snapshot carries its actual allocation bonus,
                 # after the horizon's proration and collected/committed
                 # seconds have been accounted for by _plan_after().
-                if float(replacement.merit) <= float(entry.merit):
+                if float(replacement.merit) <= float(cut[0].merit):
                     planned = None
             if planned is not None:
-                trigger, interrupted = too, int(entry.obsid)
+                trigger, interrupted = too, int(cut[0].obsid)
                 self.log.add_events(attempt.events)
                 break
             # This ToO cannot be placed at a higher value after all, so the
-            # observation stays whole unless a lower-ranked one can replace it.
+            # observation stays whole unless another one can replace it.
+            entry, original = cut
             entry.end, entry.collection_begin, entry.collection_end = original
         if planned is None:
-            if whole is not None:
-                planned = whole
-                self._last_plan = whole_summary
-                self.log.add_events(whole_log.events)
-            else:
-                planned = self._plan_after(utime, cutoff, self.log)
+            planned = self._plan_after(utime, cutoff, self.log)
         committed, dropped, new_entries, unplaced = planned
         planning_seconds = time.perf_counter() - began
 
@@ -652,10 +460,6 @@ class RollingHorizonDITL(DITL):
             planning_seconds=planning_seconds,
             trigger_obsid=trigger.obsid if trigger is not None else None,
             interrupted_obsid=interrupted,
-            seed_entries=self._last_plan.seed_entries,
-            solver_statuses=self._last_plan.solver_statuses,
-            solver_chunks_used=self._last_plan.solver_chunks_used,
-            solver_limits=self._last_plan.solver_limits,
         )
         self.replans.append(record)
         self.log.log_event(
@@ -709,19 +513,6 @@ class RollingHorizonDITL(DITL):
         return replanned
 
     @staticmethod
-    def _collects_by_deadline(entry: PlanEntry, too: TOORequest) -> bool:
-        """Whether a ToO's planned entry begins collecting by the ToO's
-        deadline, the latest its science may begin."""
-        if too.deadline is None:
-            return True
-        begins = (
-            float(entry.collection_begin)
-            if entry.collection_begin is not None
-            else float(entry.begin) + float(entry.slewtime)
-        )
-        return begins <= too.deadline
-
-    @staticmethod
     def _placed(entries: Sequence[PlanEntry], obsid: int) -> PlanEntry | None:
         """The first science entry for ``obsid`` among ``entries``, if any."""
         return next(
@@ -731,18 +522,6 @@ class RollingHorizonDITL(DITL):
                 if int(e.obsid) == obsid and entry_obstype(e) in PLAN_SCIENCE_OBSTYPES
             ),
             None,
-        )
-
-    def _seed_plan(self, start: float, end: float) -> Plan:
-        """The start plan's entries that overlap ``[start, end]``, the horizon
-        a replan plans, as its scheduler's start plan."""
-        assert self.start_plan is not None
-        return Plan(
-            entries=[
-                entry
-                for entry in self.start_plan
-                if float(entry.end) > start and float(entry.begin) < end
-            ]
         )
 
     def _plan_after(
@@ -765,7 +544,8 @@ class RollingHorizonDITL(DITL):
         committed and dropped entries, the new entries and how many targets
         could not be placed.
         """
-        committed, dropped = self._committed_at(cutoff)
+        committed = [e for e in self.plan.entries if float(e.begin) < cutoff]
+        dropped = [e for e in self.plan.entries if float(e.begin) >= cutoff]
         leading = [*committed, *pinned]
         start_state = self._start_state(leading, utime, cutoff)
         start = start_state.time if start_state is not None else cutoff
@@ -779,24 +559,13 @@ class RollingHorizonDITL(DITL):
             # contact the plans hold comes from them, so they are also the
             # passes to command, and DITL need not predict them again.
             self._run_passes = list(
-                self.coverage.pass_times.passes
-                if self.coverage is not None
-                else SchedulingContext(
-                    self.config, self.begin, self.end
-                ).predict_passes()
+                SchedulingContext(self.config, self.begin, self.end).predict_passes()
             )
             self._predicted_passes = list(self._run_passes)
         reserved = self._reserved_seconds(leading, utime)
         options = dict(self.scheduler_options)
         used = None
         if self.allocator is not None:
-            if self.allocator.passes is None and self._run_passes is not None:
-                # The allocator's data budget predicts the run's passes for
-                # itself otherwise; they are the ones just predicted.
-                self.allocator.passes = list(self._run_passes)
-            if self.coverage is not None:
-                # The run's coverage, so the allocator does not build its own.
-                self.allocator.ctx.coverage = self.coverage
             # Allocated from the exposure that remains, so nothing is used.
             self.allocation = self.allocator.allocate(
                 self.targets,
@@ -815,19 +584,6 @@ class RollingHorizonDITL(DITL):
                 used,
             )
             options["allocation_bonus"] = self.allocation_bonus
-        self._last_seed_entries = 0
-        if (
-            self.start_plan is not None
-            and "start_plan" not in options
-            and issubclass(self.scheduler, LocalSearchScheduler)
-        ):
-            seed = self._seed_plan(start, horizon_end)
-            self._last_seed_entries = len(seed)
-            if seed.entries:
-                options["start_plan"] = seed
-        reserved_activities = {
-            e.obsid for e in leading if e.obstype == ObsType.ACTIVITY
-        }
         scheduler = self.scheduler(
             self.config,
             # Finished and held targets too: the scheduler does not place
@@ -845,22 +601,17 @@ class RollingHorizonDITL(DITL):
             reserved_visits=self._reserved_visits(leading, utime),
             held=[int(t.obsid) for t in held],
             start_volume_gb=self._recorder_volume_at(utime, start, leading),
-            start_momentum_eci_n_m_s=self._momentum_start(utime, start, committed),
             start_deficit_wh=start_deficit_wh,
             start_drive_state=start_drive_state,
             passes=self._run_passes,
-            coverage=self.coverage,
-            activities=[
-                a
-                for a in self.activities
-                if a.obsid not in reserved_activities
-                and a.latest_start + a.duration_seconds > start
-            ],
             **options,  # type: ignore[arg-type]
         )
-        entries = scheduler.schedule().entries
-        self._last_plan = _PlanSummary.of(scheduler, self._last_seed_entries)
-        return (committed, dropped, [*pinned, *entries], len(scheduler.unplaced))
+        return (
+            committed,
+            dropped,
+            [*pinned, *scheduler.schedule().entries],
+            len(scheduler.unplaced),
+        )
 
     def _interrupt_for(
         self, too: TOORequest, utime: float, cutoff: float, log: DITLLog
@@ -871,8 +622,7 @@ class RollingHorizonDITL(DITL):
         commit lead time reaches into it. Collection stops no earlier than
         ``utime``, as science before then is already collected, and the
         observation ends after its cleanup. Returns the cut entry with its
-        original end and collection window. A sequence visit is never cut:
-        the ToO waits for it.
+        original end and collection window.
         """
         entry = next(
             (
@@ -884,22 +634,6 @@ class RollingHorizonDITL(DITL):
             None,
         )
         if not self.allow_interrupts or not too.interrupt or entry is None:
-            return None
-        if entry.step is not None:
-            # A step of a sequence visit: the visit is taken whole, with
-            # nothing inserted inside it, so the ToO waits for it as it does
-            # in dispatch. Cutting the step would leave the visit's remaining
-            # steps committed after a shortened one. A decision, not an
-            # attempt, so it goes to the live log.
-            self.log.log_event(
-                utime=utime,
-                event_type="TOO",
-                description=(
-                    f"ToO {too.name} (obsid={too.obsid}) waits for the visit of "
-                    f"{entry.obsid} under way at the commit cutoff"
-                ),
-                obsid=too.obsid,
-            )
             return None
         category = self.merit_model.categories.get_category(int(entry.obsid))
         if not category.interruptible:
@@ -924,7 +658,7 @@ class RollingHorizonDITL(DITL):
         end = cut
         collection = None
         if entry.collection_begin is not None and entry.collection_end is not None:
-            post = self._timing_for(entry).post_collection_seconds
+            post = self.config.payload.observation_timing.post_collection_seconds
             begin = min(float(entry.collection_begin), cut)
             # Science before ``utime`` is already collected, so collection
             # cannot stop before then; cleanup follows wherever it stops.
@@ -977,6 +711,19 @@ class RollingHorizonDITL(DITL):
         if start <= utime:
             return now
         contacts = [e for e in committed if entry_obstype(e) == ObsType.GSP]
+        science: list[tuple[float, float]] = []
+        for entry in committed:
+            if entry.collection_begin is None or entry.collection_end is None:
+                continue
+            begin = max(float(entry.collection_begin), utime)
+            end = min(float(entry.collection_end), start)
+            if end <= begin:
+                continue
+            volume = config.science_generated(end - begin, entry.science_data)
+            if float(entry.collection_begin) < utime:
+                # Already collecting: its fixed amount is on the recorder.
+                volume -= config.science_generated(0.0, entry.science_data)
+            science.append((begin, volume))
         ledger = RecorderLedger(
             config,
             utime,
@@ -985,36 +732,14 @@ class RollingHorizonDITL(DITL):
             start_volume_gb=now,
             step_size=self.step_size,
             origin=self.ustart,
-            coverage=self.coverage,
         )
-        volumes: list[RecorderAmount] = [0.0] * ledger.segments
-        for entry in committed:
-            if (
-                entry_obstype(entry) == ObsType.ACTIVITY
-                and utime <= float(entry.begin) < start
-            ):
-                for segment, volume in ledger.activity_additions(entry):
-                    volumes[segment] = combine_amounts(volumes[segment], volume)
-                continue
-            if entry.collection_begin is None or entry.collection_end is None:
-                continue
-            begin = max(float(entry.collection_begin), utime)
-            end = min(float(entry.collection_end), start)
-            if end <= begin:
-                continue
-            for segment, volume in ledger.science_additions(
-                entry,
-                end - begin,
-                begin,
-                # Already collecting: its fixed amount is on the recorder.
-                include_fixed=float(entry.collection_begin) >= utime,
-            ):
-                volumes[segment] = combine_amounts(volumes[segment], volume)
+        volumes = [0.0] * ledger.segments
+        for begin, volume in science:
+            volumes[ledger.segment(begin)] += volume
         for entry in contacts:
             # The slew into a contact still to come, flown in PASS mode.
-            k = ledger.ingress_segment(entry)
-            volumes[k] = combine_amounts(volumes[k], ledger.ingress_volume(entry))
-        return ledger.level_at(volumes, start)
+            volumes[ledger.ingress_segment(entry)] += ledger.ingress_volume(entry)
+        return ledger.peaks(volumes)[-1]
 
     def _battery_start(
         self, utime: float, start: float, committed: Sequence[PlanEntry]
@@ -1095,61 +820,6 @@ class RollingHorizonDITL(DITL):
             ledger.level_at(energy, start),
             ledger.drive_state_at(energy, start) or drive,
         )
-
-    def _momentum_start(
-        self, utime: float, start: float, committed: Sequence[PlanEntry]
-    ) -> tuple[float, float, float] | None:
-        """The stored momentum when the plan takes over at ``start``, in
-        inertial coordinates, for the plan's forecast: the momentum now,
-        with what the committed activities add until then integrated at the
-        attitudes they hold, the spacecraft's own where none is under way.
-        None where momentum is not tracked or no sample has set it yet."""
-        tracker = self._stored_momentum_tracker
-        if tracker is None:
-            return None
-        momentum = tracker.momentum_eci_n_m_s
-        if momentum is None:
-            return None
-        if start <= utime:
-            return (float(momentum[0]), float(momentum[1]), float(momentum[2]))
-        holds = sorted(
-            (
-                (float(e.begin), float(e.end), e)
-                for e in committed
-                if float(e.end) > utime and float(e.begin) < start
-            ),
-            key=lambda hold: hold[0],
-        )
-
-        def attitude_at(at: float) -> Attitude:
-            for begin, end, entry in holds:
-                if begin <= at < end:
-                    if entry.spacecraft_attitude is not None:
-                        return entry.spacecraft_attitude
-                    return (float(entry.ra), float(entry.dec), float(entry.roll))
-            return self.acs.predicted_attitude(at)
-
-        # Each committed dump that ends before the start unloads the wheels.
-        dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
-        unloads = sorted(
-            float(e.end)
-            for e in committed
-            if e.desaturation and e.activity_finishes and utime < float(e.end) <= start
-        )
-        ahead = np.asarray(momentum, dtype=np.float64)
-        cursor = utime
-        for at in [*unloads, start]:
-            if at > cursor:
-                after = self._forecast_momentum(
-                    cursor, at, attitude_at, start_eci_n_m_s=ahead
-                ).end_eci_n_m_s
-                if after is not None:
-                    ahead = after
-                cursor = at
-            if at < start or at in unloads:
-                if dump is not None and at in unloads:
-                    ahead = ahead * dump.residual_fraction
-        return (float(ahead[0]), float(ahead[1]), float(ahead[2]))
 
     def _committed_slew(
         self, entry: PlanEntry, start: Attitude, utime: float
@@ -1233,8 +903,6 @@ class RollingHorizonDITL(DITL):
             if rest is not None:
                 rest_time, attitude = rest
                 return max(float(entry.end), rest_time), attitude
-        if entry.moves:
-            return science_rest(entry, self.config.spacecraft_bus.attitude_control)
         return float(entry.end), _final_attitude(entry)
 
     @staticmethod
@@ -1299,14 +967,11 @@ class RollingHorizonDITL(DITL):
             self._entry_passes.pop(entry_id, None)
         self.plan.entries = [*committed, *new_entries]
 
-        committed_ids = {id(e) for e in committed}
         commanded = self._entries_to_command[: self._next_entry_index]
-        # The committed entries still to command: those before the cutoff
-        # and the rest of a visit under way at it.
         pending = [
             e
             for e in self._entries_to_command[self._next_entry_index :]
-            if id(e) in committed_ids
+            if id(e) not in dropped_ids and float(e.begin) < cutoff
         ]
         self._entries_to_command = [
             *commanded,
@@ -1326,6 +991,15 @@ def _final_attitude(entry: PlanEntry) -> tuple[float, float, float]:
             float(entry.track_end_roll or 0.0),
         )
     return entry.target_body_attitude()
+
+
+def _unix_time(value: float | datetime) -> float:
+    """Convert a Unix timestamp or datetime (naive means UTC) to Unix seconds."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    return float(value)
 
 
 def _as_datetime(utime: float) -> datetime:

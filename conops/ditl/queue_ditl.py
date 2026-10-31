@@ -1,5 +1,5 @@
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Mapping
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,23 +9,20 @@ from typing import Protocol, TypedDict
 import numpy as np
 import numpy.typing as npt
 import rust_ephem
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..common import (
     ACSMode,
-    DITLEventType,
     ObsType,
     angular_separation,
     dtutcfromtimestamp,
     radec2vec,
     scbodyvector,
     unixtime2date,
-    unixtime_from,
     whole_steps,
 )
 from ..common.enums import ACSCommandType, SlewAlgorithm
-from ..common.ephemeris import position_vectors, sun_vector_change_deg
-from ..common.numerics import TIME_TOLERANCE_S
+from ..common.ephemeris import position_vectors
 from ..common.vector import attitude_to_quat, quaternion_attitude_delta
 from ..config import (
     DAY_SECONDS,
@@ -33,15 +30,14 @@ from ..config import (
     MissionConfig,
     ScienceData,
 )
-from ..config.acs import AttitudeControlSystem, scheduled_slew_time
+from ..config.acs import scheduled_slew_time
 from ..config.constraint import (
     all_attitude_constraint_name,
     attitude_constraint_name_for_scopes,
     attitude_constraint_scope_label,
 )
 from ..config.data_storage import DataStorage, RecorderView
-from ..config.observation_timing import ObservationTiming
-from ..schedulers import ActivitySchedulingError, DispatchPolicy, SchedulingContext
+from ..schedulers import DispatchPolicy
 from ..schedulers.allocator import Allocation, LongRangeAllocator
 from ..schedulers.recorder import contact_downlink_gb
 from ..simulation.acs_command import ACSCommand
@@ -52,20 +48,8 @@ from ..simulation.momentum_planning import MomentumObservationPlanner
 from ..simulation.passes import Pass, pass_slew_trigger_buffer
 from ..simulation.roll import optimum_body_roll, optimum_instrument_roll
 from ..simulation.slew import Slew
-from ..targets import (
-    DESATURATION_OBSID,
-    Plan,
-    PlanEntry,
-    Pointing,
-    Queue,
-    ScheduledActivity,
-    TargetSlewEstimate,
-    assign_obsids,
-)
+from ..targets import Plan, PlanEntry, Pointing, Queue, TargetSlewEstimate
 from ..targets.merit import MeritBreakdown, MeritModel
-from ..targets.plan_entry import instrument_modes_of, snapshot_min_seconds
-from ..targets.sequence import ObservationSequence
-from ..targets.too import TOORequest
 from .ditl_log import DITLLog
 from .ditl_mixin import AttitudeRateContinuityError, DITLMixin
 from .ditl_stats import DITLStats
@@ -124,6 +108,42 @@ class _HasTimestampMethod(Protocol):
     def timestamp(self) -> float: ...
 
 
+class TOORequest(BaseModel):
+    """A Target of Opportunity (TOO) request waiting to be executed.
+
+    Attributes:
+        obsid: Unique observation identifier for this TOO
+        ra: Right ascension in degrees
+        dec: Declination in degrees
+        merit: Priority merit value (higher = more urgent)
+        exptime: Requested exposure time in seconds
+        name: Human-readable name for the TOO target
+        submit_time: Unix timestamp when the TOO becomes active. If 0.0,
+            the TOO is active immediately from simulation start.
+        deadline: Latest Unix time science collection may begin, or None for
+            no deadline. Urgency rises as it approaches, and the TOO cannot be
+            selected after it.
+        science_data: Science data observing the TOO generates, keyed by
+            instrument name; other instruments generate their own.
+        executed: Whether this TOO has been dispatched as the current
+            observation
+    """
+
+    obsid: int
+    ra: float
+    dec: float
+    merit: float
+    exptime: int
+    name: str
+    submit_time: float = 0.0
+    deadline: float | None = None
+    science_data: dict[str, ScienceData] = Field(default_factory=dict)
+    interrupt: bool = True
+    """Whether the TOO may cut short the observation in progress. If False it
+    waits for that observation to end."""
+    executed: bool = False
+
+
 class _ScienceDeadlineInputs(BaseModel):
     """Target-independent deadline components for one scheduler fetch."""
 
@@ -131,8 +151,6 @@ class _ScienceDeadlineInputs(BaseModel):
 
     simulation_end: float
     charge_deadline: float | None
-    request_openings: list[tuple[float, float, int]] = []
-    """The requests whose windows are still to open, from the queue."""
 
 
 @dataclass(frozen=True)
@@ -147,29 +165,6 @@ class _CommittedTOO:
     value: MeritBreakdown
     dispatch_time: float
     momentum_recovery: Slew | None = None
-
-
-@dataclass
-class _SequenceRun:
-    """A visit of a sequence target under way, step by step."""
-
-    parent: Pointing
-    """The sequence target, credited with each step's science or calibration."""
-    index: int
-    """The step being observed."""
-    begun: float
-    """When the visit began."""
-    advancing: bool = False
-    """Whether the step's observation is ending because the step is over,
-    rather than being cut short."""
-    optimum: float | None = None
-    """The power-optimal instrument roll found at the visit's last change
-    of pointing, held through the steps at that pointing."""
-
-    @property
-    def sequence(self) -> ObservationSequence:
-        assert self.parent.sequence is not None
-        return self.parent.sequence
 
 
 class QueueDITL(DITLMixin, DITLStats):
@@ -201,7 +196,6 @@ class QueueDITL(DITLMixin, DITLStats):
         calculate_field_of_regard: bool = False,
         allocator: LongRangeAllocator | None = None,
         allocation_bonus: float = 0.5,
-        activities: Sequence[ScheduledActivity] = (),
     ) -> None:
         """Initialize a queue-driven DITL simulation.
 
@@ -231,7 +225,7 @@ class QueueDITL(DITLMixin, DITLStats):
         self.ppt = None
 
         # Pointing history
-        self.plan = Plan(ground_contacts=self._booked_ground_contacts())
+        self.plan = Plan()
 
         # Power and battery history
         self.panel = list()
@@ -260,28 +254,6 @@ class QueueDITL(DITLMixin, DITLStats):
         # Event log
         self.log = DITLLog()
 
-        self.activities = assign_obsids(activities)
-        """Fixed-time activities, in time order: the observation under way
-        ends when one begins, the spacecraft holds its attitude in IDLE for
-        its length, and no observation starts before it ends."""
-        self._active_activity: ScheduledActivity | None = None
-        self._activity_started: float = 0.0
-        self._activity_hold_begin: float = 0.0
-        self._activity_slew: Slew | None = None
-        self._activity_context: SchedulingContext | None = None
-        self._started_activity_ids: set[int] = set()
-        self._activity_end: float = 0.0
-        self._activity_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
-        self._activity_waiting: ScheduledActivity | None = None
-        """The activity due now that waits for the slew under way to end."""
-        self._desaturations = 0
-        self._dump_pending = False
-        """A thruster dump called for at the planning level, to begin once the
-        observation under way has ended and before another starts."""
-        """How many thruster dumps dispatch has called for."""
-        self._sequence: _SequenceRun | None = None
-        """The sequence visit under way, if the observation is one of its steps."""
-
         # TOO (Target of Opportunity) register - holds pending TOOs
         self.too_register: list[TOORequest] = []
         # Queue target created for each activated TOO, keyed by id(TOORequest)
@@ -302,7 +274,6 @@ class QueueDITL(DITLMixin, DITLStats):
                 log=self.log,
                 ephem=self.ephem,
             )
-        self.queue.coverage = self.coverage
 
         if allocator is not None:
             if not isinstance(self.queue, Queue):
@@ -363,21 +334,18 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def submit_too(
         self,
-        obsid: int | TOORequest,
-        ra: float = 0.0,
-        dec: float = 0.0,
-        merit: float = 0.0,
-        exptime: int = 0,
-        name: str = "",
+        obsid: int,
+        ra: float,
+        dec: float,
+        merit: float,
+        exptime: int,
+        name: str,
         submit_time: float | datetime | None = None,
         deadline: float | datetime | None = None,
         science_data: Mapping[str, ScienceData] | None = None,
         interrupt: bool = True,
-        instrument_modes: Mapping[str, str] | None = None,
     ) -> TOORequest:
-        """Submit a Target of Opportunity (TOO) request: a
-        :class:`~conops.targets.TOORequest` holding any request, or the
-        fields of a plain pointing.
+        """Submit a Target of Opportunity (TOO) request.
 
         A TOO is an ordinary queue request with a short window. Once its
         ``submit_time`` is reached it joins the target queue with its own merit
@@ -403,9 +371,6 @@ class QueueDITL(DITLMixin, DITLStats):
                 instrument name; other instruments generate their own.
             interrupt: Whether the TOO may interrupt the observation in
                 progress; if False it is chosen when that observation ends.
-            instrument_modes: The instruments observing the TOO uses and the
-                mode each is in, by name; None: every instrument with modes,
-                in SCIENCE.
 
         Returns:
             The created TOORequest object
@@ -433,41 +398,48 @@ class QueueDITL(DITLMixin, DITLStats):
             ...     submit_time=ditl.ustart + 3600,
             ... )
         """
-        if isinstance(obsid, TOORequest):
-            too = obsid
-            self.config.payload.check_request(dict(too.instrument_modes))
-            self.too_register.append(too)
-            return too
-        self.config.payload.check_request(dict(instrument_modes or {}))
-        too = TOORequest.model_validate(
-            {
-                "config": self.config,
-                "obsid": obsid,
-                "ra": ra,
-                "dec": dec,
-                "merit": merit,
-                "exptime": exptime,
-                "name": name,
-                # None means active immediately (0.0 is always <= any simulation time)
-                "submit_time": unixtime_from(submit_time)
-                if submit_time is not None
-                else 0.0,
-                "deadline": unixtime_from(deadline) if deadline is not None else None,
-                "science_data": dict(science_data or {}),
-                "interrupt": interrupt,
-                "instrument_modes": dict(instrument_modes or {}),
-            }
+        too = TOORequest(
+            obsid=obsid,
+            ra=ra,
+            dec=dec,
+            merit=merit,
+            exptime=exptime,
+            name=name,
+            # None means active immediately (0.0 is always <= any simulation time)
+            submit_time=self._unix_time(submit_time)
+            if submit_time is not None
+            else 0.0,
+            deadline=self._unix_time(deadline) if deadline is not None else None,
+            science_data=dict(science_data or {}),
+            interrupt=interrupt,
+            executed=False,
         )
         self.too_register.append(too)
         return too
+
+    @staticmethod
+    def _unix_time(value: float | datetime) -> float:
+        """Convert a Unix timestamp or datetime (naive means UTC) to Unix seconds."""
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.timestamp()
+        return float(value)
 
     def _too_target(self, too: TOORequest) -> Pointing:
         """Return the queue target for an active TOO, adding it on first use."""
         target = self._too_targets.get(id(too))
         if target is None:
-            request = too.target_for(self.config)
-            assert isinstance(request, Pointing)
-            target = self.queue.add_request(request)
+            target = self.queue.add(
+                ra=too.ra,
+                dec=too.dec,
+                obsid=too.obsid,
+                name=too.name,
+                merit=too.merit,
+                exptime=too.exptime,
+                deadline=too.deadline,
+                science_data=too.science_data,
+            )
             self._too_targets[id(too)] = target
             self.log.log_event(
                 utime=max(too.submit_time, self.ustart),
@@ -533,10 +505,6 @@ class QueueDITL(DITLMixin, DITLStats):
         if self._committed_too is not None:
             return self._dispatch_committed_too(utime)
         if self.ppt is None or not active:
-            return False
-        if self._sequence is not None:
-            # Nothing is inserted inside a sequence visit; the TOOs are
-            # queued for the next selection.
             return False
         if not self.merit_model.category(self.ppt).interruptible:
             # The observation's category does not allow it to be cut short;
@@ -633,7 +601,6 @@ class QueueDITL(DITLMixin, DITLStats):
         # interrupted observation, is held out of this selection.
         interrupted = self.ppt
         ppt_unavailable = self._ppt_unavailable
-        sequence_before = self._sequence
         candidates = outranking
         while True:
             if not candidates:
@@ -663,19 +630,10 @@ class QueueDITL(DITLMixin, DITLStats):
                 for target in held_out:
                     target.done = False
             if replacement is None or slew is None:
-                self._sequence = sequence_before
                 self._ppt_unavailable = ppt_unavailable
                 return False
-            taken = (
-                self._sequence.parent
-                if self._sequence is not None
-                and self._sequence.parent is not replacement
-                else replacement
-            )
             too, _, offered_at = next(
-                item
-                for item in candidates
-                if item[1] is replacement or item[1] is taken
+                item for item in candidates if item[1] is replacement
             )
             # The value admission settled on, over the collection it admitted;
             # a queue that leaves no breakdown admitted it at the value offered.
@@ -686,12 +644,7 @@ class QueueDITL(DITLMixin, DITLStats):
             # candidate worth no more than the observation must not shut out
             # one that is worth more. Admission goes on without it.
             self._ppt_unavailable = ppt_unavailable
-            self._sequence = sequence_before
-            candidates = [
-                item
-                for item in candidates
-                if item[1] is not replacement and item[1] is not taken
-            ]
+            candidates = [item for item in candidates if item[1] is not replacement]
         self.log.log_event(
             utime=utime,
             event_type="TOO",
@@ -703,18 +656,12 @@ class QueueDITL(DITLMixin, DITLStats):
             obsid=too.obsid,
             acs_mode=self.acs.acsmode,
         )
-        # Admission may have begun the replacement's sequence visit; ending
-        # the interrupted observation must not cut that visit short.
-        replacement_run = self._sequence
-        self._sequence = None
         self._terminate_ppt(
             utime,
             reason=f"Preempted by TOO {too.name} (obsid={too.obsid})",
-            interrupted=True,
             mark_done=False,  # Don't mark as done, it was interrupted
         )
         self.ppt = replacement
-        self._sequence = replacement_run
         self._command_ppt_slew(utime, slew)
         too.executed = True
         return True
@@ -762,16 +709,11 @@ class QueueDITL(DITLMixin, DITLStats):
             if collection_stop is not None:
                 until = min(until, collection_stop)
             collecting = max(0.0, until - now)
-            if collecting > 0.0 and getattr(ppt, "calibration", False) is not True:
+            if collecting > 0.0:
                 science = ppt.science_data
-                modes = instrument_modes_of(ppt)
                 volume += float(
-                    config.science_generated(
-                        collecting, science=science, instrument_modes=modes
-                    )
-                    - config.science_generated(
-                        0.0, science=science, instrument_modes=modes
-                    )
+                    config.science_generated(collecting, science=science)
+                    - config.science_generated(0.0, science=science)
                 )
         return volume
 
@@ -837,13 +779,8 @@ class QueueDITL(DITLMixin, DITLStats):
         )
         if slew is None or preview.ppt is None:
             return None
-        # A sequence target is taken up as its first step's pointing: the
-        # candidate behind it is the visit's parent.
-        taken = preview._sequence.parent if preview._sequence is not None else None
         too, target, value = next(
-            item
-            for item in candidates
-            if memo[id(item[1])] is preview.ppt or memo[id(item[1])] is taken
+            item for item in candidates if memo[id(item[1])] is preview.ppt
         )
         # The value admission settled on, over the collection it admitted.
         admitted = preview.ppt.merit_breakdown or value
@@ -872,10 +809,6 @@ class QueueDITL(DITLMixin, DITLStats):
         self._committed_too = None
         target = commitment.target
         prepared = commitment.prepared
-        if isinstance(getattr(target, "sequence", None), ObservationSequence):
-            # A sequence target is observed step by step: the admitted
-            # observation is its first step, which takes the prepared slew.
-            target = self._begin_sequence(target, utime)
         for name in (
             "begin",
             "end",
@@ -904,19 +837,13 @@ class QueueDITL(DITLMixin, DITLStats):
             obsid=target.obsid,
             acs_mode=self.acs.acsmode,
         )
-        # The sequence visit begun for the replacement must not be cut by
-        # the end of the observation it replaces.
-        replacement_run = self._sequence
-        self._sequence = None
         self._terminate_ppt(
             utime,
             reason=f"Preempted by TOO {commitment.request.name} (obsid={target.obsid})",
-            interrupted=True,
             mark_done=False,
         )
         self.ppt = target
         self._momentum_recovery = commitment.momentum_recovery
-        self._sequence = replacement_run
         self.acs.slew_dists.append(commitment.slew.slewdist)
         self.acs.enqueue_command(
             ACSCommand(
@@ -932,9 +859,7 @@ class QueueDITL(DITLMixin, DITLStats):
     def _too_cleanup_end(self, utime: float) -> float:
         """Return the earliest task end if collection stops for a TOO now."""
         ppt = self.ppt
-        post_collection = (
-            self._ppt_timing(ppt).post_collection_seconds if ppt is not None else 0.0
-        )
+        post_collection = self.config.payload.observation_timing.post_collection_seconds
         if (
             ppt is None
             or ppt.collection_begin is None
@@ -948,52 +873,28 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def _reserve_too_cleanup(self, utime: float, *, decision_time: float) -> None:
         """Stop future collection after a replacement passed delayed admission."""
-        self._reserve_cleanup(
-            utime,
-            decision_time=decision_time,
-            event_type="TOO",
-            before="TOO",
-            waiting="preemption",
-        )
-
-    def _reserve_cleanup(
-        self,
-        stop: float,
-        *,
-        decision_time: float,
-        event_type: DITLEventType,
-        before: str,
-        waiting: str,
-    ) -> None:
-        """Stop the observation under way collecting at ``stop`` and end it
-        when its cleanup and handoff budget is paid, so that what is
-        ``waiting`` for it can begin then. Nothing changes where collection
-        was to stop by ``stop`` anyway."""
+        cleanup_end = self._too_cleanup_end(utime)
         ppt = self.ppt
         assert ppt is not None and ppt.collection_end is not None
-        if ppt.collection_begin is not None:
-            stop = max(stop, ppt.collection_begin)
-        if stop >= ppt.collection_end:
-            return
-        # Collection from earlier steps is already accounted for. Shorten
-        # only the future window, then keep its full teardown budget.
-        post = self._ppt_timing(ppt).post_collection_seconds
-        ppt.collection_end = stop
-        ppt.end = min(ppt.end, stop + post)
-        if self.plan and self.plan[-1].begin == ppt.begin:
-            self.plan[-1].collection_end = ppt.collection_end
-            self.plan[-1].end = ppt.end
-        self.log.log_event(
-            utime=decision_time,
-            event_type=event_type,
-            description=(
-                f"Reserved {before} cleanup for obsid {ppt.obsid}; collection "
-                f"stops at {unixtime2date(stop)}, {waiting} "
-                f"waits for cleanup/handoff until {unixtime2date(ppt.end)}"
-            ),
-            obsid=ppt.obsid,
-            acs_mode=self.acs.acsmode,
-        )
+        if utime < ppt.collection_end:
+            # Collection from earlier steps is already accounted for. Shorten
+            # only the future window, then keep its full teardown budget.
+            ppt.collection_end = utime
+            ppt.end = cleanup_end
+            if self.plan and self.plan[-1].begin == ppt.begin:
+                self.plan[-1].collection_end = ppt.collection_end
+                self.plan[-1].end = ppt.end
+            self.log.log_event(
+                utime=decision_time,
+                event_type="TOO",
+                description=(
+                    f"Reserved TOO cleanup for obsid {ppt.obsid}; collection "
+                    f"stops at {unixtime2date(utime)}, preemption "
+                    f"waits for cleanup/handoff until {unixtime2date(ppt.end)}"
+                ),
+                obsid=ppt.obsid,
+                acs_mode=self.acs.acsmode,
+            )
 
     def calc(self) -> bool:
         """Run the simulation; an unexecutable momentum state fails diagnostically."""
@@ -1019,7 +920,7 @@ class QueueDITL(DITLMixin, DITLStats):
         self._active_gsp_end_time = None
         self._committed_too = None
         if self._run_started:
-            self.plan = Plan(ground_contacts=self._booked_ground_contacts())
+            self.plan = Plan()
             self.charging_ppt = None
             self.emergency_charging.current_charging_ppt = None
             self._planned_gsp_keys.clear()
@@ -1082,12 +983,6 @@ class QueueDITL(DITLMixin, DITLStats):
                 self._sync_acs_slew_metadata()
                 mode = self.acs.get_mode(utime)
 
-            # Begin or end a scheduled activity due now
-            if self._manage_activities(utime, ra, dec, roll):
-                ra, dec, roll, obsid = self.acs.pointing(utime)
-                self._sync_acs_slew_metadata()
-                mode = self.acs.get_mode(utime)
-
             # Handle spacecraft operations based on current mode
             self._handle_mode_operations(mode, utime, ra, dec)
 
@@ -1135,8 +1030,6 @@ class QueueDITL(DITLMixin, DITLStats):
             self.acs._advance_attitude(self.uend)
         if self.plan and self.ppt is not None:
             self._close_last_plan_entry(self.uend)
-        if self._active_activity is not None:
-            self._end_activity(self.uend)
 
         attitude_fault = any(
             event.name
@@ -1178,957 +1071,6 @@ class QueueDITL(DITLMixin, DITLStats):
             )
         return not attitude_fault
 
-    # ── Scheduled activities ──────────────────────────────────────────────
-
-    def _unstarted_activities(self) -> Iterator[ScheduledActivity]:
-        """Activities still eligible for this run, with their original IDs.
-
-        A sliding block expires only after its latest possible end. Keep the
-        source list intact so filtering a partial run never renumbers activities
-        or discards ones needed by a later interval.
-        """
-        return (
-            activity
-            for activity in self.activities
-            if activity.obsid not in self._started_activity_ids
-            and activity.begin < self.uend
-            and activity.latest_start + activity.duration_seconds > self.ustart
-        )
-
-    def _manage_activities(
-        self, utime: float, ra: float, dec: float, roll: float
-    ) -> bool:
-        """End the activity under way once it is over, and begin the one due
-        now. An activity due while a slew is under way waits for the slew to
-        end and then runs its full length, unless it is ``fixed``, when it
-        begins at its start and the slew finishes inside it. One due while
-        another activity is under way begins when that one ends, for its
-        full length. Returns whether the spacecraft's state changed."""
-        changed = False
-        active = self._active_activity
-        if active is not None and utime >= self._activity_end:
-            self._end_activity(utime)
-            changed = True
-        elif (
-            active is not None
-            and active.safe_hold
-            and utime >= self._activity_hold_begin
-        ):
-            self.acs.begin_safe_hold()
-        elif (
-            active is not None
-            and active.desaturation
-            and active.attitude.fixed_pointing is not None
-            and utime >= self._activity_hold_begin
-        ):
-            self.acs.begin_desaturation()
-        if self._active_activity is None:
-            self._call_for_desaturation(utime)
-            due = next(
-                (a for a in self._unstarted_activities() if a.begin <= utime),
-                None,
-            )
-            if due is None:
-                due = self._activity_needing_ingress(utime)
-            if due is not None:
-                waits_for = self._activity_waits_for(due, utime)
-                if waits_for is not None:
-                    if self._activity_waiting is not due:
-                        self._activity_waiting = due
-                        self.log.log_event(
-                            utime=utime,
-                            event_type="ACTIVITY",
-                            description=(
-                                f"Scheduled activity {due.name} waits for {waits_for}"
-                            ),
-                            obsid=due.obsid,
-                            acs_mode=self.acs.acsmode,
-                        )
-                    return changed
-                self._begin_activity(due, utime, (ra, dec, roll))
-                changed = True
-        return changed
-
-    def _activity_model(self) -> SchedulingContext:
-        """Geometry shared with the planners, for explicit activity ingress."""
-        ctx = self._activity_context
-        if ctx is None or ctx.begin != self.begin or ctx.end != self.end:
-            ctx = self._activity_context = SchedulingContext(
-                self.config, self.begin, self.end, step_size=self.step_size
-            )
-        return ctx
-
-    def _activity_ingress(self, activity: ScheduledActivity, utime: float) -> Slew:
-        assert activity.obsid is not None
-        ctx = self._activity_model()
-        start = ctx.ceil_step(self.acs.handoff_ready_time(utime))
-        hold_begin = max(activity.begin, start)
-        # Include every possible shifted hold in the window. The pose remains
-        # valid when the real ingress chooses a later start within that window.
-        end = min(
-            max(activity.latest_start, hold_begin) + activity.duration_seconds,
-            self.uend,
-        )
-        try:
-            fixed = ctx.activity_attitude(activity, hold_begin, end)
-        except ValueError as exc:
-            raise ActivitySchedulingError(activity, str(exc)) from exc
-        return ctx.slew(
-            self.acs.predicted_attitude(start),
-            fixed,
-            start,
-            obstype=ObsType.IDLE,
-            obsid=activity.obsid,
-        )
-
-    def _activity_needing_ingress(self, utime: float) -> ScheduledActivity | None:
-        """Prepare a future explicit hold before its latest start is missed."""
-        for activity in self._unstarted_activities():
-            if activity.attitude.kind == "inherited" or activity.begin <= utime:
-                continue
-            slew = self._activity_ingress(activity, utime)
-            if slew.slewend + self.step_size >= activity.latest_start:
-                return activity
-        return None
-
-    def _activity_waits_for(
-        self, activity: ScheduledActivity, utime: float
-    ) -> str | None:
-        """What a due activity waits for before it begins, if anything: a
-        slew under way, unless the activity is fixed; or, within its slide
-        window, the observation under way."""
-        if not activity.fixed and self._slew_under_way(utime):
-            return "the slew under way"
-        if (
-            activity.desaturation
-            and activity.attitude.kind != "inherited"
-            and self._sequence is not None
-        ):
-            return "the indivisible visit under way"
-        ppt = self.ppt
-        if (
-            ppt is not None
-            and ppt is not self.charging_ppt
-            and utime < activity.latest_start
-        ):
-            if activity.attitude.kind != "inherited":
-                ingress = self._activity_ingress(activity, utime)
-                if ingress.slewend + self.step_size >= activity.latest_start:
-                    return None
-            return (
-                f"observation {ppt.obsid} under way, until "
-                f"{unixtime2date(activity.latest_start)} at the latest"
-            )
-        return None
-
-    def _call_for_desaturation(self, utime: float) -> None:
-        """Call for a thruster dump where the stored momentum asks for one.
-        At the planning level of the capacity a dump is pending: it begins
-        between observations, once the one under way has ended and before
-        another starts, holding the attitude the spacecraft has for the
-        dump's length. At the capacity itself the dump is an emergency,
-        recorded in fault management: it begins now, interrupting the
-        observation under way once its cleanup and handoff budget is paid.
-        One at a time: none is called for while one waits for a slew or is
-        still to begin."""
-        level = self._dump_level_n_m_s()
-        tracker = self._stored_momentum_tracker
-        if level is None or tracker is None:
-            return
-        if any(a.desaturation for a in self._unstarted_activities()):
-            return
-        stored = tracker.stored_momentum_norm_n_m_s
-        capacity = (
-            self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_n_m_s
-        )
-        assert capacity is not None
-        observing = self.ppt is not None and self.ppt is not self.charging_ppt
-        obsid = self.ppt.obsid if observing and self.ppt is not None else None
-        if self._momentum_at_capacity(utime, obsid):
-            demand = self._momentum_demand_n_m_s(tracker)
-            self.log.log_event(
-                utime=utime,
-                event_type="MOMENTUM",
-                description=(
-                    f"Stored momentum {demand:.3f} N m s has reached the "
-                    f"{capacity} N m s capacity: emergency thruster dump"
-                    + (f" interrupts observation {obsid}" if obsid is not None else "")
-                ),
-                obsid=obsid,
-                acs_mode=self.acs.acsmode,
-            )
-            self._dump_pending = False
-            self._add_dump(self._dump_begin(utime))
-            return
-        if stored >= level and not self._dump_pending:
-            self._dump_pending = True
-            self.log.log_event(
-                utime=utime,
-                event_type="MOMENTUM",
-                description=(
-                    f"Stored momentum {stored:.3f} N m s has reached the planning "
-                    f"level {level:.3f} of the {capacity} N m s capacity: thruster dump"
-                    + (f" after observation {obsid}" if obsid is not None else "")
-                ),
-                obsid=obsid,
-                acs_mode=self.acs.acsmode,
-            )
-        if self._dump_pending and self.ppt is None:
-            self._dump_pending = False
-            self._add_dump(utime)
-
-    def _add_dump(self, begin: float) -> None:
-        """Add a thruster dump due at ``begin`` to the activities."""
-        dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
-        assert dump is not None
-        activity = ScheduledActivity(
-            name="Desaturation",
-            begin=begin,
-            duration_seconds=dump.duration_seconds,
-            desaturation=True,
-            obsid=DESATURATION_OBSID + self._desaturations,
-            attitude=dump.attitude,
-        )
-        self._desaturations += 1
-        self.activities = sorted([*self.activities, activity], key=lambda a: a.begin)
-        # The dump answers any dump called for while an observation ran.
-        self._dump_pending = False
-
-    def _within_momentum(self, utime: float, ra: float, dec: float, slew: Slew) -> bool:
-        """Whether the observation just selected begins as bounded, given
-        the stored momentum forecast over it from the wheels as they are.
-
-        It does where momentum is not tracked, where the forecast stays
-        under the planning level, and where it reaches the level during
-        the observation but not the capacity: the dump then follows the
-        observation. Where the level is reached before the observation
-        collects, the wheels are emptied first. Where the capacity would be
-        reached, a plain observation ends where the level is reached, so
-        the dump follows it and the rest is revisited, unless that leaves
-        too little science, when the wheels are emptied first. A visit is
-        indivisible: the wheels are emptied first where it fits from empty,
-        and it is rejected where it does not. Returns False where the
-        observation does not begin now."""
-        tracker = self._stored_momentum_tracker
-        level = self._dump_level_n_m_s()
-        capacity = (
-            self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_n_m_s
-        )
-        ppt = self.ppt
-        assert ppt is not None
-        if tracker is None or level is None or capacity is None:
-            return True
-        slew_end = float(slew.slewstart) + float(slew.slewtime)
-        if self._sequence is not None:
-            # The observation is the visit's first step: the forecast runs
-            # over the whole visit, which is taken whole or not at all.
-            end, attitude_at = self._visit_forecast(ppt, slew)
-        else:
-            end = float(ppt.end)
-            attitude_at = self._observation_attitude(slew, [])
-
-        # The tracker holds the momentum at its last sample, a step ago.
-        begin = self._momentum_forecast_begin(utime)
-        times, norms, _, _ = self._forecast_momentum(
-            begin,
-            end,
-            attitude_at,
-            start_eci_n_m_s=tracker.momentum_eci_n_m_s,
-            slew=slew,
-        )
-        if len(norms) == 0 or norms.max() < level:
-            return True
-        visit = self._sequence is not None
-        name = (
-            f"the visit of {self._sequence.parent.obsid}"
-            if self._sequence is not None
-            else f"observation {ppt.obsid}"
-        )
-        at_level = float(times[int(np.argmax(norms >= level))])
-        collects = (
-            float(ppt.collection_begin)
-            if ppt.collection_begin is not None
-            else slew_end
-        )
-        if at_level <= collects:
-            reason = (
-                f"Stored momentum {norms[0]:.3f} N m s reaches the planning level "
-                f"{level:.3f} before {name} collects: thruster dump first"
-            )
-        elif norms.max() < capacity:
-            return True
-        elif not visit:
-            # The observation ends where the level is reached, with its minimum
-            # snapshot collected: past the level, within the capacity, where
-            # the level comes first. Too little within the capacity: from
-            # empty wheels if that gives the minimum, else not at all.
-            timing = self._ppt_timing(ppt)
-            was_end = ppt.end
-            floor_cut = (
-                utime + floor((at_level - utime) / self.step_size) * self.step_size
-            )
-            ppt.end = floor_cut
-            ppt.set_collection_window(timing)
-            if ppt.exposure < snapshot_min_seconds(ppt):
-                assert ppt.collection_begin is not None
-                least = ppt.collection_begin + snapshot_min_seconds(ppt)
-                least += timing.post_collection_seconds
-                ppt.end = (
-                    utime + ceil((least - utime) / self.step_size) * self.step_size
-                )
-                ppt.set_collection_window(timing)
-            cut = float(ppt.end)
-            within = cut <= was_end and bool(norms[times <= cut].max() < capacity)
-            if within:
-                self.log.log_event(
-                    utime=utime,
-                    event_type="MOMENTUM",
-                    description=(
-                        f"Observation {ppt.obsid} ends at {unixtime2date(cut)}, "
-                        + (
-                            "where the stored momentum reaches the planning level"
-                            if cut == floor_cut
-                            else "with its minimum snapshot, past the planning level"
-                        )
-                        + "; the thruster dump follows it"
-                    ),
-                    obsid=ppt.obsid,
-                    acs_mode=self.acs.acsmode,
-                )
-                return True
-            ppt.end = was_end
-            ppt.set_collection_window(timing)
-            from_empty = self._forecast_momentum(
-                begin, cut, attitude_at, start_eci_n_m_s=None, slew=slew
-            ).norms
-            if cut > was_end or (len(from_empty) and from_empty.max() >= capacity):
-                self.log.log_event(
-                    utime=utime,
-                    event_type="MOMENTUM",
-                    description=(
-                        f"Observation {ppt.obsid} held out: its minimum snapshot "
-                        f"stores more than the {capacity} N m s capacity from empty "
-                        "wheels now"
-                    ),
-                    obsid=ppt.obsid,
-                    acs_mode=self.acs.acsmode,
-                )
-                # Held out of this selection: the torque varies around the
-                # orbit, so the minimum may fit later.
-                self._retry_fetch_without_current_ppt(utime, ra, dec)
-                return False
-            reason = (
-                f"Stored momentum would reach the {capacity} N m s capacity before "
-                f"{name} collects its minimum snapshot: thruster dump first"
-            )
-        else:
-            from_empty = self._forecast_momentum(
-                begin, end, attitude_at, start_eci_n_m_s=None, slew=slew
-            ).norms
-            if len(from_empty) and from_empty.max() >= capacity:
-                assert self._sequence is not None
-                parent = self._request_of(self._sequence.parent)
-                self.log.log_event(
-                    utime=utime,
-                    event_type="MOMENTUM",
-                    description=(
-                        f"Visit of {parent.obsid} rejected: its loading of "
-                        f"{from_empty.max():.3f} N m s from empty wheels exceeds "
-                        f"the {capacity} N m s capacity"
-                    ),
-                    obsid=parent.obsid,
-                    acs_mode=self.acs.acsmode,
-                )
-                parent.done = True
-                self._retry_fetch_without_current_ppt(utime, ra, dec)
-                return False
-            reason = (
-                f"Stored momentum would reach the {capacity} N m s capacity during "
-                f"{name}: thruster dump first"
-            )
-        self.log.log_event(
-            utime=utime,
-            event_type="MOMENTUM",
-            description=reason,
-            obsid=ppt.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-        self._sequence = None
-        self.ppt = None
-        self._ppt_unavailable = True
-        # Activities are managed before the fetch at each step: due at the next.
-        self._add_dump(utime + self.step_size)
-        return False
-
-    def _momentum_forecast_begin(self, utime: float) -> float:
-        """Where a forecast from the wheels as they are starts: the tracker's
-        last sample, a step ago, or now before the first."""
-        previous = getattr(self, "_momentum_previous", None)
-        return min(utime, previous.utime) if previous is not None else utime
-
-    def _cap_slew_momentum(
-        self, utime: float, ra: float, dec: float, slew: Slew
-    ) -> bool:
-        """Where the momentum of slews counts against the capacity, fly the
-        slew into the observation just selected at the first configured
-        rate fraction at which what the wheels hold, the stored momentum
-        less the body's own, stays within the capacity over the slew, from
-        the wheels as they are; a fraction the entry carries already is
-        the first tried. Returns False where no fraction fits and the
-        observation does not begin now: the wheels are emptied first where
-        the slowest fits from empty, and the observation is held out and
-        marked done where it does not, since a slew's momentum does not
-        vary with the orbit."""
-        tracker = self._stored_momentum_tracker
-        momentum_config = self.config.spacecraft_bus.attitude_control.stored_momentum
-        capacity = momentum_config.capacity_n_m_s
-        if (
-            tracker is None
-            or capacity is None
-            or not momentum_config.slew_momentum_enabled
-        ):
-            return True
-        ppt = self.ppt
-        assert ppt is not None
-        begin = self._momentum_forecast_begin(utime)
-        attitude_at = self._observation_attitude(slew, [])
-        fractions = momentum_config.slew_rate_fractions
-        first = (
-            fractions.index(slew.rate_fraction)
-            if slew.rate_fraction in fractions
-            else 0
-        )
-        for fraction in fractions[first:]:
-            slew.rate_fraction = fraction
-            slew.calc_slewtime()
-            demands = self._forecast_momentum(
-                begin,
-                float(slew.slewend),
-                attitude_at,
-                start_eci_n_m_s=tracker.momentum_eci_n_m_s,
-                slew=slew,
-            ).demands
-            if len(demands) == 0 or demands.max() < capacity:
-                if fraction != fractions[first]:
-                    self.log.log_event(
-                        utime=utime,
-                        event_type="MOMENTUM",
-                        description=(
-                            f"Slew to {ppt.obsid} flown at {fraction:g} of the slew "
-                            f"rate: the wheels hold {demands.max():.3f} N m s over it "
-                            f"within the {capacity} N m s capacity, more than that "
-                            "at full rate"
-                        ),
-                        obsid=ppt.obsid,
-                        acs_mode=self.acs.acsmode,
-                    )
-                return True
-        name = (
-            f"the visit of {self._sequence.parent.obsid}"
-            if self._sequence is not None
-            else f"observation {ppt.obsid}"
-        )
-        from_empty = self._forecast_momentum(
-            begin, float(slew.slewend), attitude_at, start_eci_n_m_s=None, slew=slew
-        ).demands
-        if len(from_empty) and from_empty.max() >= capacity:
-            self.log.log_event(
-                utime=utime,
-                event_type="MOMENTUM",
-                description=(
-                    f"{name[0].upper()}{name[1:]} held out: its slew's momentum of "
-                    f"{from_empty.max():.3f} N m s at {fractions[-1]:g} of the slew "
-                    f"rate exceeds the {capacity} N m s capacity from empty wheels"
-                ),
-                obsid=ppt.obsid,
-                acs_mode=self.acs.acsmode,
-            )
-            (self._sequence.parent if self._sequence is not None else ppt).done = True
-            self._retry_fetch_without_current_ppt(utime, ra, dec)
-            return False
-        if momentum_config.thruster_dump is None:
-            self.log.log_event(
-                utime=utime,
-                event_type="MOMENTUM",
-                description=(
-                    f"Stored momentum leaves the slew to {name} no room within the "
-                    f"{capacity} N m s capacity at {fractions[-1]:g} of the slew "
-                    "rate; no thrusters to empty the wheels"
-                ),
-                obsid=ppt.obsid,
-                acs_mode=self.acs.acsmode,
-            )
-            self._retry_fetch_without_current_ppt(utime, ra, dec)
-            return False
-        self.log.log_event(
-            utime=utime,
-            event_type="MOMENTUM",
-            description=(
-                f"Stored momentum leaves the slew to {name} no room within the "
-                f"{capacity} N m s capacity at {fractions[-1]:g} of the slew rate: "
-                "thruster dump first"
-            ),
-            obsid=ppt.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-        self._sequence = None
-        self.ppt = None
-        self._ppt_unavailable = True
-        self._add_dump(utime + self.step_size)
-        return False
-
-    @staticmethod
-    def _observation_attitude(
-        slew: Slew, held: Sequence[tuple[float, tuple[float, float, float]]]
-    ) -> Callable[[float], tuple[float, float, float]]:
-        """The attitude through an observation reached by ``slew``: the
-        slew's start attitude before it, its path along it, and the
-        attitude it ends at after, until each of ``held`` begins, in order,
-        when that attitude is held."""
-        slew_end = float(slew.slewstart) + float(slew.slewtime)
-        ends_at = (float(slew.endra), float(slew.enddec), float(slew.endroll))
-
-        def attitude_at(at: float) -> tuple[float, float, float]:
-            if at < float(slew.slewstart):
-                return (
-                    float(slew.startra),
-                    float(slew.startdec),
-                    float(slew.startroll),
-                )
-            if at < slew_end:
-                sampled = slew.attitude(at)
-                return (float(sampled[0]), float(sampled[1]), float(sampled[2]))
-            attitude = ends_at
-            for begins, holds in held:
-                if at < begins:
-                    break
-                attitude = holds
-            return attitude
-
-        return attitude_at
-
-    def _visit_forecast(
-        self, ppt: Pointing, slew: Slew
-    ) -> tuple[float, Callable[[float], tuple[float, float, float]]]:
-        """The visit the observation just selected begins, for the momentum
-        forecast at selection: when it ends and the attitude through it.
-        Each step is held at its own pointing from when it begins, after the
-        steps before it and the slews between them, with the attitude held
-        through those slews; a step's roll is the roll the first step's slew
-        ends at with the step's own offset, since a step elsewhere finds its
-        power-optimal roll only when it is reached. The visit ends with the
-        last step's cleanup."""
-        run = self._sequence
-        assert run is not None
-        parent = run.parent
-        sequence = run.sequence
-        base_ra, base_dec = parent.visit_base_pointing
-        timing = self._timing_for(parent)
-        acs = self.config.spacecraft_bus.attitude_control
-        starts = sequence.step_starts(acs, timing, base_ra, base_dec)
-        collects = (
-            float(ppt.collection_begin)
-            if ppt.collection_begin is not None
-            else float(slew.slewstart) + float(slew.slewtime)
-        )
-        first_offset = sequence.steps[0].roll_offset_deg or 0.0
-        held: list[tuple[float, tuple[float, float, float]]] = []
-        for index, (start, step) in enumerate(zip(starts, sequence.steps, strict=True)):
-            step_ra, step_dec = sequence.pointing_of(index, base_ra, base_dec)
-            roll = (
-                float(slew.endroll) + (step.roll_offset_deg or 0.0) - first_offset
-            ) % 360.0
-            held.append((collects + start, (step_ra, step_dec, roll)))
-        end = (
-            collects
-            + starts[-1]
-            + sequence.steps[-1].duration_seconds
-            + timing.post_collection_seconds
-        )
-        return end, self._observation_attitude(slew, held)
-
-    def _dump_begin(self, utime: float) -> float:
-        """When a dump called for at ``utime`` begins: now, unless the
-        observation under way is collecting or in its cleanup. Collection
-        already executed cannot be relabelled as cleanup, so the dump then
-        begins at the first step by which the observation's cleanup and
-        handoff budget is paid, and the observation's collection stops a
-        budget before it. The planning level leaves the capacity the margin
-        for the wait."""
-        ppt = self.ppt
-        if (
-            ppt is None
-            or ppt is self.charging_ppt
-            or ppt.collection_begin is None
-            or ppt.collection_end is None
-            or utime >= ppt.end
-        ):
-            return utime
-        post = self._ppt_timing(ppt).post_collection_seconds
-        if post <= 0.0:
-            return utime
-        stop = max(utime, ppt.collection_begin)
-        cleanup_end = min(ppt.end, stop + post)
-        begin = utime + ceil((cleanup_end - utime) / self.step_size) * self.step_size
-        self._reserve_cleanup(
-            begin - post,
-            decision_time=utime,
-            event_type="MOMENTUM",
-            before="thruster dump",
-            waiting="the dump",
-        )
-        return begin
-
-    def _slew_under_way(self, utime: float) -> bool:
-        """Whether the ACS is flying a slew at ``utime``."""
-        slew = self.acs.last_slew
-        return slew is not None and slew.is_slewing(utime)
-
-    def _begin_activity(
-        self,
-        activity: ScheduledActivity,
-        utime: float,
-        attitude: tuple[float, float, float],
-    ) -> None:
-        if self.ppt is not None:
-            if self.ppt == self.charging_ppt:
-                self._terminate_charging_ppt(utime)
-            else:
-                self._terminate_ppt(
-                    utime,
-                    reason=f"Scheduled activity {activity.name} begins, ending observation",
-                    interrupted=True,
-                )
-        self.acs.end_science_observation(utime)
-        self._active_activity = activity
-        assert activity.obsid is not None
-        self._started_activity_ids.add(activity.obsid)
-        self._activity_started = utime
-        self._activity_attitude = attitude
-        # Delayed by a slew, an observation or the activity that was under
-        # way at its start, the activity keeps its length from when it begins.
-        delayed = (
-            self._activity_waiting is activity or activity.begin < self._activity_end
-        )
-        self._activity_waiting = None
-        assumed_start = activity.hold_start_for_run(self.ustart)
-        resumed = utime == self.ustart and assumed_start < self.ustart
-        if resumed:
-            self._activity_hold_begin = assumed_start
-        elif delayed or activity.begin < self.ustart:
-            self._activity_hold_begin = utime
-        else:
-            self._activity_hold_begin = activity.begin
-        self._activity_slew = None
-        if activity.attitude.kind != "inherited":
-            ctx = self._activity_model()
-            ingress = self._activity_ingress(activity, utime)
-            fixed = (
-                float(ingress.endra),
-                float(ingress.enddec),
-                float(ingress.endroll),
-            )
-            arrival = ctx.ceil_step(float(ingress.slewend))
-            hold_begin = max(self._activity_hold_begin, arrival)
-            if (
-                (activity.fixed and hold_begin > activity.begin)
-                or (activity.slides and hold_begin > activity.latest_start)
-                or (resumed and arrival > utime)
-            ):
-                raise ActivitySchedulingError(
-                    activity,
-                    "its requested attitude cannot be reached in its start window",
-                )
-            mode = activity.hold_mode
-            end = min(hold_begin + activity.duration_seconds, self.uend)
-            if (
-                ctx.first_slew_violation(ingress, ACSMode.SLEWING) is not None
-                or ctx.first_hold_violation(
-                    fixed, ingress.slewend, hold_begin, ACSMode.IDLE
-                )
-                is not None
-                or ctx.first_hold_violation(fixed, hold_begin, end, mode) is not None
-            ):
-                raise ActivitySchedulingError(
-                    activity, "its ingress or full hold violates attitude constraints"
-                )
-            if not resumed:
-                self._activity_hold_begin = hold_begin
-            self._activity_attitude = fixed
-            self._activity_slew = ingress
-            if ingress.slewtime > 0:
-                self.acs.enqueue_command(
-                    ACSCommand(
-                        command_type=ACSCommandType.SLEW_TO_TARGET,
-                        execution_time=float(ingress.slewstart),
-                        slew=ingress,
-                    )
-                )
-        self._activity_end = self._activity_hold_begin + activity.duration_seconds
-        if activity.safe_hold and utime >= self._activity_hold_begin:
-            self.acs.begin_safe_hold()
-        if activity.desaturation and utime >= self._activity_hold_begin:
-            self.acs.begin_desaturation()
-        if not resumed:
-            self._add_activity_data(float(activity.data_gb), activity)
-        description = (
-            f"Scheduled activity {activity.name} {'resumes' if resumed else 'begins'}"
-        )
-        if delayed and not resumed:
-            description += f", {utime - activity.begin:.0f}s after its start"
-        self.log.log_event(
-            utime=utime,
-            event_type="ACTIVITY",
-            description=description,
-            obsid=activity.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-
-    def _end_activity(self, utime: float) -> None:
-        activity = self._active_activity
-        assert activity is not None
-        entry = activity.plan_entry(
-            self.config, self._activity_attitude, begin=self._activity_started
-        )
-        entry.end = min(utime, self._activity_end)
-        entry.activity_hold_begin = self._activity_hold_begin
-        entry.activity_hold_end = self._activity_end
-        if self._activity_slew is not None:
-            self._apply_slew_metadata(entry, self._activity_slew)
-            entry.begin = self._activity_started
-            entry.slewtime = int(
-                ceil(float(self._activity_slew.slewend) - self._activity_started)
-            )
-            entry.activity_requires_stationary = True
-        if self._activity_hold_begin < self._activity_started:
-            entry.fixed_data_gb = 0.0
-        # Recorded when it ends, after any contact that began inside it: the
-        # plan is kept in order of beginning.
-        entries = self.plan.entries
-        index = len(entries)
-        while index > 0 and float(entries[index - 1].begin) > float(entry.begin):
-            index -= 1
-        entries.insert(index, entry)
-        self.log.log_event(
-            utime=utime,
-            event_type="ACTIVITY",
-            description=(
-                f"Scheduled activity {activity.name} "
-                f"{'ends' if entry.activity_finishes else 'stops before completion'}"
-            ),
-            obsid=activity.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-        self._active_activity = None
-        if activity.safe_hold:
-            self.acs.end_safe_hold()
-        if activity.desaturation:
-            self.acs.end_desaturation()
-            if entry.activity_finishes:
-                self._unload_stored_momentum(utime, activity.obsid)
-                # The wheels are empty: nothing called for before the dump stands.
-                self._dump_pending = False
-
-    def _ppt_deadline(self, target: Pointing | None = None) -> float | None:
-        """The latest time the observation may begin collecting: its visit
-        window's deadline for a visit, else the target's deadline."""
-        ppt = self.ppt if target is None else target
-        if ppt is None:
-            return None
-        current = getattr(ppt, "current_deadline", None)
-        if isinstance(current, (int, float)):
-            return float(current)
-        deadline = getattr(ppt, "deadline", None)
-        return float(deadline) if isinstance(deadline, (int, float)) else None
-
-    def _next_activity_begin(
-        self, after: float, *, protected_visit: bool = False
-    ) -> float | None:
-        """When the next scheduled activity begins after ``after``: its
-        latest start where it may slide, since an observation may run until
-        then."""
-        return next(
-            (
-                a.latest_start
-                for a in self._unstarted_activities()
-                if a.latest_start > after
-                and not (
-                    protected_visit
-                    and a.desaturation
-                    and a.attitude.fixed_pointing is not None
-                )
-            ),
-            None,
-        )
-
-    def _activity_pending(self, utime: float) -> ScheduledActivity | None:
-        """An activity due now that has not begun: one that slides is
-        waiting for the observation under way, and nothing starts before it."""
-        return next(
-            (
-                a
-                for a in self._unstarted_activities()
-                if a.begin <= utime < a.latest_start
-            ),
-            None,
-        )
-
-    # ── Sequence visits ───────────────────────────────────────────────────
-
-    def _ppt_timing(self, ppt: PlanEntry) -> ObservationTiming:
-        """The budgets the observation pays: a step's own within a visit."""
-        timing = getattr(ppt, "step_timing", None)
-        if isinstance(timing, ObservationTiming):
-            return timing
-        return self._timing_for(ppt)
-
-    def _begin_sequence(self, parent: Pointing, utime: float) -> Pointing:
-        """Start a visit of ``parent``: its first step is the observation,
-        admitted as any other; the visit's beginning is logged once it is."""
-        self._sequence = _SequenceRun(parent=parent, index=0, begun=utime)
-        return parent.step_pointing(0)
-
-    def _advance_sequence(self, utime: float) -> None:
-        """The current step's time is up: go on to the next, or finish the visit."""
-        run = self._sequence
-        assert run is not None and self.ppt is not None
-        step = run.sequence.steps[run.index]
-        complete = self.ppt.collected_seconds >= step.duration_seconds - self.step_size
-        run.advancing = True
-        try:
-            self._terminate_ppt(
-                utime,
-                reason=(
-                    f"Step {step.name} complete"
-                    if complete
-                    else f"Step {step.name} cut short, ending visit"
-                ),
-            )
-        finally:
-            run.advancing = False
-        if not complete:
-            self._cut_sequence(utime)
-            return
-        if run.index + 1 < len(run.sequence.steps):
-            run.index += 1
-            self._start_sequence_step(utime)
-            return
-        parent = run.parent
-        self._sequence = None
-        if (
-            parent.exptime is not None
-            and parent.exptime < run.sequence.science_seconds - 1e-6
-        ):
-            # Not enough exposure left for another whole visit.
-            parent.done = True
-        self.log.log_event(
-            utime=utime,
-            event_type="OBSERVATION",
-            description=f"Sequence visit of {parent.name} complete",
-            obsid=parent.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-
-    def _cut_sequence(self, utime: float) -> None:
-        """End the visit under way short: the target is revisited for the rest."""
-        run = self._sequence
-        if run is None:
-            return
-        self._sequence = None
-        run.parent.record_interruption(utime)
-        self.log.log_event(
-            utime=utime,
-            event_type="OBSERVATION",
-            description=f"Sequence visit of {run.parent.name} cut short",
-            obsid=run.parent.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-
-    def _start_sequence_step(self, utime: float) -> None:
-        """Observe the visit's next step straight after the last: slew to it
-        where it points elsewhere, with no setup unless the step asks, and
-        cleanup only after the last step. A step that cannot be observed
-        (not visible, constrained, or over a pass) cuts the visit."""
-        run = self._sequence
-        assert run is not None
-        step = run.sequence.steps[run.index]
-        ppt = run.parent.step_pointing(run.index)
-        timing = self._ppt_timing(ppt)
-        slew = self._new_ppt_slew(ppt, utime)
-        execution_time = self._ppt_slew_execution_time(utime)
-        execution_time = (
-            utime + ceil((execution_time - utime) / self.step_size) * self.step_size
-        )
-        # A step at the pointing of the step before keeps the power-optimal
-        # roll found there, as the planners do: its own roll offset is then a
-        # roll-only slew, and the same offset leaves the attitude where it
-        # is. A step elsewhere finds the optimum afresh.
-        parent = run.parent
-        same_pointing = run.index > 0 and run.sequence.pointing_of(
-            run.index, parent.ra, parent.dec
-        ) == run.sequence.pointing_of(run.index - 1, parent.ra, parent.dec)
-        if run.optimum is None or not same_pointing:
-            run.optimum = self._power_optimal_roll(ppt, execution_time)
-        self._complete_ppt_slew(slew, ppt, utime, execution_time, optimum=run.optimum)
-        slew_end = execution_time + slew.slewtime
-        end = slew_end + timing.total_seconds + step.duration_seconds
-        # The checks below read the observation under way.
-        self.ppt = ppt
-        reason: str | None = None
-        if end > self.uend:
-            reason = "the run ends first"
-        elif not ppt.visible(slew_end, end):
-            reason = "the step's pointing is not visible throughout"
-        elif self._slew_attitude_constraint_violation(slew, ACSMode.SLEWING):
-            reason = "the slew path is constrained"
-        elif self._check_locked_roll_window(
-            slew_end, end, (slew.endra, slew.enddec, slew.endroll)
-        ):
-            reason = "the step's attitude is constrained"
-        elif self._pass_within(execution_time, slew_end, end):
-            reason = "a ground pass falls in the step"
-        if reason is not None:
-            self.ppt = None
-            self.log.log_event(
-                utime=utime,
-                event_type="OBSERVATION",
-                description=f"Step {step.name} of {run.parent.name} not observed: {reason}",
-                obsid=run.parent.obsid,
-                acs_mode=self.acs.acsmode,
-            )
-            self._cut_sequence(utime)
-            return
-        self._apply_slew_metadata(ppt, slew, update_end=True)
-        ppt.end = end
-        ppt.set_collection_window(timing)
-        self.acs.slew_dists.append(slew.slewdist)
-        self.log.log_event(
-            utime=utime,
-            event_type="QUEUE",
-            description=f"Next step: {ppt}",
-            obsid=ppt.obsid,
-            acs_mode=self.acs.acsmode,
-        )
-        self.acs.enqueue_command(
-            ACSCommand(
-                command_type=ACSCommandType.SLEW_TO_TARGET,
-                execution_time=slew.slewstart,
-                slew=slew,
-            )
-        )
-        self._ppt_unavailable = False
-
-    def _pass_within(self, execution_time: float, slew_end: float, end: float) -> bool:
-        """Whether a ground pass is under way at the slew's start or end, or
-        begins before ``end``."""
-        passes = self.acs.passrequests
-        if passes.current_pass(execution_time) is not None:
-            return True
-        if passes.current_pass(slew_end) is not None:
-            return True
-        upcoming = passes.next_pass(slew_end)
-        return upcoming is not None and float(upcoming.begin) < end
-
     def _handle_data_management(self, utime: float, mode: ACSMode) -> None:
         """Handle data generation during observations and downlink during passes."""
         collection_start, collection_stop = self._collection_interval_for_step(
@@ -2138,21 +1080,7 @@ class QueueDITL(DITLMixin, DITLStats):
         if collection_seconds > 0 and self.ppt is not None:
             # Credit the visit at the end of what was collected, not the tick
             # start, so cadence scoring sees how recently the target was observed.
-            visit = self.ppt.visit
-            self.ppt.record_collection(
-                collection_stop, collection_seconds, visit=visit, step=self.step_size
-            )
-            if self._sequence is not None and self.ppt.step is not None:
-                parent = self._sequence.parent
-                if self.ppt.calibration:
-                    parent.record_calibration(collection_stop, collection_seconds)
-                else:
-                    parent.record_collection(
-                        collection_stop,
-                        collection_seconds,
-                        visit=visit,
-                        step=self.step_size,
-                    )
+            self.ppt.record_collection(collection_stop, collection_seconds)
         # Use the mixin method to process data generation and downlink
         data_generated, data_downlinked = self._process_data_management(
             utime, mode, self.step_size, collection_seconds=collection_seconds
@@ -2185,9 +1113,9 @@ class QueueDITL(DITLMixin, DITLStats):
         has not. This lets us stop collection before charging without delaying
         the charge command or retroactively subtracting generated data.
         """
+        timing = self.config.payload.observation_timing
         if self.ppt is None or self.ppt.collection_end is None:
             return
-        timing = self._ppt_timing(self.ppt)
         deadline = self._next_charge_science_deadline(utime + self.step_size)
         if deadline is None or deadline >= self.ppt.end:
             return
@@ -2266,7 +1194,7 @@ class QueueDITL(DITLMixin, DITLStats):
         collection_time = self._science_collection_time(entry)
         if collection_time is None:
             return False
-        return collection_time < max(0.0, snapshot_min_seconds(entry))
+        return collection_time < max(0.0, float(entry.ss_min))
 
     def _entry_obstype(self, entry: PlanEntry) -> ObsType | None:
         """Return the entry's obstype as an ObsType, or None if it cannot be coerced."""
@@ -2382,12 +1310,6 @@ class QueueDITL(DITLMixin, DITLStats):
         """Return plan/ACS mismatches over exported science and contact intervals."""
         return self._plan_validator().validate()
 
-    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
-        """The slews of the executed plan that took longer than their
-        requirement class allows (``attitude_control.slew_requirements``);
-        empty without a table. A report, not a fault: the run completes."""
-        return self._plan_validator().slew_requirement_mismatches()
-
     def _assert_plan_matches_execution(self) -> None:
         """Raise if the exported plan doesn't match executed telemetry, logging the first mismatch."""
         mismatches = self.validate_plan_matches_execution()
@@ -2409,14 +1331,10 @@ class QueueDITL(DITLMixin, DITLStats):
         )
         raise PlanExecutionMismatchError(message)
 
-    def _close_last_plan_entry(
-        self, end_time: float, *, interrupted: bool = False
-    ) -> None:
+    def _close_last_plan_entry(self, end_time: float) -> None:
         """Close the last plan entry in the timeline by setting its end time.
         If it's a science observation that didn't meet the minimum snapshot
-        requirement, log it and remove it from the plan; unless it was
-        ``interrupted``, since its science counts and its target is revisited
-        for the rest."""
+        requirement, log it and remove it from the plan."""
         if len(self.plan) == 0:
             return
         entry = self.plan[-1]
@@ -2440,7 +1358,8 @@ class QueueDITL(DITLMixin, DITLStats):
             assert entry.collection_end is not None
             cutoff = max(
                 entry.collection_begin,
-                end_time - self._ppt_timing(entry).post_collection_seconds,
+                end_time
+                - self.config.payload.observation_timing.post_collection_seconds,
             )
             # Future collection can be cancelled, but already executed collection
             # cannot be relabelled as cleanup to make an interruption fit.
@@ -2455,10 +1374,7 @@ class QueueDITL(DITLMixin, DITLStats):
                 entry.collection_begin, min(entry.collection_end, cutoff, end_time)
             )
         self.plan[-1].end = end_time
-        # A cut entry stays only if it collected something; one cut during
-        # its slew or setup has no science to keep.
-        kept = interrupted and (self._science_collection_time(self.plan[-1]) or 0) > 0
-        if not kept and self._is_short_science_entry(self.plan[-1]):
+        if self._is_short_science_entry(self.plan[-1]):
             entry = self.plan[-1]
             self._dropped_science_windows.append(
                 (float(entry.begin), float(entry.end), int(entry.obsid))
@@ -2470,7 +1386,7 @@ class QueueDITL(DITLMixin, DITLStats):
                 event_type="QUEUE",
                 description=(
                     f"Dropping under-collected science entry {entry.obsid} - "
-                    f"collected {collected:.0f}s of required {snapshot_min_seconds(entry):.0f}s"
+                    f"collected {collected:.0f}s of required {float(entry.ss_min):.0f}s"
                 ),
                 obsid=entry.obsid,
                 acs_mode=self.acs.acsmode,
@@ -2578,7 +1494,7 @@ class QueueDITL(DITLMixin, DITLStats):
             roll_offset_deg = (roll - nominal_roll + 180.0) % 360.0 - 180.0
 
         _q = attitude_to_quat(ra, dec, roll)
-        momentum_sample = self._update_stored_momentum(utime, _pos, _q, index=ei)
+        momentum_sample = self._update_stored_momentum(utime, _pos, _q)
         drive_angles = self._solar_array_drive_telemetry()
         return Housekeeping(
             timestamp=datetime.fromtimestamp(utime, tz=timezone.utc),
@@ -2590,7 +1506,6 @@ class QueueDITL(DITLMixin, DITLStats):
             collection_seconds=self._collection_seconds_for_step(utime, mode),
             panel_illumination=panel_illumination,
             solar_array_drive_angles=drive_angles,
-            instrument_modes=self._instrument_modes_telemetry(mode, utime),
             power_usage=total_power,
             power_bus=bus_power,
             power_payload=payload_power,
@@ -2655,30 +1570,6 @@ class QueueDITL(DITLMixin, DITLStats):
             ),
             actuator_momentum_norm_n_m_s=(
                 momentum_sample.actuator_momentum_norm_n_m_s
-                if momentum_sample is not None
-                else None
-            ),
-            disturbance_torques_body_n_m=(
-                {
-                    name: list(torque)
-                    for name, torque in momentum_sample.torques_body_n_m.items()
-                }
-                if momentum_sample is not None
-                else None
-            ),
-            disturbance_torque_body_n_m=(
-                list(momentum_sample.torque_body_n_m)
-                if momentum_sample is not None
-                else None
-            ),
-            geomagnetic_field_body_t=(
-                list(momentum_sample.geomagnetic_field_body_t)
-                if momentum_sample is not None
-                and momentum_sample.geomagnetic_field_body_t is not None
-                else None
-            ),
-            atmosphere_density_kg_m3=(
-                momentum_sample.atmosphere_density_kg_m3
                 if momentum_sample is not None
                 else None
             ),
@@ -2785,9 +1676,6 @@ class QueueDITL(DITLMixin, DITLStats):
         entry.slewtime = int(round(slew.slewtime))
         entry.slew_rate_fraction = slew.rate_fraction
         entry.slewdist = float(slew.slewdist)
-        entry.great_circle_deg = float(slew.great_circle_deg)
-        entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
-        entry.settle_seconds = float(slew.settle_seconds or 0.0)
         entry.slewpath = slew.slewpath
         if entry.uses_mounted_attitude():
             entry.spacecraft_attitude = (
@@ -2804,7 +1692,7 @@ class QueueDITL(DITLMixin, DITLStats):
             if entry.collection_end is None:
                 entry.end = int(slew.slewstart + slew.slewtime + entry.ss_max)
         if entry.config is not None:
-            timing = entry.step_timing or entry.observation_timing
+            timing = entry.config.payload.observation_timing
             entry.set_collection_window(timing)
             if slew._momentum_collection_begin is not None:
                 assert (
@@ -2856,7 +1744,7 @@ class QueueDITL(DITLMixin, DITLStats):
         if entry_begin <= slew_start < entry_end:
             return True
 
-        return abs(entry_begin - slew_start) <= TIME_TOLERANCE_S
+        return abs(entry_begin - slew_start) <= 1e-6
 
     def _sync_gsp_slew_metadata(self, slew: Slew) -> None:
         """Update the GSP plan entry's timing/roll from its associated executed slew."""
@@ -2865,9 +1753,6 @@ class QueueDITL(DITLMixin, DITLStats):
             entry.begin = int(slew.slewstart)
             entry.slewtime = int(round(slew.slewtime))
             entry.slewdist = float(slew.slewdist)
-            entry.great_circle_deg = float(slew.great_circle_deg)
-            entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
-            entry.settle_seconds = float(slew.settle_seconds or 0.0)
             entry.roll = float(slew.endroll)
 
     def _sync_slew_metadata(self, slew: Slew) -> None:
@@ -2950,9 +1835,7 @@ class QueueDITL(DITLMixin, DITLStats):
         """Handle science mode operations: charging, observations, and target acquisition."""
         if mode == ACSMode.SAFE:
             if self.ppt is not None:
-                self._terminate_ppt(
-                    utime, "Observation interrupted by safehold", interrupted=True
-                )
+                self._terminate_ppt(utime, "Observation interrupted by safehold")
             return
         # Finish protective motion before considering discretionary preemption.
         if (
@@ -2974,12 +1857,7 @@ class QueueDITL(DITLMixin, DITLStats):
         self._manage_ppt_lifecycle(utime, mode)
 
         # Fetch new PPT if none is active
-        if (
-            self.ppt is None
-            and self._active_activity is None
-            and not self._dump_pending
-            and self._activity_pending(utime) is None
-        ):
+        if self.ppt is None:
             if self._gsp_activity_in_progress(utime):
                 self._ppt_unavailable = None
                 return
@@ -3108,7 +1986,6 @@ class QueueDITL(DITLMixin, DITLStats):
                 self.ephem,
                 self.config.solar_panel,
                 self.constraint,
-                science_attitude=False,
                 drive_state=self.acs.solar_array_drive_state,
             )
             for roll in self.acs._idle_safe_roll_candidates(preferred_roll):
@@ -3270,12 +2147,6 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def _schedule_groundstation_passes(self) -> None:
         """Populate groundstation passes for the simulation window."""
-        if self.coverage is not None:
-            # PassTimes already booked these contacts before execution.
-            # ACS pass requests contain only spacecraft tracking activities.
-            self.passes = self.coverage.pass_times
-            return
-        self.passes = self.acs.passrequests
         if (
             self.acs.passrequests.passes is None
             or len(self.acs.passrequests.passes) == 0
@@ -3342,8 +2213,6 @@ class QueueDITL(DITLMixin, DITLStats):
             return
         if self._next_allocation is not None and utime < self._next_allocation:
             return
-        if self.coverage is not None:
-            self.allocator.ctx.coverage = self.coverage
         allocation = self.allocator.allocate(
             self.queue.targets,
             utime,
@@ -3451,9 +2320,6 @@ class QueueDITL(DITLMixin, DITLStats):
         )
         if slew is not None:
             entry.slewdist = float(slew.slewdist)
-            entry.great_circle_deg = float(slew.great_circle_deg)
-            entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
-            entry.settle_seconds = float(slew.settle_seconds or 0.0)
         entry.obsid = gspass.obsid
         entry.obstype = ObsType.GSP
         entry.ss_min = 0
@@ -3520,8 +2386,8 @@ class QueueDITL(DITLMixin, DITLStats):
                 entry.station == station
                 and contact_begin is not None
                 and contact_end is not None
-                and abs(float(contact_begin) - pass_begin) <= TIME_TOLERANCE_S
-                and abs(float(contact_end) - pass_end) <= TIME_TOLERANCE_S
+                and abs(float(contact_begin) - pass_begin) <= 1e-6
+                and abs(float(contact_end) - pass_end) <= 1e-6
             ):
                 return entry
         return None
@@ -3828,16 +2694,11 @@ class QueueDITL(DITLMixin, DITLStats):
                 reason=f"Target {constraint_text} constrained, ending observation",
             )
         elif utime >= self.ppt.end:
-            if self._sequence is not None and self.ppt.step is not None:
-                self._advance_sequence(utime)
-            else:
-                self._terminate_ppt(
-                    utime, reason="Time window elapsed, ending observation"
-                )
+            self._terminate_ppt(utime, reason="Time window elapsed, ending observation")
         elif (
-            self._ppt_deadline() is not None
+            self.ppt.deadline is not None
             and self.ppt.collected_seconds == 0
-            and utime > float(self._ppt_deadline() or 0.0)
+            and utime > self.ppt.deadline
         ):
             # A start deadline is missed if no science has begun by then,
             # whatever delayed it (e.g. an unforeseen SAA entry).
@@ -3901,12 +2762,7 @@ class QueueDITL(DITLMixin, DITLStats):
         return None
 
     def _terminate_ppt(
-        self,
-        utime: float,
-        reason: str,
-        mark_done: bool = False,
-        *,
-        interrupted: bool = False,
+        self, utime: float, reason: str, mark_done: bool = False
     ) -> None:
         """Terminate the current PPT.
 
@@ -3918,10 +2774,6 @@ class QueueDITL(DITLMixin, DITLStats):
             Reason for termination (for logging)
         mark_done : bool
             Whether to mark the PPT as done
-        interrupted : bool
-            Whether the observation is cut short rather than finished: the
-            interruption is recorded on the target, which is revisited for
-            what remains, and the cut entry stays in the plan.
         """
         assert self.ppt is not None
         if (
@@ -3936,52 +2788,20 @@ class QueueDITL(DITLMixin, DITLStats):
             obsid=self.ppt.obsid,
             acs_mode=self.acs.acsmode,
         )
-        if self._sequence is not None and not self._sequence.advancing:
-            self._cut_sequence(utime)
 
         # Update plan timeline with actual end time
         if len(self.plan) > 0:
-            self._close_last_plan_entry(utime, interrupted=interrupted)
+            self._close_last_plan_entry(utime)
 
-        if interrupted:
-            self.ppt.record_interruption(utime)
-            self._log_cut_visit(utime)
         if mark_done:
             self.ppt.done = True
 
         self.ppt = None
-        self.acs.end_science_observation(utime)
+        self.acs.end_science_observation()
         # Do NOT clear last_slew here. The spacecraft is physically still pointing
         # at the science target; clearing last_slew would cause pointing() to call
         # roll optimization and jump the roll on the next tick. Roll stays locked to
         # last_slew.endroll until the next executed slew replaces last_slew.
-
-    def _log_cut_visit(self, utime: float) -> None:
-        """Say what becomes of a visit cut short: taken again while its
-        window is open, else missed."""
-        assert self.ppt is not None
-        request = self._request_of(self.ppt)
-        if not request.visit_windows:
-            return
-        index = request.visit_index_at(utime)
-        if index is None or request.visit_complete(index):
-            return
-        deadline = request.visit_windows[index].deadline
-        self.log.log_event(
-            utime=utime,
-            event_type="OBSERVATION",
-            description=(
-                f"Visit {index + 1} of {request.name} cut short: "
-                + (
-                    f"taken again whole while its window is open, until "
-                    f"{unixtime2date(deadline)}"
-                    if utime <= deadline
-                    else "its window has closed, so it is missed"
-                )
-            ),
-            obsid=request.obsid,
-            acs_mode=self.acs.acsmode,
-        )
 
     def _get_constraint_name(
         self,
@@ -4213,13 +3033,9 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def _science_deadline_inputs(self, current_time: float) -> _ScienceDeadlineInputs:
         """Calculate deadline inputs that are stable during one queue fetch."""
-        openings = getattr(self.queue, "request_openings", None)
-        requests = openings(current_time) if callable(openings) else None
         return _ScienceDeadlineInputs(
             simulation_end=self._simulation_end_deadline(),
             charge_deadline=self._next_charge_science_deadline(current_time),
-            # A test double's queue has no requests.
-            request_openings=requests if isinstance(requests, list) else [],
         )
 
     def _next_science_deadline(
@@ -4232,40 +3048,14 @@ class QueueDITL(DITLMixin, DITLStats):
         deadline_inputs: _ScienceDeadlineInputs | None = None,
     ) -> tuple[float, str]:
         """Determine the next science deadline after the slew ends, which could
-        be the end of the current visibility window, the next pass, the time a
-        request ranked above the target must start, or the end of the
-        simulation."""
+        be the end of the current visibility window, the next pass, or the end
+        of the simulation."""
         if deadline_inputs is None:
             deadline_inputs = self._science_deadline_inputs(current_time)
 
         deadlines: list[tuple[float, str]] = [
             (deadline_inputs.simulation_end, "simulation end")
         ]
-        # The next activity from now, not from the slew's end: a slew that
-        # would cross the activity's start leaves no collection before it, so
-        # the candidate is passed over rather than flown into the block.
-        candidate = target or self.ppt
-        activity_begin = self._next_activity_begin(
-            current_time,
-            protected_visit=self._sequence is not None
-            or getattr(candidate, "sequence", None) is not None,
-        )
-        if activity_begin is not None:
-            deadlines.append((activity_begin, "scheduled activity"))
-
-        if candidate is not None and deadline_inputs.request_openings:
-            # The observation ends when a request ranked above it must start,
-            # or one ranked below it that it can wait for; a sequence visit
-            # under way is not cut for the latter, since a cut visit is void.
-            visit_under_way = target is None and self._sequence is not None
-            cut = self.queue.request_cut(
-                candidate,
-                deadline_inputs.request_openings,
-                deadline_inputs.simulation_end,
-                yield_to_lower=not visit_under_way,
-            )
-            if cut is not None:
-                deadlines.append((cut[0], f"request {cut[1]} must start"))
 
         visibility_end = self._current_ppt_visibility_deadline(slew_end, target=target)
         if visibility_end is not None:
@@ -4309,13 +3099,6 @@ class QueueDITL(DITLMixin, DITLStats):
         """Return when a new slew can execute, waiting for an in-progress slew to finish."""
         if self.acs.last_slew is not None and self.acs.last_slew.is_slewing(utime):
             return self.acs.last_slew.slewstart + self.acs.last_slew.slewtime
-        # A moving target being tracked is braked when its observation ends,
-        # so a slew away from it can start once that brake is over. A test
-        # double's ACS has only its motion's rest time.
-        ready = getattr(self.acs, "handoff_ready_time", None)
-        time = ready(utime) if callable(ready) else None
-        if isinstance(time, (int, float)) and not isinstance(time, bool):
-            return float(time)
         return self.acs.motion_ready_time(utime)
 
     @staticmethod
@@ -4340,10 +3123,6 @@ class QueueDITL(DITLMixin, DITLStats):
         slew.obstype = ObsType.PPT
         slew.obsid = target.obsid
         slew.at = target
-        # The fraction the entry carries, if any. (A test double has no number.)
-        fraction = getattr(target, "slew_rate_fraction", 1.0)
-        if isinstance(fraction, (int, float)):
-            slew.rate_fraction = float(fraction)
         return slew
 
     def _complete_ppt_slew(
@@ -4354,24 +3133,14 @@ class QueueDITL(DITLMixin, DITLStats):
         execution_time: float,
         *,
         instrument_roll: float | None = None,
-        optimum: float | None = None,
     ) -> None:
-        """Fill in a PPT slew's start attitude, end roll, and computed slew
-        time. ``optimum`` is the power-optimal roll to take as given, for a
-        sequence step holding the roll of the step before."""
+        """Fill in a PPT slew's start attitude, end roll, and computed slew time."""
         slew.slewstart = execution_time
         slew.startra, slew.startdec, slew.startroll = (
             self._expected_slew_start_attitude(utime, execution_time)
         )
-        self._point_moving_target(
-            target,
-            execution_time,
-            (slew.startra, slew.startdec, slew.startroll),
-            limits=slew.motion_limits,
-            instrument_roll=instrument_roll,
-        )
         if instrument_roll is None:
-            instrument_roll = self._ppt_optimum_roll(target, execution_time, optimum)
+            instrument_roll = self._ppt_optimum_roll(target, execution_time)
         slew.endra, slew.enddec, slew.endroll = self._target_body_attitude(
             target, instrument_roll
         )
@@ -4389,39 +3158,7 @@ class QueueDITL(DITLMixin, DITLStats):
             )
         slew.calc_slewtime()
 
-    def _ppt_optimum_roll(
-        self, target: Pointing, execution_time: float, optimum: float | None = None
-    ) -> float:
-        """The roll a target is observed at, at ``execution_time``: the
-        power-optimal roll, cached, or the roll the target asks for (see
-        :meth:`Pointing.requested_roll`); the optimum where an absolute roll
-        is beyond the ACS limit, which :meth:`_roll_allowed` rejects. A given
-        ``optimum`` stands in for the power-optimal roll now."""
-        if optimum is None:
-            optimum = self._power_optimal_roll(target, execution_time)
-        if not isinstance(target, Pointing):
-            # A test double has no roll request.
-            return optimum
-        roll = target.requested_roll(
-            optimum,
-            self.config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg,
-        )
-        return optimum if roll is None else float(roll)
-
-    def _roll_allowed(self, target: Pointing, execution_time: float) -> bool:
-        """Whether the roll ``target`` asks for is within the ACS limit of the
-        power-optimal roll at ``execution_time``; True without a request."""
-        if not isinstance(target, Pointing):
-            return True
-        limit = self.config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg
-        return (
-            target.requested_roll(
-                self._power_optimal_roll(target, execution_time), limit
-            )
-            is not None
-        )
-
-    def _power_optimal_roll(self, target: Pointing, execution_time: float) -> float:
+    def _ppt_optimum_roll(self, target: Pointing, execution_time: float) -> float:
         """Return the optimum roll for a target at the given time, caching the result."""
         telescope = (
             target.science_telescope() if issubclass(type(target), PlanEntry) else None
@@ -4471,9 +3208,6 @@ class QueueDITL(DITLMixin, DITLStats):
         startra, startdec, startroll = self._expected_slew_start_attitude(
             utime, execution_time
         )
-        self._point_moving_target(
-            target, execution_time, (startra, startdec, startroll)
-        )
         endroll = self._ppt_optimum_roll(target, execution_time)
         endra, enddec, body_roll = self._target_body_attitude(target, endroll)
         slewdist, rotation_axis_body = quaternion_attitude_delta(
@@ -4485,16 +3219,8 @@ class QueueDITL(DITLMixin, DITLStats):
             body_roll,
         )
         attitude_control = self.config.spacecraft_bus.attitude_control
-        sun_change = self._selection_sun_vector_change(
-            target,
-            execution_time,
-            (startra, startdec, startroll),
-            (endra, enddec, body_roll),
-        )
         slewtime = scheduled_slew_time(
             attitude_control.slew_time(slewdist, rotation_axis_body)
-            if sun_change is None
-            else attitude_control.slew_time(slewdist, rotation_axis_body, sun_change)
         )
         mounted_telescope = (
             issubclass(type(target), PlanEntry) and target.uses_mounted_attitude()
@@ -4507,51 +3233,6 @@ class QueueDITL(DITLMixin, DITLStats):
             if mounted_telescope
             else None,
         )
-
-    def _selection_sun_vector_change(
-        self,
-        target: Pointing,
-        execution_time: float,
-        start: tuple[float, float, float],
-        end: tuple[float, float, float],
-    ) -> float | None:
-        """How far the slew into a candidate moves the Sun in the body frame,
-        for the thermal settling table; None where ``settle_time`` applies:
-        without a table, or for a category that skips the thermal settle."""
-        attitude_control = self.config.spacecraft_bus.attitude_control
-        table = getattr(attitude_control, "thermal_settling", None)
-        if not isinstance(table, list) or not table:
-            return None
-        if self.config.observation_categories.skips_thermal_settling(int(target.obsid)):
-            return None
-        return sun_vector_change_deg(self.ephem, execution_time, start, end)
-
-    def _point_moving_target(
-        self,
-        target: Pointing,
-        execution_time: float,
-        start: tuple[float, float, float],
-        *,
-        limits: AttitudeControlSystem | None = None,
-        instrument_roll: float | None = None,
-    ) -> None:
-        """Take a moving target's pointing where the slew to it ends: its
-        position at the end of the slew from ``start`` at ``execution_time``,
-        the slew timed to its position at the start and then once more to
-        the position that gives. Nothing for a fixed target."""
-        # A test double's target has no track to speak of.
-        if getattr(target, "moves", False) is not True:
-            return
-        attitude_control = limits or self.config.spacecraft_bus.attitude_control
-        arrival = execution_time
-        for _ in range(2):
-            target.point_at(arrival)
-            endra, enddec, endroll = self._target_body_attitude(target, instrument_roll)
-            distance, axis = quaternion_attitude_delta(*start, endra, enddec, endroll)
-            arrival = execution_time + scheduled_slew_time(
-                attitude_control.slew_time(distance, axis)
-            )
-        target.point_at(arrival)
 
     def _earliest_science_start(self, slew_end: float, ready_time: float) -> float:
         """Return when science collection can begin once the payload is ready.
@@ -4579,17 +3260,6 @@ class QueueDITL(DITLMixin, DITLStats):
         returning the same one"""
         return len(self.queue.targets) > 1
 
-    @staticmethod
-    def _request_of(ppt: Pointing) -> Pointing:
-        """The queue's own target ``ppt`` observes: itself, or the target a
-        visit with a pointing of its own is one visit of."""
-        # A test double's target has no parent.
-        parent = getattr(ppt, "visit_parent", None)
-        while isinstance(parent, Pointing):
-            ppt = parent
-            parent = ppt.visit_parent
-        return ppt
-
     def _retry_fetch_without_current_ppt(
         self, utime: float, ra: float, dec: float
     ) -> None:
@@ -4598,12 +3268,6 @@ class QueueDITL(DITLMixin, DITLStats):
         the current PPT is the only one in the queue, mark PPT as unavailable.
         """
         rejected_ppt = self.ppt
-        if self._sequence is not None and rejected_ppt is not None:
-            # The step stands in for its sequence target: reject that.
-            rejected_ppt = self._sequence.parent
-            self._sequence = None
-        if rejected_ppt is not None:
-            rejected_ppt = self._request_of(rejected_ppt)
         if rejected_ppt is None or not self._can_retry_without_current_ppt():
             self.ppt = None
             self._ppt_unavailable = True
@@ -4643,9 +3307,6 @@ class QueueDITL(DITLMixin, DITLStats):
                 )
                 if self._retry_ppt_fetch_requested:
                     continue
-                if self.ppt is None:
-                    # A sequence whose first step was not admitted never began.
-                    self._sequence = None
                 return slew
         finally:
             temporary_rejections = self._temporary_rejected_ppts or []
@@ -4674,9 +3335,6 @@ class QueueDITL(DITLMixin, DITLStats):
         What the candidate's own slew and science generate beyond the
         waiting rate the queue counts against the room, as it does the
         science.
-        Passes without spacecraft tracking use their usable link spans:
-        there is no ingress slew, housekeeping stays at the waiting rate,
-        and each span downlinks at its mean rate for its length.
         """
         if isinstance(self.config.data_storage, DataStorage):
             rooms = {
@@ -4711,47 +3369,14 @@ class QueueDITL(DITLMixin, DITLStats):
             if isinstance(projected, (int, float))
             else float(config.recorder.current_volume_gb)
         )
-        # Each contact to come: when it begins and ends, the pass whose slew
-        # ACS flies into it (None for a span of coverage) and what it
-        # downlinks for its length.
-        contacts: list[tuple[float, float, Pass | None, float]]
-        if self.coverage is not None:
-            contacts = [
-                (
-                    float(span.begin),
-                    float(span.end),
-                    None,
-                    span.rate_mbps * (span.end - span.begin) / 1000.0,
-                )
-                for span in (
-                    self.coverage.recorder_spans(config, utime, self.uend)
-                    if isinstance(config, RecorderView)
-                    else self.coverage.spans(utime, self.uend)
-                )
-            ]
-        else:
-            passes = sorted(
-                (
-                    p
-                    for p in self.acs.passrequests.passes or []
-                    if utime < float(p.begin) < self.uend
-                ),
-                key=lambda p: float(p.begin),
-            )
-            contacts = [
-                (
-                    float(p.begin),
-                    min(float(p.begin) + float(p.length), self.uend),
-                    p,
-                    contact_downlink_gb(
-                        config,
-                        p.station,
-                        min(float(p.begin) + float(p.length), self.uend)
-                        - float(p.begin),
-                    ),
-                )
-                for p in passes
-            ]
+        passes = sorted(
+            (
+                p
+                for p in self.acs.passrequests.passes or []
+                if utime < float(p.begin) < self.uend
+            ),
+            key=lambda p: float(p.begin),
+        )
 
         def highest(extra: float) -> float:
             """The most the recorder holds from now to the run's end with
@@ -4759,34 +3384,34 @@ class QueueDITL(DITLMixin, DITLStats):
             volume = volume_now + extra
             worst = volume
             cursor = utime
-            for begin, end, gspass, downlink in contacts:
+            for gspass in passes:
+                begin = float(gspass.begin)
+                end = min(begin + float(gspass.length), self.uend)
                 span = whole_steps(begin - cursor, step)
                 volume += config.housekeeping_while_waiting(span)
-                if gspass is not None:
-                    ingress = min(
-                        span,
-                        whole_steps(
-                            self._pass_ingress_seconds(gspass, cursor, ra, dec, roll),
-                            step,
-                        ),
-                    )
-                    # The ingress is an upper bound: a PASS rate below the
-                    # waiting rate is not credited with a saving over it.
-                    volume += max(
-                        0.0,
-                        config.housekeeping_generated(ingress, mode=ACSMode.PASS)
-                        - config.housekeeping_while_waiting(ingress),
-                    )
+                ingress = min(
+                    span,
+                    whole_steps(
+                        self._pass_ingress_seconds(gspass, cursor, ra, dec, roll), step
+                    ),
+                )
+                # The ingress is an upper bound: a PASS rate below the
+                # waiting rate is not credited with a saving over it.
+                volume += max(
+                    0.0,
+                    config.housekeeping_generated(ingress, mode=ACSMode.PASS)
+                    - config.housekeeping_while_waiting(ingress),
+                )
                 worst = max(worst, volume)
                 contact = whole_steps(end - begin, step)
-                during = config.housekeeping_while_waiting(contact)
-                if gspass is not None:
-                    during = max(
-                        during,
-                        config.housekeeping_generated(contact, mode=ACSMode.PASS),
-                    )
-                volume += during
-                volume = max(0.0, volume - downlink)
+                volume += max(
+                    config.housekeeping_while_waiting(contact),
+                    config.housekeeping_generated(contact, mode=ACSMode.PASS),
+                )
+                volume = max(
+                    0.0,
+                    volume - contact_downlink_gb(config, gspass.station, end - begin),
+                )
                 cursor = end
             volume += config.housekeeping_while_waiting(
                 whole_steps(self.uend - cursor, step)
@@ -4878,13 +3503,10 @@ class QueueDITL(DITLMixin, DITLStats):
             target.ss_max,
             target.exptime if target.exptime is not None else target.ss_max,
         )
-        budget_left = self.queue.science_budget_left(target)
-        if isinstance(budget_left, (int, float)):
-            requested = min(requested, float(budget_left))
         limit = getattr(target, "collection_limit", None)
         if isinstance(limit, (int, float)):
             requested = min(requested, float(limit))
-        if requested < snapshot_min_seconds(target):
+        if requested < target.ss_min:
             return None
         # Check if target is visible
         visstart = target.next_vis(utime)
@@ -4974,19 +3596,6 @@ class QueueDITL(DITLMixin, DITLStats):
                     )
                     return None
 
-        if not self._roll_allowed(target, execution_time):
-            self.log.log_event(
-                utime=utime,
-                event_type="QUEUE",
-                description=(
-                    f"Target {target.obsid} skipped - its roll is beyond the "
-                    "ACS limit from the power-optimal roll now"
-                ),
-                obsid=target.obsid,
-                acs_mode=self.acs.acsmode,
-            )
-            return None
-
         return _ObservationRequest(execution_time, requested, recorder_room)
 
     def _validate_ppt_slew(
@@ -5003,16 +3612,15 @@ class QueueDITL(DITLMixin, DITLStats):
         slew_end = slew.slewend
         collection_start = self._earliest_science_start(
             slew_end,
-            slew_end + self._ppt_timing(target).setup_seconds,
+            slew_end + self.config.payload.observation_timing.setup_seconds,
         )
-        deadline = self._ppt_deadline(target)
-        if deadline is not None and collection_start > deadline:
+        if target.deadline is not None and collection_start > target.deadline:
             self.log.log_event(
                 utime=utime,
                 event_type="QUEUE",
                 description=(
                     f"Target {target.obsid} skipped - collection would start "
-                    f"{collection_start - deadline:.0f}s after its deadline"
+                    f"{collection_start - target.deadline:.0f}s after its deadline"
                 ),
                 obsid=target.obsid,
                 acs_mode=self.acs.acsmode,
@@ -5069,12 +3677,12 @@ class QueueDITL(DITLMixin, DITLStats):
             )
             return None
 
-        timing = self._ppt_timing(target)
+        timing = self.config.payload.observation_timing
         deadline, reason = self._next_science_deadline(
             slew_end, current_time=utime, target_roll=slew.endroll, target=target
         )
         available = deadline - collection_start - timing.post_collection_seconds
-        if available < snapshot_min_seconds(target):
+        if available < target.ss_min:
             self.log.log_event(
                 utime=utime,
                 event_type="QUEUE",
@@ -5082,7 +3690,7 @@ class QueueDITL(DITLMixin, DITLStats):
                 acs_mode=self.acs.acsmode,
                 description=(
                     f"Target {target.obsid} rejected - only {available:.0f}s "
-                    f"available before {reason} (need {snapshot_min_seconds(target):.0f}s)"
+                    f"available before {reason} (need {target.ss_min:.0f}s)"
                 ),
             )
             return None
@@ -5104,9 +3712,7 @@ class QueueDITL(DITLMixin, DITLStats):
             deadline = min(deadline, violation_time - self.step_size)
             if (
                 deadline
-                < collection_start
-                + snapshot_min_seconds(target)
-                + timing.post_collection_seconds
+                < collection_start + target.ss_min + timing.post_collection_seconds
             ):
                 self.log.log_event(
                     utime=utime,
@@ -5130,19 +3736,12 @@ class QueueDITL(DITLMixin, DITLStats):
         target.end = min(
             deadline, collection_start + timing.post_collection_seconds + remaining
         )
-        if self.coverage is not None and self._antenna_repoints(target) == "forbidden":
-            # The observation ends before the antenna next moves.
-            cut = self.coverage.next_repoint_cut(collection_start)
-            if cut is not None:
-                target.end = min(target.end, cut[0] + timing.post_collection_seconds)
         target.set_collection_window(timing)
         target.collection_begin = min(target.end, collection_start)
         target.collection_end = max(
             target.collection_begin, target.end - timing.post_collection_seconds
         )
-        if target.collection_end - target.collection_begin < snapshot_min_seconds(
-            target
-        ):
+        if target.collection_end - target.collection_begin < target.ss_min:
             return None
         return _ScienceWindow(deadline, remaining, collection_start)
 
@@ -5227,12 +3826,6 @@ class QueueDITL(DITLMixin, DITLStats):
             roll=self.acs.roll,
             recorder_room_gb=recorder_room,
         )
-        if self.ppt is not None and isinstance(
-            getattr(self.ppt, "sequence", None), ObservationSequence
-        ):
-            # A sequence target is observed step by step: its first step is
-            # the observation admitted now, the rest follow it directly.
-            self.ppt = self._begin_sequence(self.ppt, utime)
 
         if self.ppt is not None:
             request = self._observation_request(self.ppt, utime, recorder_room)
@@ -5263,28 +3856,11 @@ class QueueDITL(DITLMixin, DITLStats):
             else:
                 slew = self._new_ppt_slew(self.ppt, utime)
                 self._complete_ppt_slew(slew, self.ppt, utime, request.start)
-                if not self._cap_slew_momentum(utime, ra, dec, slew):
-                    return None
                 if self._validate_ppt_slew(self.ppt, slew, utime, request) is None:
                     self._retry_fetch_without_current_ppt(utime, ra, dec)
                     return None
-                if not self._within_momentum(utime, ra, dec, slew):
-                    return None
-            if self._sequence is not None:
-                self._sequence.optimum = self._power_optimal_roll(
-                    self.ppt, request.start
-                )
-            if not enqueue_slew:
-                return slew
-            if self._sequence is not None and self._sequence.index == 0:
-                self.log.log_event(
-                    utime=utime,
-                    event_type="OBSERVATION",
-                    description=f"Sequence visit of {self._sequence.parent.name} begins",
-                    obsid=self._sequence.parent.obsid,
-                    acs_mode=self.acs.acsmode,
-                )
-            self._command_ppt_slew(utime, slew)
+            if enqueue_slew:
+                self._command_ppt_slew(utime, slew)
             return slew
         else:
             self.log.log_event(
@@ -5327,7 +3903,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
         # Calculate power consumption by subsystem
         bus_power, payload_power, total_power = self._calculate_power_consumption(
-            mode=mode, in_eclipse=in_eclipse, utime=utime
+            mode=mode, in_eclipse=in_eclipse
         )
         self.power_bus.append(bus_power)
         self.power_payload.append(payload_power)
@@ -5423,7 +3999,7 @@ class QueueDITL(DITLMixin, DITLStats):
         return angular_separation(moon_ra, moon_dec, ra, dec)
 
     def _calculate_power_consumption(
-        self, mode: ACSMode, in_eclipse: bool, utime: float | None = None
+        self, mode: ACSMode, in_eclipse: bool
     ) -> tuple[float, float, float]:
         """Calculate total spacecraft power consumption broken down by subsystem.
 
@@ -5431,11 +4007,7 @@ class QueueDITL(DITLMixin, DITLStats):
             Tuple of (bus_power, payload_power, total_power) in watts
         """
         bus_power = self.spacecraft_bus.power(mode=mode, in_eclipse=in_eclipse)
-        payload_power = self.payload.power(
-            mode=mode,
-            in_eclipse=in_eclipse,
-            instrument_modes=self._instrument_modes_now(mode, utime),
-        )
+        payload_power = self.payload.power(mode=mode, in_eclipse=in_eclipse)
         total_power = bus_power + payload_power
         return bus_power, payload_power, total_power
 
@@ -5456,8 +4028,6 @@ class QueueDITL(DITLMixin, DITLStats):
                 self._close_last_plan_entry(utime)
             self.ppt.end = utime
             self.ppt = None
-            if self._sequence is not None:
-                self._cut_sequence(utime)
 
     def _terminate_charging_ppt(self, utime: float) -> None:
         """Terminate the current charging PPT if active."""

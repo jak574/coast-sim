@@ -21,16 +21,9 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from ..common.enums import ACSMode
 from ..config import MissionConfig
-from ..config.data_storage import RecorderView
-from ..simulation.coverage import StationCoverage
 from ..simulation.passes import Pass
 from ..targets import Pointing
 from ..targets.merit import MeritModel
-from ..targets.plan_entry import (
-    extra_data_gb,
-    instrument_modes_of,
-    snapshot_min_seconds,
-)
 from .context import SchedulingContext
 from .recorder import contact_downlink_gb
 
@@ -226,16 +219,6 @@ class _Demand(BaseModel):
     remaining: float
     ss_min: float
     deadline: float | None
-    category: str | None = None
-    """The key of its category's cap where that has a time budget."""
-    group: str | None = None
-    """The key of its group's cap where that has a time budget."""
-
-    @property
-    def caps(self) -> tuple[str, ...]:
-        """The caps the demand counts against."""
-        return tuple(key for key in (self.category, self.group) if key is not None)
-
     spread: bool
     """Whether its exposure should be spread across bins, as for a cadence."""
     visible: dict[int, float]
@@ -453,9 +436,6 @@ class LongRangeAllocator:
         passes: The run's predicted ground passes, for the data budget, where
             the caller has them; predicted once otherwise, which takes a
             while for a long run.
-        coverage: Link coverage for passes without spacecraft tracking,
-            for the data budget, where the caller has it; built from the
-            configuration otherwise.
 
     Raises:
         ImportError: If ``solver`` is "milp" and OR-Tools is not installed.
@@ -473,7 +453,6 @@ class LongRangeAllocator:
         solver: Literal["milp", "greedy"] = "milp",
         time_limit: float = 10.0,
         passes: Sequence[Pass] | None = None,
-        coverage: StationCoverage | None = None,
     ) -> None:
         if bin_length <= timedelta(0):
             raise ValueError("bin_length must be positive")
@@ -500,11 +479,11 @@ class LongRangeAllocator:
         """The MILP solver's status for each stage of the last allocation,
         or "OPTIMAL" if every stage was solved to optimality."""
         self._previous: Allocation | None = None
-        self.ctx = SchedulingContext(
-            config, begin, end, passes=passes, coverage=coverage
-        )
+        self.ctx = SchedulingContext(config, begin, end)
         self.merit_model = MeritModel(config)
         self._windows: dict[int, list[tuple[float, float]]] = {}
+        self._passes: list[Pass] | None = list(passes) if passes is not None else None
+        """The run's predicted ground passes, once given or predicted."""
         length = bin_length.total_seconds()
         ustart, uend = begin.timestamp(), end.timestamp()
         count = max(1, int(-(-(uend - ustart) // length)))
@@ -512,17 +491,6 @@ class LongRangeAllocator:
             (ustart + k * length, min(ustart + (k + 1) * length, uend))
             for k in range(count)
         ]
-
-    @property
-    def passes(self) -> list[Pass] | None:
-        """The run's bookings, shared with the context's link coverage."""
-        return self.ctx.passes
-
-    @passes.setter
-    def passes(self, passes: Sequence[Pass] | None) -> None:
-        self.ctx.passes = passes
-        # Visibility windows can include cuts for the old coverage's repoints.
-        self._windows.clear()
 
     def allocate(
         self,
@@ -577,22 +545,21 @@ class LongRangeAllocator:
             if (demand := self._demand(target, start, reserved, shares)) is not None
         ]
         budget = self._budget(start, demands, start_volume_gb)
-        caps = self._category_caps(targets, reserved)
         unplanned_set = set(unplanned)
         empty: dict[int, dict[int, float]] = {d.obsid: {} for d in demands}
         if self.solver == "greedy" or not demands:
             seconds = self._greedy(
-                demands, capacity, held, unplanned_set, empty, budget, caps
+                demands, capacity, held, unplanned_set, empty, budget
             )
         else:
             seconds, unsolved = self._solve(
-                demands, capacity, held, unplanned_set, budget, caps
+                demands, capacity, held, unplanned_set, budget
             )
             if unsolved:
                 # Levels the solver found no solution for go greedily into
                 # the room the solved levels leave.
                 seconds = self._greedy(
-                    unsolved, capacity, held, unplanned_set, seconds, budget, caps
+                    unsolved, capacity, held, unplanned_set, seconds, budget
                 )
         science = budget.science(seconds)
         allocation = Allocation(
@@ -622,7 +589,6 @@ class LongRangeAllocator:
         unplanned_set: Collection[int],
         allocated: Mapping[int, Mapping[int, float]],
         budget: _Budget,
-        caps: Mapping[str, float] | None = None,
     ) -> dict[int, dict[int, float]]:
         """Add ``demands`` to ``allocated`` in priority order, each where it fits.
 
@@ -635,17 +601,6 @@ class LongRangeAllocator:
         there allows, keeping every later bin's carry-over within the limit.
         """
         seconds = {obsid: dict(bins) for obsid, bins in allocated.items()}
-        # What each capped category has left: its budget less what is
-        # allocated to its requests already.
-        left: dict[str, float] = dict(caps or {})
-        by_obsid = {d.obsid: d for d in demands}
-        for obsid, per_bin in seconds.items():
-            demand = by_obsid.get(obsid)
-            if demand is None:
-                continue
-            for key in demand.caps:
-                if key in left:
-                    left[key] -= sum(per_bin.values())
         # Seconds allocated in each bin to unplanned requests, and to the rest.
         surprise = [0.0] * len(self.bins)
         planned = [0.0] * len(self.bins)
@@ -672,9 +627,6 @@ class LongRangeAllocator:
             given[k] = given.get(k, 0.0) + part
             load[k] += part
             budget.add(science, demand, k, part, first)
-            for key in demand.caps:
-                if key in left:
-                    left[key] -= part
 
         order = sorted(
             demands,
@@ -687,12 +639,6 @@ class LongRangeAllocator:
             for k, part in self._shares(demand).items():
                 pressure[k] -= part
             need = demand.remaining
-            capped = [left[key] for key in demand.caps if key in left]
-            if capped:
-                # No more than its category's and its group's budgets leave.
-                need = min(need, max(0.0, min(capped)))
-                if need < demand.ss_min:
-                    continue
             # As the MILP: nothing in a bin, or at least a snapshot, and a
             # cadence request no more than an even share in any bin.
             smallest = min(demand.ss_min, need)
@@ -731,7 +677,6 @@ class LongRangeAllocator:
         held: Sequence[float],
         unplanned: Collection[int],
         budget: _Budget,
-        caps: Mapping[str, float] | None = None,
     ) -> tuple[dict[int, dict[int, float]], list[_Demand]]:
         """Solve the allocation as a MILP with HiGHS, level by level.
 
@@ -762,7 +707,6 @@ class LongRangeAllocator:
         previous = self._previous.seconds if self._previous is not None else {}
         terms: dict[bool, list[variables.LinearTerm]] = {}
         planned_in: dict[int, list[variables.Variable]] = {}
-        capped: dict[str, list[variables.Variable]] = {}
         unplanned_in: dict[int, list[variables.Variable]] = {}
         planned_by_level: dict[bool, dict[int, list[variables.Variable]]]
         planned_by_level = {}
@@ -820,15 +764,6 @@ class LongRangeAllocator:
                     level_terms.append(variables.LinearTerm(stays, 0.01 * demand.value))
             if own:
                 model.add_linear_constraint(expressions.fast_sum(own) <= remaining)
-                for cap_key in demand.caps:
-                    if cap_key in (caps or {}):
-                        capped.setdefault(cap_key, []).extend(own)
-        for name, capped_x in capped.items():
-            # A category's time budget: its requests share what is left.
-            assert caps is not None
-            model.add_linear_constraint(
-                expressions.fast_sum(capped_x) <= max(0.0, caps[name])
-            )
         for k in range(len(self.bins)):
             planned_x = planned_in.get(k, [])
             if planned_x:
@@ -1056,30 +991,6 @@ class LongRangeAllocator:
                 result[obsid][k] = float(round(value))
         return result, unsolved
 
-    def _category_caps(
-        self, targets: Sequence[Pointing], reserved: Mapping[int, float]
-    ) -> dict[str, float]:
-        """Seconds each category and each group with a time budget may still
-        be allocated: its budget less what its targets have collected and
-        have reserved, keyed ``category:<name>`` and ``group:<name>``."""
-        used: dict[str, float] = {}
-        caps: dict[str, float] = {}
-        for target in targets:
-            collected = getattr(target, "collected_seconds", 0.0)
-            seconds = float(collected) if isinstance(collected, (int, float)) else 0.0
-            seconds += reserved.get(int(target.obsid), 0.0)
-            category = self.merit_model.category(target)
-            if category.time_budget_seconds is not None:
-                key = f"category:{category.name}"
-                caps[key] = category.time_budget_seconds
-                used[key] = used.get(key, 0.0) + seconds
-            group = self.merit_model.group(target)
-            if group is not None and group.time_budget_seconds is not None:
-                key = f"group:{group.name}"
-                caps[key] = group.time_budget_seconds
-                used[key] = used.get(key, 0.0) + seconds
-        return {key: max(0.0, cap - used.get(key, 0.0)) for key, cap in caps.items()}
-
     def _demand(
         self,
         target: Pointing,
@@ -1090,7 +1001,7 @@ class LongRangeAllocator:
         obsid = int(target.obsid)
         exptime = target.exptime if target.exptime is not None else target.ss_max
         remaining = float(exptime) - reserved.get(obsid, 0.0)
-        if target.done or remaining < float(snapshot_min_seconds(target)):
+        if target.done or remaining < float(target.ss_min):
             return None
         windows = self._windows.get(obsid)
         if windows is None:
@@ -1099,50 +1010,27 @@ class LongRangeAllocator:
         opens = start
         if target.earliest_start is not None:
             opens = max(start, target.earliest_start)
-        # Its group's window narrows its own.
-        group = self.merit_model.group(target)
-        group_start, group_deadline = (
-            group.bounds if group is not None else (None, None)
-        )
-        if group_start is not None:
-            opens = max(opens, group_start)
-        if group_deadline is not None:
-            stop = min(stop, group_deadline)
         visible: dict[int, float] = {}
         for k, (b0, b1) in enumerate(self.bins):
             lo, hi = max(b0, opens), min(b1, stop)
             if hi <= lo:
                 continue
             seen = sum(max(0.0, min(w1, hi) - max(w0, lo)) for w0, w1 in windows)
-            if seen >= float(snapshot_min_seconds(target)):
+            if seen >= float(target.ss_min):
                 visible[k] = seen
         category = self.merit_model.category(target)
         merit = self.merit_model.value_terms(target, start, delivered_shares=shares)
-        modes = instrument_modes_of(target)
         generated: dict[str, tuple[float, float]] = {}
         for name, view in self.config.recorder_views().items():
-            fixed = view.science_generated(0.0, target.science_data, modes)
-            rate = view.science_generated(1.0, target.science_data, modes) - fixed
-            generated[name] = (
-                max(0.0, rate),
-                max(0.0, fixed + extra_data_gb(target, view)),
-            )
+            fixed = view.science_generated(0.0, target.science_data)
+            rate = view.science_generated(1.0, target.science_data) - fixed
+            generated[name] = (max(0.0, rate), max(0.0, fixed))
         return _Demand(
             obsid=obsid,
             value=merit.value,
             remaining=remaining,
-            ss_min=float(snapshot_min_seconds(target)),
-            deadline=stop if np.isfinite(stop) else None,
-            category=(
-                f"category:{category.name}"
-                if category.time_budget_seconds is not None
-                else None
-            ),
-            group=(
-                f"group:{group.name}"
-                if group is not None and group.time_budget_seconds is not None
-                else None
-            ),
+            ss_min=float(target.ss_min),
+            deadline=target.deadline,
             spread=category.cadence_seconds is not None
             and self.merit_model.cadence_weight > 0.0,
             visible=visible,
@@ -1189,42 +1077,29 @@ class LongRangeAllocator:
             # No budget: nothing is predicted or counted, as predicting a
             # run's passes is slow.
             return _Budget(stores)
+        if self._passes is None:
+            self._passes = list(self.ctx.predict_passes())
+        # Each bin's contacts, by station and seconds: the time in contact
+        # is the same for every recorder, what it downlinks from each is not.
         contacts: list[list[tuple[str, float]]] = [[] for _ in self.bins]
         contact_seconds = [0.0] * len(self.bins)
-        coverage = self.ctx.coverage
-        if coverage is None:
-            if self.passes is None:
-                self.passes = list(self.ctx.predict_passes())
-            for gspass in self.passes:
-                for k, (b0, b1) in enumerate(self.bins):
-                    lo, hi = max(b0, start, gspass.begin), min(b1, gspass.end)
-                    if hi > lo:
-                        contacts[k].append((gspass.station, hi - lo))
-                        contact_seconds[k] += hi - lo
+        for gspass in self._passes:
+            for k, (b0, b1) in enumerate(self.bins):
+                lo, hi = max(b0, start, gspass.begin), min(b1, gspass.end)
+                if hi > lo:
+                    contacts[k].append((gspass.station, hi - lo))
+                    contact_seconds[k] += hi - lo
         for name, store in stores.items():
             if not store.active:
                 continue
             view = views[name]
-            if coverage is not None:
-                downlink = [
-                    sum(
-                        span.rate_mbps * (span.end - span.begin) / 1000.0
-                        for span in (
-                            coverage.recorder_spans(view, max(b0, start), b1)
-                            if isinstance(view, RecorderView)
-                            else coverage.spans(max(b0, start), b1)
-                        )
-                    )
-                    for b0, b1 in self.bins
-                ]
-            else:
-                downlink = [
-                    sum(
-                        contact_downlink_gb(view, station, seconds)
-                        for station, seconds in k
-                    )
-                    for k in contacts
-                ]
+            downlink = [
+                sum(
+                    contact_downlink_gb(view, station, seconds)
+                    for station, seconds in k
+                )
+                for k in contacts
+            ]
             housekeeping = []
             for k, (b0, b1) in enumerate(self.bins):
                 seconds = max(0.0, b1 - max(b0, start))

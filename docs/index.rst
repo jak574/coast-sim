@@ -24,7 +24,6 @@ optimize observation schedules, and validate operational constraints before laun
    data_management
    fault_management
    attitude_execution
-   momentum
    radiator_shadowing
    target_of_opportunity
    planning

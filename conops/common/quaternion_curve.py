@@ -13,14 +13,7 @@ from math import comb, isclose, isfinite
 import numpy as np
 from numpy.polynomial.polynomial import polyval
 
-from .numerics import ROUNDOFF
 from .vector import _quat_mul
-
-_RELATIVE_TOLERANCE = 1e-10
-"""The relative slack that absorbs floating-point roundoff in the
-coefficients when a bound is certified."""
-_MAX_SUBDIVISION_DEPTH = 14
-"""How many times an interval is halved before a bound is given up on."""
 
 
 @lru_cache(maxsize=16)
@@ -53,16 +46,14 @@ def _certify(
     """
     lower = float(np.min(denominator))
     upper = float(np.max(np.linalg.norm(numerator, axis=1)))
-    if lower > ROUNDOFF and upper <= lower**power * (1 + _RELATIVE_TOLERANCE):
+    if lower > 1e-12 and upper <= lower**power * (1 + 1e-10):
         return True
-    if depth == _MAX_SUBDIVISION_DEPTH:
+    if depth == 14:
         return False
     dl, dr = _split(denominator)
     nl, nr = _split(numerator)
     # An actual violation at the midpoint permits immediate rejection.
-    if dl[-1] <= ROUNDOFF or np.linalg.norm(nl[-1]) > dl[-1] ** power * (
-        1 + _RELATIVE_TOLERANCE
-    ):
+    if dl[-1] <= 1e-12 or np.linalg.norm(nl[-1]) > dl[-1] ** power * (1 + 1e-10):
         return False
     return _certify(dl, nl, power, depth + 1) and _certify(dr, nr, power, depth + 1)
 

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from ..common.enums import ACSMode, ObsType
+from ..common.enums import ACSMode
 from ._base import ConfigModel
 from .data_generator import ScienceData
 from .recorder import OnboardRecorder
@@ -178,13 +178,7 @@ class DataStorage(ConfigModel):
                 "Unresolved data storage configuration: " + ", ".join(missing)
             )
 
-    def downlink_rate(
-        self,
-        config: MissionConfig,
-        store: str,
-        station: str,
-        range_km: float | None = None,
-    ) -> float:
+    def downlink_rate(self, config: MissionConfig, store: str, station: str) -> float:
         for link in self.downlinks or []:
             if link.station == station:
                 ground = config.ground_stations.get(station)
@@ -192,8 +186,8 @@ class DataStorage(ConfigModel):
                 if comms is None:
                     return 0.0
                 rate = min(
-                    ground.get_downlink_rate(link.band, range_km) or 0.0,
-                    comms.get_downlink_rate(link.band, range_km),
+                    ground.get_downlink_rate(link.band) or 0.0,
+                    comms.get_downlink_rate(link.band),
                 )
                 return rate * link.shares.get(store, 0.0)
         return 0.0
@@ -237,10 +231,7 @@ class RecorderView:
         return housekeeping_while_waiting(self, seconds)
 
     def science_generated(
-        self,
-        seconds: float,
-        science: Mapping[str, ScienceData] | None = None,
-        instrument_modes: Mapping[str, str] | None = None,
+        self, seconds: float, science: Mapping[str, ScienceData] | None = None
     ) -> float:
         storage = self.mission.data_storage
         assert storage is not None
@@ -253,69 +244,19 @@ class RecorderView:
                 f"science overrides reference unknown instruments: {sorted(unknown)}"
             )
         return sum(
-            data.data_generated(seconds)
+            (
+                science.get(instrument.name, instrument.data_generation.science)
+                if science
+                else instrument.data_generation.science
+            ).data_generated(seconds)
             for instrument in self.payload.instruments
             if storage.instrument_science.get(instrument.name) == self.name
-            if (
-                data := self.payload._science_of(
-                    instrument, science or {}, instrument_modes
-                )
-            )
-            is not None
         )
 
-    def extra_data_gb(self, entry: object) -> float:
-        """Fixed activity and calibration frames routed to this store.
-
-        A scalar frame size must identify one destination through its
-        instruments. Bus activities with no instrument use the bus store.
-        """
+    def downlink_rate(self, station: str) -> float:
         storage = self.mission.data_storage
         assert storage is not None
-        modes_lookup = getattr(entry, "effective_instrument_modes", None)
-        modes = (
-            modes_lookup()
-            if callable(modes_lookup)
-            else getattr(entry, "instrument_modes", {})
-        )
-        modes = modes if isinstance(modes, dict) else {}
-        instrument = getattr(entry, "instrument_name", None)
-        instrument = instrument if isinstance(instrument, str) else None
-        activity = getattr(entry, "obstype", None) == ObsType.ACTIVITY or hasattr(
-            entry, "data_gb"
-        )
-
-        def routed(amount: float, selected: dict[str, str]) -> float:
-            if amount <= 0.0:
-                return 0.0
-            names = list(selected) if selected else ([instrument] if instrument else [])
-            if not names and not activity:
-                names = [i.name for i in self.payload.instruments]
-            destinations = {storage.instrument_science[name] for name in names}
-            if not destinations:
-                destinations = {storage.bus_housekeeping}
-            if len(destinations) != 1:
-                raise ValueError(
-                    "Fixed data spans multiple recorder stores; use separate "
-                    "entries naming instruments routed to one store"
-                )
-            return amount if self.name in destinations else 0.0
-
-        fixed = getattr(entry, "fixed_data_gb", getattr(entry, "data_gb", 0.0))
-        total = routed(float(fixed) if isinstance(fixed, (int, float)) else 0.0, modes)
-        if not activity:
-            timing = getattr(entry, "step_timing", None) or getattr(
-                entry, "observation_timing", None
-            )
-            if timing is not None:
-                for step in (*timing.setup_steps, *timing.cleanup_steps):
-                    total += routed(float(step.data_gb), step.instrument_modes or modes)
-        return total
-
-    def downlink_rate(self, station: str, range_km: float | None = None) -> float:
-        storage = self.mission.data_storage
-        assert storage is not None
-        return storage.downlink_rate(self.mission, self.name, station, range_km)
+        return storage.downlink_rate(self.mission, self.name, station)
 
 
 class RecorderSummary:

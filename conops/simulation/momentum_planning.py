@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..common import ACSMode, ObsType
-from ..common.numerics import ATTITUDE_TOLERANCE_DEG
 from ..common.vector import quaternion_attitude_delta
 from .attitude import Attitude, AttitudeState, AttitudeTrajectory
 from .momentum_budget import MomentumForecast
@@ -175,14 +174,8 @@ class MomentumObservationPlanner:
         if before.first_violation is not None:
             return None
         preferred = self.sim._ppt_optimum_roll(target, start)
-        if getattr(target, "commands_roll", False) is True:
-            # A commanded roll is the only roll the target is observed at.
-            rolls = dict.fromkeys([preferred])
-        else:
-            rolls = dict.fromkeys(
-                [preferred, *range(0, 360, self.settings.roll_step_deg)]
-            )
-        timing = self.sim._ppt_timing(target)
+        rolls = dict.fromkeys([preferred, *range(0, 360, self.settings.roll_step_deg)])
+        timing = self.sim.config.payload.observation_timing
         best: MomentumObservation | None = None
         best_collection = -1.0
         for roll in rolls:
@@ -224,7 +217,7 @@ class MomentumObservationPlanner:
                     )
                     * self.sim.step_size
                 )
-                minimum = collection_begin + target.snapshot_min_seconds + teardown
+                minimum = collection_begin + target.ss_min + teardown
                 while end >= minimum:
                     held = self.budget.forecast(
                         trajectory.state, end, trajectory=trajectory, initial=arrival
@@ -278,7 +271,7 @@ class MomentumObservationPlanner:
                 # momentum-limited escape remains possible at the next tick.
                 if (
                     quaternion_attitude_delta(*initial.attitude, ra, dec, roll)[0]
-                    <= ATTITUDE_TOLERANCE_DEG
+                    <= 1e-8
                 ):
                     continue
                 result = self.recovery(initial, momentum, (ra, dec, roll))

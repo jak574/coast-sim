@@ -24,13 +24,6 @@ if TYPE_CHECKING:
     from ..targets import Pointing
 
 
-_DISTINCT_DEC_DEG = 0.1
-"""A charging candidate within this of the optimal declination is the same."""
-_NEAR_AXIS_COMPONENT = 0.9
-"""A unit vector whose component along an axis reaches this lies too near
-the axis for a cross product with it to give a direction."""
-
-
 class EmergencyCharging:
     """
     Manages emergency battery charging operations.
@@ -204,7 +197,6 @@ class EmergencyCharging:
             ephem,
             self.solar_panel,
             self.constraint,
-            science_attitude=False,
             drive_state=drive_state,
         )
 
@@ -310,7 +302,6 @@ class EmergencyCharging:
             ephem,
             self.solar_panel,
             self.constraint,
-            science_attitude=False,
             drive_state=drive_state,
         )
         if not self._charging_attitude_violates_scopes(
@@ -356,7 +347,7 @@ class EmergencyCharging:
 
         for dec_offset in (10, -10, 20, -20, 30, -30):
             alt_dec = max(-90.0, min(90.0, optimal_dec + dec_offset))
-            if abs(alt_dec - optimal_dec) > _DISTINCT_DEC_DEG:
+            if abs(alt_dec - optimal_dec) > 0.1:  # Only if actually different
                 raw_candidates.append((optimal_ra, alt_dec))
 
         for ra_offset in (45, -45, 90, -90, 135, -135):
@@ -397,7 +388,6 @@ class EmergencyCharging:
                 ephem,
                 self.solar_panel,
                 self.constraint,
-                science_attitude=False,
                 drive_state=drive_state,
             )
 
@@ -500,7 +490,7 @@ class EmergencyCharging:
 
         # Create two orthogonal vectors perpendicular to Sun
         # First perpendicular vector: use cross product with z-axis (or x if Sun near pole)
-        if abs(sun_z) < _NEAR_AXIS_COMPONENT:
+        if abs(sun_z) < 0.9:
             perp1 = np.cross(sun_vec, [0, 0, 1])
         else:
             perp1 = np.cross(sun_vec, [1, 0, 0])

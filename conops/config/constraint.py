@@ -1,13 +1,11 @@
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from collections.abc import Sequence
 from enum import Enum
 from functools import cached_property, lru_cache
 from typing import cast
 
 import numpy as np
 import rust_ephem
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import ConfigDict, Field, PrivateAttr
 from rust_ephem.constraints import (
     AndConstraint,
     AtLeastConstraint,
@@ -18,7 +16,7 @@ from rust_ephem.constraints import (
     XorConstraint,
 )
 
-from ..common import dtutcfromtimestamp, unixtime_from
+from ..common import dtutcfromtimestamp
 from ..common.enums import ACSMode
 from ._base import ConfigModel
 from .constants import (
@@ -38,10 +36,6 @@ _TIME_PRECISION = 0  # round to nearest second
 # Integer-based rounding multipliers for faster key generation
 _RA_DEC_ROUNDER = 10**_RA_DEC_PRECISION
 _TIME_ROUNDER = 10**_TIME_PRECISION
-
-
-_INTERVAL_ENDS = 2
-"""An eclipse interval is a start and an end."""
 
 
 class AttitudeConstraintScope(str, Enum):
@@ -77,23 +71,6 @@ def _default_panel_constraint() -> ConstraintConfig:
         )
         & ~rust_ephem.EclipseConstraint()
     )
-
-
-def _sample_datetime(sample: object) -> datetime:
-    """An ephemeris sample as a timezone-aware datetime, whether the
-    ephemeris holds datetimes or numpy datetime64 values."""
-    if isinstance(sample, datetime):
-        return (
-            sample if sample.tzinfo is not None else sample.replace(tzinfo=timezone.utc)
-        )
-    seconds = (
-        float(np.datetime64(cast(np.datetime64, sample), "us").astype(np.int64)) / 1e6
-    )
-    return dtutcfromtimestamp(seconds)
-
-
-def _sample_utime(sample: object) -> float:
-    return _sample_datetime(sample).timestamp()
 
 
 @lru_cache(maxsize=65536)
@@ -147,16 +124,6 @@ class Constraint(ConfigModel):
     moon_constraint: ConstraintConfig | None = Field(
         default=None,
         description="Moon constraint configuration",
-    )
-    eclipse_intervals: list[tuple[float, float]] = Field(
-        default_factory=list,
-        description=(
-            "Intervals, as (start, end) in Unix seconds, datetimes or ISO-8601 "
-            "strings, during which the spacecraft is taken to be in eclipse "
-            "whatever the ephemeris says: for a test of an eclipse that the "
-            "orbit does not give. Power, the panels, the planners' ledgers, "
-            "the momentum sources, telemetry and the plots all see them"
-        ),
     )
     earth_constraint: ConstraintConfig | None = Field(
         default=None,
@@ -252,9 +219,6 @@ class Constraint(ConfigModel):
     )
     _cache_hits: int = PrivateAttr(default=0)
     _cache_misses: int = PrivateAttr(default=0)
-    _held_over: list[float] | None = PrivateAttr(default=None)
-    """The times a pointing is being checked over, while it is (see
-    :meth:`held_over`): a miss then evaluates them all in one call."""
     _eclipse_constraint: rust_ephem.EclipseConstraint = PrivateAttr(
         default_factory=rust_ephem.EclipseConstraint
     )
@@ -300,73 +264,21 @@ class Constraint(ConfigModel):
             self._cache_hits += 1
             return self._cache[key]
 
-        held = self._held_over
-        if held is not None and len(held) > 1:
-            # The pointing is being checked over these times: evaluate them
-            # all at once and keep each, as a check at each would compute it.
-            self._cache_misses += 1
-            flags = check_fn.in_constraint_batch(
-                ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
-                target_ras=[ra],
-                target_decs=[dec],
-                times=[self._sample_time(t) for t in held],
-                target_rolls=None if target_roll is None else [target_roll],
-            )
-            for t, flag in zip(held, np.asarray(flags).reshape(-1), strict=True):
-                self._cache[
-                    self._cache_key(constraint_type, ra, dec, t, target_roll)
-                ] = bool(flag)
-            if key in self._cache:
-                return self._cache[key]
-
         # Cache miss - compute result (caller has already asserted ephem is not None)
         self._cache_misses += 1
+        dt = dtutcfromtimestamp(utime)
         result = cast(
             bool,
             check_fn.in_constraint(
                 ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
                 target_ra=ra,
                 target_dec=dec,
-                time=self._sample_time(utime),
+                time=dt,
                 target_roll=target_roll,
             ),
         )
         self._cache[key] = result
         return result
-
-    @contextmanager
-    def held_over(self, utimes: Sequence[float]) -> Iterator[None]:
-        """While this holds, a check of a pointing at one of ``utimes``
-        evaluates the pointing at all of them in one call and keeps the
-        results, so a scan of a held attitude step by step costs one
-        evaluation per constraint rather than one per step. The answers are
-        those the checks would give one by one."""
-        previous = self._held_over
-        self._held_over = [float(t) for t in utimes]
-        try:
-            yield
-        finally:
-            self._held_over = previous
-
-    def _sample_time(self, utime: float) -> datetime:
-        """The ephemeris sample at or before ``utime``, as the time a check
-        is made at. ``rust_ephem`` evaluates a constraint only at its
-        samples, and a check between them, as at the end of a slew, is made
-        at the sample before. An ephemeris without samples to speak of, a
-        test double, is asked at the time itself."""
-        dt = dtutcfromtimestamp(utime)
-        ephem = self.ephem
-        timestamps = getattr(ephem, "timestamp", None)
-        if (
-            ephem is None
-            or not isinstance(timestamps, np.ndarray)
-            or not timestamps.size
-        ):
-            return dt
-        index = min(max(int(ephem.index(dt)), 0), timestamps.size - 1)
-        if index > 0 and _sample_utime(timestamps[index]) > utime:
-            index -= 1
-        return _sample_datetime(timestamps[index])
 
     def clear_cache(self) -> None:
         """Clear the constraint result cache. Call at step boundaries."""
@@ -388,7 +300,6 @@ class Constraint(ConfigModel):
         self.__dict__.pop("safety_constraint_config", None)
         self.__dict__.pop("roll_independent_constraint", None)
         self.__dict__.pop("roll_dependent_constraint", None)
-        self.__dict__.pop("science_constraint_roll_dependent", None)
 
     @staticmethod
     def _combine_constraints(
@@ -524,33 +435,6 @@ class Constraint(ConfigModel):
         )
         return self._combine_constraints(components)
 
-    @cached_property
-    def science_constraint_roll_dependent(self) -> bool:
-        """Whether the explicit science constraint depends on the roll: a
-        boresight offset or a field-of-view polygon somewhere in its tree. A
-        polygon, as a stray-light patch beside the boresight is written,
-        turns with the instrument, and ``roll_range`` does not sweep it, so
-        the roll optimiser tests such a constraint roll by roll."""
-        return self.science_constraint is not None and (
-            self._contains_boresight_offset(self.science_constraint)
-            or self._contains_field_of_view(self.science_constraint)
-        )
-
-    @staticmethod
-    def _contains_field_of_view(constraint: ConstraintConfig) -> bool:
-        """Return whether a constraint tree contains a field-of-view polygon."""
-        if isinstance(constraint, NotConstraint):
-            return Constraint._contains_field_of_view(constraint.constraint)
-        if isinstance(
-            constraint,
-            (AndConstraint, OrConstraint, XorConstraint, AtLeastConstraint),
-        ):
-            return any(
-                Constraint._contains_field_of_view(subconstraint)
-                for subconstraint in constraint.constraints
-            )
-        return getattr(constraint, "fov_polygon", None) is not None
-
     @staticmethod
     def _contains_boresight_offset(constraint: ConstraintConfig) -> bool:
         """Return whether a constraint tree contains a boresight-offset node."""
@@ -656,40 +540,7 @@ class Constraint(ConfigModel):
             "earth", ra, dec, time, self.earth_constraint, target_roll=target_roll
         )
 
-    @field_validator("eclipse_intervals", mode="before")
-    @classmethod
-    def _intervals_as_unix(cls, value: object) -> object:
-        """Accept each interval's ends as Unix seconds, datetimes or ISO strings."""
-        if not isinstance(value, (list, tuple)):
-            return value
-        intervals = []
-        for interval in value:
-            if (
-                not isinstance(interval, (list, tuple))
-                or len(interval) != _INTERVAL_ENDS
-            ):
-                raise ValueError("an eclipse interval is a (start, end) pair")
-            start, end = (unixtime_from(interval[0]), unixtime_from(interval[1]))
-            if end <= start:
-                raise ValueError("an eclipse interval must end after it starts")
-            intervals.append((start, end))
-        return intervals
-
-    def eclipse_intervals_unix(self) -> list[tuple[float, float]]:
-        """The intervals given as eclipse, each end in Unix seconds, however
-        they were given: assignment to this model is not validated."""
-        return [
-            (unixtime_from(start), unixtime_from(end))
-            for start, end in self.eclipse_intervals
-        ]
-
-    def in_eclipse_interval(self, time: float) -> bool:
-        """Whether ``time`` falls in an interval given as eclipse."""
-        return any(start <= time < end for start, end in self.eclipse_intervals_unix())
-
     def in_eclipse(self, ra: float, dec: float, time: float) -> bool:
-        if self.in_eclipse_interval(time):
-            return True
         assert self.ephem is not None, "Ephemeris must be set to use in_eclipse method"
         return self._cached_check("eclipse", ra, dec, time, self._eclipse_constraint)
 
@@ -1029,7 +880,7 @@ class Constraint(ConfigModel):
             "Ephemeris must be set to use in_constraint_batch"
         )
 
-        dt = self._sample_time(utime)
+        dt = dtutcfromtimestamp(utime)
 
         # Check all constraint types and OR the results
         violations: np.ndarray | None = None

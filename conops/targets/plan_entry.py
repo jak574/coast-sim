@@ -20,9 +20,8 @@ from pydantic import (
 )
 from rust_ephem.constraints import ConstraintConfig
 
-from ..common import givename, unixtime2date, unixtime_from
+from ..common import givename, unixtime2date
 from ..common.enums import ACSMode, ObsType
-from ..common.ephemeris import sun_vector_change_deg
 from ..common.vector import (
     attitude_to_quat,
     quat_to_attitude,
@@ -40,17 +39,8 @@ from ..config.constraint import (
     attitude_constraint_names_for_scopes,
     mounted_science_attitude_constraint_names,
 )
-from ..config.data_storage import RecorderView
-from ..config.observation_categories import ObservationCategories
-from ..config.observation_timing import ObservationTiming, timing_for
+from ..config.observation_timing import ObservationTiming
 from ..simulation.saa import SAA
-from .track import (
-    TrackPoint,
-    position_along,
-    positions_along,
-    rate_along,
-    validate_track,
-)
 
 BodyAxis = Literal["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
 RollSource = Literal["planned", "defaulted_from_unconstrained_sentinel"]
@@ -85,26 +75,6 @@ class AttitudeRotationSchema(AttitudeRotationConventionSchema):
     """Generic attitude rotation representation."""
 
     values: tuple[float, float, float, float]
-
-
-def extra_data_gb(
-    entry: object, config: MissionConfig | RecorderView | None = None
-) -> float:
-    """Data ``entry`` puts on the recorder once beyond its science, or 0 for
-    an object that cannot say, such as a test double."""
-    if isinstance(config, RecorderView):
-        return config.extra_data_gb(entry)
-    extra = getattr(entry, "extra_data_gb", None)
-    value = extra() if callable(extra) else None
-    return float(value) if isinstance(value, (int, float)) else 0.0
-
-
-def instrument_modes_of(entry: object) -> dict[str, str] | None:
-    """The instrument modes in effect for ``entry``, or None for an object
-    that cannot say, such as a test double: every instrument then generates."""
-    modes = getattr(entry, "effective_instrument_modes", None)
-    resolved = modes() if callable(modes) else None
-    return resolved if isinstance(resolved, dict) else None
 
 
 class AttitudePointingSchema(BaseModel):
@@ -146,52 +116,6 @@ class PlanEntry(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    EXECUTION_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "begin",
-            "end",
-            "slewtime",
-            "insaa",
-            "roll",
-            "slewdist",
-            "great_circle_deg",
-            "sun_vector_change_deg",
-            "settle_seconds",
-            "done",
-            "exposure",
-            "exporig",
-            "target_attitude",
-            "isat",
-            "obstype",
-            "collection_begin",
-            "collection_end",
-            "spacecraft_attitude",
-            "visit",
-            "slewpath",
-            # A ground contact's station and times, and a tracked entry's
-            # end points, are a run's state as much as the rest.
-            "station",
-            "station_lat_deg",
-            "station_lon_deg",
-            "station_alt_m",
-            "contact_begin",
-            "contact_end",
-            "track_start_ra",
-            "track_start_dec",
-            "track_start_roll",
-            "track_end_ra",
-            "track_end_dec",
-            "track_end_roll",
-        }
-    )
-    """The fields a run fills in as it schedules and executes an entry; a
-    request written to a program file leaves them out."""
-
-    kind: Literal["entry"] = Field(
-        default="entry",
-        description="The entry's class, for a file to read it back as that class",
-    )
-
     _STATIC_TARGET_OBSTYPES: ClassVar[frozenset[ObsType]] = frozenset(
         {ObsType.PPT, ObsType.AT, ObsType.TOO}
     )
@@ -202,15 +126,6 @@ class PlanEntry(BaseModel):
     ephem: rust_ephem.Ephemeris | None = Field(default=None, exclude=True)
     name: str = ""
     instrument_name: str | None = None
-    instrument_modes: dict[str, str] = Field(
-        default_factory=dict,
-        exclude_if=lambda v: not v,
-        description=(
-            "The instruments this observation uses and the mode each is in, "
-            "by name; instruments not named idle. Empty: the instrument the "
-            "observation names, or every instrument with modes, in SCIENCE"
-        ),
-    )
     science_data: dict[str, ScienceData] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
@@ -219,64 +134,9 @@ class PlanEntry(BaseModel):
             "name; instruments not named generate their configured science data"
         ),
     )
-    fixed_data_gb: float = Field(
-        default=0.0,
-        ge=0.0,
-        exclude_if=lambda v: v == 0.0,
-        description=(
-            "Data this entry puts on the recorder once, beyond any science: a "
-            "scheduled activity's frames, for instance"
-        ),
-    )
-    desaturation: bool = Field(
-        default=False,
-        exclude_if=lambda v: v is False,
-        description=(
-            "Whether this activity entry is a thruster momentum dump, after "
-            "which the wheels hold the dump's residual"
-        ),
-    )
-    activity_hold_begin: float | None = Field(
-        default=None,
-        exclude_if=lambda v: v is None,
-        description="Full activity hold start, including any part before this run",
-    )
-    safe_hold: bool = Field(default=False, exclude_if=lambda v: v is False)
-    activity_hold_end: float | None = Field(
-        default=None,
-        exclude_if=lambda v: v is None,
-        description="Full activity hold end, including any part after this run",
-    )
-    activity_requires_stationary: bool = Field(
-        default=False,
-        exclude_if=lambda v: v is False,
-        description=(
-            "Whether this activity reserves a stationary hold after ingress; "
-            "slewing or an unexpected hold mode violates the plan"
-        ),
-    )
-    own_timing: ObservationTiming | None = Field(
-        default=None,
-        exclude_if=lambda v: v is None,
-        description=(
-            "This observation's own setup, cleanup and handoff budgets, with "
-            "their calibration steps, in place of its category's: a long dark "
-            "after one deep field, for instance. None: the category's"
-        ),
-    )
     ra: float = 0.0
     dec: float = 0.0
     roll: float = -1.0
-    track: list[TrackPoint] = Field(
-        default_factory=list,
-        exclude_if=lambda v: not v,
-        description=(
-            "The target's sky position at a series of times, for a target "
-            "that moves across the sky: its pointing is taken from the track "
-            "at the end of the slew to it, and the attitude follows the track "
-            "while it is observed. Empty for a fixed target"
-        ),
-    )
     spacecraft_attitude: tuple[float, float, float] | None = None
     begin: float = 0  # start of window, not observation
     slewtime: int = 0
@@ -285,12 +145,8 @@ class PlanEntry(BaseModel):
         gt=0.0,
         le=1.0,
         allow_inf_nan=False,
-        exclude_if=lambda v: v == 1.0,
-        description=(
-            "The fraction of the configured slew rates the slew into this "
-            "entry is flown at, where its momentum does not fit the wheels at "
-            "full rate; acceleration and settling are unchanged"
-        ),
+        exclude_if=lambda value: value == 1.0,
+        description="Commanded fraction of configured slew-rate limits; acceleration and settling are unchanged.",
     )
     insaa: int = 0
     end: float = 0
@@ -315,49 +171,18 @@ class PlanEntry(BaseModel):
     track_end_roll: float | None = None
     saa: SAA | None = Field(default=None, exclude=True)
     merit: float = 101
-    step: str | None = Field(
-        default=None,
-        exclude_if=lambda v: v is None,
-        description="The sequence step this entry observes, for a sequence target",
-    )
-    calibration: bool = Field(
-        default=False,
-        exclude_if=lambda v: not v,
-        description="Whether this entry is a calibration step, collecting no science",
-    )
-    visit: int | None = Field(
-        default=None,
-        exclude_if=lambda v: v is None,
-        description=(
-            "Which of its target's visit windows this entry observes in, "
-            "from 0, for a target with visit windows"
-        ),
-    )
     windows: list[list[float]] = Field(default_factory=list, exclude=True)
     obstype: ObsType = ObsType.PPT
     slewpath: tuple[list[float], list[float]] = Field(
         default_factory=lambda: ([], []), exclude=True
     )
     slewdist: float = 0.0
-    great_circle_deg: float = 0.0
-    """The great-circle angle between the pointings the entry's slew joins,
-    in degrees, beside ``slewdist``, the rotation flown; what a slew
-    requirement class is written in."""
-    sun_vector_change_deg: float = 0.0
-    """How far the entry's slew moves the Sun's direction in the body frame,
-    in degrees; what the thermal settling table is written in. Zero without
-    a table."""
-    settle_seconds: float = 0.0
-    """The settle the entry's ``slewtime`` includes, in seconds."""
     ss_min: float = 1000
     ss_max: float = 1e6
     _exptime: float | None = PrivateAttr(default=None)
     _exporig: float | None = PrivateAttr(default=None)
     _collected_seconds: float = PrivateAttr(default=0.0)
-    _calibration_seconds: float = PrivateAttr(default=0.0)
-    _step_timing: ObservationTiming | None = PrivateAttr(default=None)
     _last_collection_time: float | None = PrivateAttr(default=None)
-    _interruptions: list[float] = PrivateAttr(default_factory=list)
     _serialized_target_attitude: TargetAttitudeSchema | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
@@ -379,10 +204,6 @@ class PlanEntry(BaseModel):
         instance = handler(data)
         if exptime is not None:
             instance._exptime = exptime
-            # A request written without its run state has its exposure as
-            # its original exposure, as a request built in code has.
-            if exporig is None:
-                instance._exporig = exptime
         if exporig is not None:
             instance._exporig = exporig
         if target_attitude is not None:
@@ -463,9 +284,13 @@ class PlanEntry(BaseModel):
         mode="before",
     )
     @classmethod
-    def _coerce_time(cls, v: float | int | str | datetime | None) -> float | None:
-        """Accept Unix timestamps, datetimes (naive means UTC) or ISO-8601 strings."""
-        return None if v is None else unixtime_from(v)
+    def _coerce_time(cls, v: float | int | str | None) -> float | None:
+        """Accept Unix timestamps (float/int) or ISO-8601 strings."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return datetime.fromisoformat(v).timestamp()
+        return float(v)
 
     @field_serializer(
         "begin",
@@ -500,38 +325,6 @@ class PlanEntry(BaseModel):
         return f"{unixtime2date(self.begin)} Target: {self.name} ({self.obsid}) Exp: {self.exposure}s "
 
     @property
-    def activity_partial(self) -> bool:
-        """Whether this entry covers only part of its full activity hold."""
-        return (
-            self.activity_hold_begin is not None
-            and float(self.begin) > self.activity_hold_begin
-        ) or (
-            self.activity_hold_end is not None
-            and float(self.end) < self.activity_hold_end
-        )
-
-    @property
-    def activity_mode(self) -> ACSMode:
-        return (
-            ACSMode.SAFE
-            if self.safe_hold
-            else ACSMode.DESAT
-            if self.desaturation
-            else ACSMode.IDLE
-        )
-
-    @property
-    def activity_finishes(self) -> bool:
-        """Whether the reserved interval reaches the full hold's end.
-
-        Legacy entries without hold metadata retain their original meaning:
-        their entry end is the activity's completion time.
-        """
-        return (
-            self.activity_hold_end is None or float(self.end) >= self.activity_hold_end
-        )
-
-    @property
     def collected_seconds(self) -> float:
         """Science collection credited to this target so far."""
         return self._collected_seconds
@@ -541,64 +334,22 @@ class PlanEntry(BaseModel):
         """When this target last collected science, or None if never."""
         return self._last_collection_time
 
-    def record_collection(
-        self, utime: float, seconds: float, *, step: float = 0.0
-    ) -> None:
+    def record_collection(self, utime: float, seconds: float) -> None:
         """Credit executed science collection to this target.
 
         Reduces the remaining exposure time and records when the target was
-        last observed. A remainder shorter than ``step``, the step the
-        simulation runs at, ends the target: it is rounding, not science.
+        last observed.
 
         Args:
             utime: Time the collection ended.
             seconds: Seconds of science collected.
-            step: The simulation step, in seconds; 0 keeps any remainder.
         """
         if seconds <= 0:
             return
         if self.exptime is not None:
             self.exptime = max(0, self.exptime - seconds)
-            if 0 < self.exptime < step:
-                # A remainder shorter than the step the simulation runs at
-                # is rounding, not science to come back for.
-                self.exptime = 0
         self._collected_seconds += seconds
         self._last_collection_time = utime
-
-    @property
-    def step_timing(self) -> ObservationTiming | None:
-        """The budgets this entry pays as a step of a sequence visit, where
-        it is one: set by :meth:`Pointing.step_pointing`; None otherwise."""
-        return self._step_timing
-
-    @property
-    def calibration_seconds(self) -> float:
-        """Calibration time taken on this target so far, in a sequence."""
-        return self._calibration_seconds
-
-    def record_calibration(self, utime: float, seconds: float) -> None:
-        """Count executed calibration time against this target: it is not
-        science, so the exposure is not reduced."""
-        if seconds <= 0:
-            return
-        self._calibration_seconds += seconds
-        self._last_collection_time = utime
-
-    @property
-    def snapshot_min_seconds(self) -> float:
-        """The least a snapshot of this target may collect; see
-        :func:`snapshot_min_seconds`."""
-        return snapshot_min_seconds(self)
-
-    @property
-    def interruptions(self) -> tuple[float, ...]:
-        """When this target's observations were cut short, in order."""
-        return tuple(self._interruptions)
-
-    def record_interruption(self, utime: float) -> None:
-        """Record that an observation of this target was cut short at ``utime``."""
-        self._interruptions.append(utime)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -624,15 +375,6 @@ class PlanEntry(BaseModel):
     def exposure(self, value: float) -> None:
         """Accept legacy assignment; exposure is derived from the collection window."""
         pass
-
-    @property
-    def observation_timing(self) -> ObservationTiming:
-        """This observation's setup, cleanup and handoff budgets: its own
-        where it has them, else its category's under its configuration (see
-        :func:`~conops.config.observation_timing.timing_for`)."""
-        if self.own_timing is not None:
-            return self.own_timing
-        return timing_for(self.config, int(self.obsid))
 
     def set_collection_window(self, timing: ObservationTiming) -> None:
         """Record the planned collection interval without changing the task boundary."""
@@ -732,111 +474,25 @@ class PlanEntry(BaseModel):
             ),
         )
 
-    def extra_data_gb(self) -> float:
-        """Data this entry puts on the recorder once beyond its science: its
-        own fixed data, and its setup and cleanup steps' data for an
-        observation."""
-        extra = float(self.fixed_data_gb)
-        if self.obstype in self._STATIC_TARGET_OBSTYPES and self.config is not None:
-            timing = self.step_timing or self.observation_timing
-            extra += float(getattr(timing, "budget_data_gb", 0.0) or 0.0)
-        return extra
-
-    def instrument_modes_at(self, utime: float) -> dict[str, str]:
-        """The mode each instrument is in at ``utime`` during this
-        observation: a setup or cleanup step's own modes while that step
-        runs, else the observation's (see :meth:`effective_instrument_modes`)."""
-        modes = self.effective_instrument_modes()
-        if self.obstype not in self._STATIC_TARGET_OBSTYPES or self.config is None:
-            return modes
-        timing = self.step_timing or self.observation_timing
-        if not isinstance(timing, ObservationTiming) or not (
-            timing.setup_steps or timing.cleanup_steps
-        ):
-            return modes
-        if self.collection_begin is not None and self.collection_end is not None:
-            begin, end = float(self.collection_begin), float(self.collection_end)
-        else:
-            begin, end = timing.collection_window(
-                float(self.begin), float(self.slewtime or 0), float(self.end)
-            )
-        step = None
-        if begin - timing.setup_seconds <= utime < begin:
-            step = timing.setup_step_at(utime - (begin - timing.setup_seconds))
-        elif end <= utime < end + timing.cleanup_seconds:
-            step = timing.cleanup_step_at(utime - end)
-        if step is not None and step.instrument_modes:
-            return dict(step.instrument_modes)
-        return modes
-
-    def effective_instrument_modes(self) -> dict[str, str]:
-        """The mode each instrument is in during this entry, by name: as
-        named; else, for a science observation, every instrument with modes
-        in ``SCIENCE``; else none. Instruments left out idle. The instrument
-        an observation names for its pointing is not a restriction: a
-        request that uses some instruments only names them."""
-        if self.instrument_modes:
-            return dict(self.instrument_modes)
-        if self.config is None or self.obstype not in self._STATIC_TARGET_OBSTYPES:
-            return {}
-        default = getattr(self.config.payload, "default_instrument_modes", None)
-        modes = default() if callable(default) else None
-        # A test double's payload has no instruments.
-        return dict(modes) if isinstance(modes, dict) else {}
-
     def science_telescope(self) -> Telescope | None:
         """Return the telescope assigned to this target, if configured."""
         if self.config is None or self.obstype not in self._STATIC_TARGET_OBSTYPES:
             return None
-        instrument = self.config.payload.telescope_for_target(self.instrument_name)
-        return instrument if isinstance(instrument, Telescope) else None
+        telescope = self.config.payload.telescope_for_target(self.instrument_name)
+        return telescope if issubclass(type(telescope), Telescope) else None
 
     def uses_mounted_attitude(self) -> bool:
         """Return whether science coordinates differ from the body attitude."""
         telescope = self.science_telescope()
         return bool(telescope is not None and not telescope.mounting.is_identity)
 
-    @field_validator("track")
-    @classmethod
-    def _track_in_time_order(cls, track: list[TrackPoint]) -> list[TrackPoint]:
-        return validate_track(track)
-
-    @property
-    def moves(self) -> bool:
-        """Whether the target moves across the sky: it has a track."""
-        return bool(self.track)
-
-    def position_at(self, utime: float) -> tuple[float, float]:
-        """The target's RA and Dec at ``utime``, in degrees: along its track
-        for a moving target, its own for a fixed one."""
-        if not self.track:
-            return float(self.ra), float(self.dec)
-        return position_along(self.track, utime)
-
-    def track_rate_deg_per_s(self, utime: float) -> float:
-        """How fast a moving target crosses the sky at ``utime``, in degrees
-        per second; zero for a fixed one."""
-        return rate_along(self.track, utime) if self.track else 0.0
-
-    def point_at(self, utime: float) -> None:
-        """Take the pointing a moving target has at ``utime``, where the slew
-        to it ends; nothing for a fixed target."""
-        if self.track:
-            self.ra, self.dec = position_along(self.track, utime)
-
     def target_body_attitude(
-        self, instrument_roll_deg: float | None = None, at: float | None = None
+        self, instrument_roll_deg: float | None = None
     ) -> tuple[float, float, float]:
-        """Return physical body +X RA/Dec/roll for this science target; for
-        a moving target with ``at`` given, at its position then."""
+        """Return physical body +X RA/Dec/roll for this science target."""
         roll = self.roll if instrument_roll_deg is None else instrument_roll_deg
         if roll == -1.0:
             roll = 0.0
-        ra, dec = (
-            self.position_at(at)
-            if at is not None and self.track
-            else (self.ra, self.dec)
-        )
         telescope = self.science_telescope()
         if telescope is None:
             if self.config is None and self._serialized_target_attitude is not None:
@@ -846,8 +502,8 @@ class PlanEntry(BaseModel):
                         dtype=np.float64,
                     )
                 )
-            return ra, dec, float(roll)
-        return telescope.target_body_attitude(ra, dec, float(roll))
+            return self.ra, self.dec, float(roll)
+        return telescope.target_body_attitude(self.ra, self.dec, float(roll))
 
     def attitude_constraint_names(
         self,
@@ -963,26 +619,6 @@ class PlanEntry(BaseModel):
             ]
             return 0
 
-        if self.track:
-            # A moving target: the constraint along its track, resampled on
-            # the ephemeris grid, which the moving-body evaluation wants.
-            times = list(self.ephem.timestamp)
-            ras, decs = positions_along(
-                self.track, [float(t.timestamp()) for t in times]
-            )
-            moving = combined_constraint.evaluate_moving_body(
-                self.ephem,
-                target_ras=[float(ra) for ra in ras],
-                target_decs=[float(dec) for dec in decs],
-                times=times,
-                target_roll=effective_roll,
-            )
-            self.windows = [
-                [v.start_time.timestamp(), v.end_time.timestamp()]
-                for v in moving.visibility
-            ]
-            return 0
-
         in_constraint = combined_constraint.evaluate(
             ephemeris=self.ephem,
             target_ra=self.ra,  # already in degrees
@@ -1026,16 +662,11 @@ class PlanEntry(BaseModel):
         lastra: float,
         lastdec: float,
         lastroll: float | None = None,
-        utime: float | None = None,
     ) -> int:
         """Calculate time to slew from the prior pointing or attitude.
 
         Scalar slew limits support legacy RA/Dec-only callers. Direction-dependent
-        limits require the complete starting RA/Dec/roll attitude. With a
-        thermal settling table the settle is the table's for the Sun-vector
-        change of the slew at ``utime``, when the time and both rolls are
-        known, and the table's longest otherwise; a category that skips the
-        thermal settle takes ``settle_time``.
+        limits require the complete starting RA/Dec/roll attitude.
         """
 
         # Slew endpoints are physical body attitudes even when the science
@@ -1045,11 +676,6 @@ class PlanEntry(BaseModel):
 
         assert self.acs_config is not None, (
             "ACS config must be set to calculate slew time"
-        )
-        limits = (
-            self.acs_config
-            if self.slew_rate_fraction == 1.0
-            else self.acs_config.at_rate_fraction(self.slew_rate_fraction)
         )
         if self.acs_config.direction_dependent_slew:
             if lastroll is None or lastroll == -1.0:
@@ -1070,57 +696,13 @@ class PlanEntry(BaseModel):
                 enddec,
                 endroll,
             )
-        else:
-            rotation_axis_body = None
-        settle = self._thermal_settle(
-            (lastra, lastdec, lastroll), (endra, enddec, endroll), utime
-        )
-        if settle is None:
-            # The calls a configuration without a table saw before.
-            if rotation_axis_body is None:
-                return scheduled_slew_time(limits.slew_time(self.slewdist))
-            return scheduled_slew_time(
-                limits.slew_time(self.slewdist, rotation_axis_body)
+            slewtime = scheduled_slew_time(
+                self.acs_config.slew_time(self.slewdist, rotation_axis_body)
             )
-        if self.slewdist <= 0.0 or np.isnan(self.slewdist):
-            return 0
-        return scheduled_slew_time(
-            limits.motion_time(self.slewdist, rotation_axis_body) + settle
-        )
+        else:
+            slewtime = scheduled_slew_time(self.acs_config.slew_time(self.slewdist))
 
-    def _thermal_settle(
-        self,
-        start: tuple[float, float, float | None],
-        end: tuple[float, float, float],
-        utime: float | None,
-    ) -> float | None:
-        """The thermal settling table's settle for a slew between the
-        attitudes at ``utime``; None where ``settle_time`` applies: without
-        a table, or for an observation whose category skips the thermal
-        settle. Without the time or either roll, the table's longest."""
-        acs = self.acs_config
-        table = getattr(acs, "thermal_settling", None)
-        if acs is None or not isinstance(table, list) or not table:
-            return None
-        categories = getattr(self.config, "observation_categories", None)
-        if isinstance(
-            categories, ObservationCategories
-        ) and categories.skips_thermal_settling(int(self.obsid)):
-            return None
-        ephem = self.ephem
-        startroll = start[2]
-        if (
-            utime is None
-            or ephem is None
-            or startroll is None
-            or startroll == -1.0
-            or end[2] == -1.0
-        ):
-            return acs.max_settle_seconds
-        change = sun_vector_change_deg(
-            ephem, utime, (start[0], start[1], float(startroll)), end
-        )
-        return acs.settle_seconds(change)
+        return slewtime
 
     def predict_slew(
         self,
@@ -1137,28 +719,3 @@ class PlanEntry(BaseModel):
         self.slewdist, self.slewpath = self.acs_config.predict_slew(
             lastra, lastdec, endra, enddec
         )
-
-
-def snapshot_min_seconds(entry: PlanEntry, step: float = 0.0) -> float:
-    """The least a snapshot of ``entry`` may collect, in seconds.
-
-    ``ss_min`` for its first snapshot; once it has collected anything, the
-    smaller of ``ss_min`` and what remains, so a target cut short by an
-    interruption, or left with a remainder, finishes its exposure instead
-    of losing what is below ``ss_min``. A remainder shorter than ``step``,
-    the step the simulation runs at, is rounding rather than science and
-    gets no snapshot: the minimum stays ``ss_min``. Reads the public
-    attributes, so a test double with a numeric ``ss_min`` and no
-    collection record gets its ``ss_min``.
-    """
-    ss_min = float(entry.ss_min)
-    collected = getattr(entry, "collected_seconds", 0.0)
-    remaining = entry.exptime
-    if (
-        not isinstance(collected, (int, float))
-        or collected <= 0.0
-        or not isinstance(remaining, (int, float))
-        or float(remaining) < step
-    ):
-        return ss_min
-    return min(ss_min, max(0.0, float(remaining)))

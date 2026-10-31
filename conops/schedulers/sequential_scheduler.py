@@ -148,7 +148,7 @@ class SequentialScheduler:
     @staticmethod
     def _validated_ephem(config: MissionConfig) -> rust_ephem.Ephemeris:
         """Return the configuration's ephemeris, rejecting what this scheduler can't plan."""
-        if any(timing.total_seconds > 0 for timing in config.observation_timings()):
+        if config.payload.observation_timing.total_seconds > 0:
             raise ValueError(
                 "Observation timing budgets require QueueDITL, not "
                 "SequentialScheduler or DumbScheduler"
@@ -206,7 +206,7 @@ class SequentialScheduler:
             if target.obsid in self.scheduled:
                 continue
             roll, attitude = self._point(target, utime)
-            slewtime = self._slewtime(target, utime)
+            slewtime = self._slewtime(target)
             assert target.exptime is not None
             clear_seconds = min(
                 self._clear_seconds(
@@ -258,20 +258,13 @@ class SequentialScheduler:
         target.spacecraft_attitude = attitude if mounted else None
         return roll, attitude
 
-    def _slewtime(self, target: PlanEntry, utime: float | None = None) -> float:
+    def _slewtime(self, target: PlanEntry) -> float:
         """Return the slew time into ``target`` from the previous observation."""
         if len(self.plan) == 0:
             return FIRST_SLEW_SECONDS
         last = self.plan[-1]
         last_attitude = last.spacecraft_attitude or (last.ra, last.dec, last.roll)
-        table = getattr(
-            self.config.spacecraft_bus.attitude_control, "thermal_settling", None
-        )
-        estimate = (
-            target.calc_slewtime(*last_attitude, utime=utime)
-            if isinstance(table, list) and table
-            else target.calc_slewtime(*last_attitude)
-        )
+        estimate = target.calc_slewtime(*last_attitude)
         if estimate is not None:
             target.slewtime = estimate
         return target.slewtime

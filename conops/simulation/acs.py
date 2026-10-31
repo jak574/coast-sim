@@ -10,12 +10,6 @@ from ..common import (
     dtutcfromtimestamp,
     unixtime2date,
 )
-from ..common.numerics import (
-    ANGLE_TOLERANCE_DEG,
-    ATTITUDE_TOLERANCE_DEG,
-    POLE_DEC_DEG,
-    REST_RATE_DEG_S,
-)
 from ..common.vector import (
     _quaternion_delta,
     attitude_to_quat,
@@ -24,7 +18,6 @@ from ..common.vector import (
 )
 from ..config import (
     AttitudeConstraintScope,
-    AttitudeControlSystem,
     MissionConfig,
     SolarArrayDriveState,
     SolarPanelSet,
@@ -44,7 +37,6 @@ from .attitude import (
     AttitudeTrajectory,
 )
 from .emergency_charging import EmergencyCharging
-from .momentum import StoredMomentumTracker
 from .momentum_budget import MomentumBudget
 from .passes import Pass
 from .slew import Slew
@@ -104,10 +96,6 @@ class ACS:
         self.fault_management = config.fault_management.new_run()
         self.log = log
         self._executor: AttitudeExecutor | None = None
-        self.momentum_tracker: StoredMomentumTracker | None = None
-        """The simulation's stored-momentum tracker, which capacity
-        enforcement integrates into where it is on; set by the simulation
-        before the run."""
         self.readmission_requests: list[Slew] = []
         self._initial_attitude: Attitude = (0.0, 0.0, 0.0)
         self._attitude_guidance_disabled = False
@@ -133,9 +121,6 @@ class ACS:
         self.obstype = ObsType.PPT
         self.acsmode = ACSMode.IDLE
         self.science_observation_active = False
-        self.scheduled_safe_hold = False
-        self.desaturation_active = False
-        """Whether the held attitude is a thruster momentum dump's."""
         self.in_eclipse = False  # Initialize eclipse state
         self.in_safe_mode = False  # Safe mode flag - once True, cannot be exited
 
@@ -163,8 +148,6 @@ class ACS:
         self.solar_panel = config.solar_panel or SolarPanelSet()
         self.solar_array_drive_state = self.solar_panel.initial_drive_state()
         self.slew_dists: list[float] = []
-        self._tracked_slew: Slew | None = None
-        """The science slew whose moving target the executor is following."""
         self.saa = None
 
     def _attitude_component(self, index: int) -> float:
@@ -226,7 +209,6 @@ class ACS:
                     self.ephem,
                     self.solar_panel,
                     self.constraint,
-                    science_attitude=False,
                     drive_state=self.solar_array_drive_state,
                 )
             executor = AttitudeExecutor(utime, self._initial_attitude)
@@ -235,10 +217,7 @@ class ACS:
                 is True
             ):
                 executor.momentum = MomentumBudget(
-                    self.config,
-                    self.ephem,
-                    executor.state,
-                    tracker=self.momentum_tracker,
+                    self.config, self.ephem, executor.state
                 )
             # Failed initialization must not leave an unguarded executor behind.
             self._executor = executor
@@ -253,23 +232,6 @@ class ACS:
         """Next feasible rest-to-rest handoff, without changing executed state."""
         return self._executor.next_rest_time(utime) if self._executor else utime
 
-    def handoff_ready_time(self, utime: float) -> float:
-        """When a new slew could start if the current motion were stopped
-        now: a moving science target being tracked brakes from ``utime``,
-        as ending its observation brakes it; any other motion rests when it
-        rests. Nothing is changed."""
-        if (
-            self._tracked_slew is not None
-            and self._executor is not None
-            and self.science_observation_active
-        ):
-            state = self._executor.predict(utime)
-            trajectory = AttitudeTrajectory.braking(
-                state, self.config.spacecraft_bus.attitude_control
-            )
-            return float(trajectory.end) if trajectory is not None else utime
-        return self.motion_ready_time(utime)
-
     def predicted_attitude(self, utime: float) -> Attitude:
         """Evaluate installed physical motion without advancing execution."""
         return (
@@ -277,27 +239,6 @@ class ACS:
             if self._executor
             else self._initial_attitude
         )
-
-    def executed_attitude(self, utime: float) -> Attitude:
-        """The attitude flown at ``utime``, a time up to the present, from
-        the motion that was flying then."""
-        if self._executor is None:
-            return (self.ra, self.dec, self.roll)
-        return self._executor.flown(utime).attitude
-
-    def executed_angular_velocity(self, utime: float) -> Attitude:
-        """The body's angular velocity at ``utime`` in degrees per second:
-        from the motion that was flying then for a time up to the present,
-        from the motion installed for a time after it."""
-        if self._executor is None:
-            return (0.0, 0.0, 0.0)
-        if utime > self._executor.state.utime:
-            return self._executor.predict(utime).angular_velocity_body
-        return self._executor.flown(utime).angular_velocity_body
-
-    def attitude_moved(self, begin: float, end: float) -> bool:
-        """Whether the attitude moved at any time in ``(begin, end]``."""
-        return self._executor is not None and self._executor.moved_between(begin, end)
 
     def _log_or_print(
         self, utime: float, event_type: DITLEventType, description: str
@@ -464,7 +405,7 @@ class ACS:
         """Handle START_PASS command to command the start of a groundstation pass."""
         # Fetch the current pass from pass requests
         gspass = self.passrequests.current_pass(utime)
-        if gspass is None or not gspass.requires_tracking:
+        if gspass is None:
             self._log_or_print(
                 utime, "PASS", f"{unixtime2date(utime)}: No active pass found to start."
             )
@@ -546,53 +487,6 @@ class ACS:
             f"{unixtime2date(utime)}: Command queue cleared - no further commands will be executed",
         )
 
-        policy = self.config.spacecraft_bus.attitude_control.safe_mode_attitude
-        if policy is not None:
-            # Imported locally: the planning geometry depends on ACS too.
-            from ..schedulers.context import SchedulingContext
-            from .safe_hold import SafeHoldUnavailableError, power_positive_attitudes
-
-            ctx = SchedulingContext(
-                self.config, dtutcfromtimestamp(utime), self.ephem.timestamp[-1]
-            )
-            start = ctx.ceil_step(self.handoff_ready_time(utime))
-            poses = (
-                [policy.fixed_pointing]
-                if policy.kind == "fixed"
-                else power_positive_attitudes(
-                    self.config, policy, start, ctx.uend, ACSMode.SAFE
-                )
-            )
-            for pose in poses:
-                assert pose is not None
-                slew = ctx.slew(
-                    self.predicted_attitude(start),
-                    pose,
-                    start,
-                    obstype=ObsType.SAFE,
-                    obsid=-999,
-                )
-                if (
-                    slew.slewend >= ctx.uend
-                    or ctx.first_slew_violation(slew, ACSMode.SLEWING) is not None
-                    or ctx.first_hold_violation(
-                        pose, slew.slewend, ctx.uend, ACSMode.SAFE
-                    )
-                    is not None
-                ):
-                    continue
-                self.enqueue_command(
-                    ACSCommand(
-                        command_type=ACSCommandType.SLEW_TO_TARGET,
-                        execution_time=start,
-                        slew=slew,
-                    )
-                )
-                return
-            raise SafeHoldUnavailableError(
-                "no SAFE pose has a safe ingress and whole hold"
-            )
-
         # Initiate slew to Sun pointing for safe mode
         # Use solar panel optimal pointing to maximize power generation
         if self.solar_panel is not None:
@@ -634,29 +528,22 @@ class ACS:
             angle, _ = _quaternion_delta(
                 prepared.state(prepared.start).quaternion, executor.state.quaternion
             )
-            if prepared.start != utime or angle > ATTITUDE_TOLERANCE_DEG:
+            if prepared.start != utime or angle > 1e-8:
                 self.readmission_requests.append(slew)
                 self._log_or_print(
                     utime, "SLEW", "Delayed slew requires scheduler re-admission"
                 )
                 return None
-            trajectory = prepared
+            executor.install(prepared, momentum_end=slew._momentum_hold_end)
         else:
             slew.startra = self.ra
             slew.startdec = self.dec
             slew.startroll = self.roll
             slew.slewstart = utime
             slew.calc_slewtime()
-            trajectory = AttitudeTrajectory.from_slew(
-                slew, slew.motion_limits, executor.state
+            executor.install(
+                AttitudeTrajectory.from_slew(slew, slew.motion_limits, executor.state)
             )
-        tracking = self._tracking_after(slew, trajectory, slew.motion_limits)
-        if tracking is not None:
-            trajectory = AttitudeTrajectory(
-                (*trajectory.legs, *tracking.legs), tracking.end
-            )
-        executor.install(trajectory, momentum_end=slew._momentum_hold_end)
-        self._tracked_slew = slew if tracking is not None else None
 
         slewdist = slew.slewdist
         self._log_or_print(
@@ -664,17 +551,7 @@ class ACS:
             "SLEW",
             f"{unixtime2date(utime)}: Starting slew from RA={self.ra:.2f} Dec={self.dec:.2f} "
             f"to RA={slew.endra:.2f} Dec={slew.enddec:.2f} "
-            f"(duration: {slew.slewtime:.1f}s, distance: {slewdist:.1f} deg"
-            + (
-                f", Sun moves {slew.sun_vector_change_deg:.1f} deg, "
-                f"settle {slew.settle_seconds:.0f}s)"
-                if slew.settle_seconds is not None
-                and isinstance(
-                    self.config.spacecraft_bus.attitude_control.thermal_settling, list
-                )
-                and self.config.spacecraft_bus.attitude_control.thermal_settling
-                else ")"
-            ),
+            f"(duration: {slew.slewtime:.1f}s, distance: {slewdist:.1f} deg)",
         )
 
         self.current_slew = slew
@@ -688,81 +565,13 @@ class ACS:
             self.science_observation_active = False
         return slew
 
-    TRACK_SAMPLE_SECONDS = 60.0
-    """How often a moving target's track is sampled for the executor."""
-
-    def _tracking_after(
-        self, slew: Slew, trajectory: AttitudeTrajectory, limits: AttitudeControlSystem
-    ) -> AttitudeTrajectory | None:
-        """The motion that follows the slew to a moving science target: its
-        track, at the roll the slew ends at, from the slew's end to the
-        observation's end, as a ground contact's profile is followed, then a
-        stop. None for a fixed target, or one not observed past the slew."""
-        target = slew.at
-        # A test double's target has no track to speak of.
-        if (
-            not self._is_science_pointing(slew)
-            or getattr(target, "moves", False) is not True
-        ):
-            return None
-        assert target is not None
-        end = float(getattr(target, "end", 0.0) or 0.0)
-        begin = float(slew.slewend)
-        if end <= begin + self.TRACK_SAMPLE_SECONDS:
-            return None
-        instrument_roll = (
-            slew.instrument_roll if slew.instrument_roll is not None else slew.endroll
-        )
-        arrival = trajectory.state(begin)
-        samples: list[tuple[float, Attitude]] = [(begin, arrival.attitude)]
-        time = begin + self.TRACK_SAMPLE_SECONDS
-        while time < end:
-            samples.append(
-                (time, target.target_body_attitude(instrument_roll, at=time))
-            )
-            time += self.TRACK_SAMPLE_SECONDS
-        samples.append((end, target.target_body_attitude(instrument_roll, at=end)))
-        tracking = AttitudeTrajectory.tracking(samples, limits, initial_state=arrival)
-        self._log_or_print(
-            begin,
-            "SLEW",
-            f"{unixtime2date(begin)}: Tracking moving target {slew.obsid} at "
-            f"{target.track_rate_deg_per_s(begin) * 3600.0:.3f} deg/h until "
-            f"{unixtime2date(end)}",
-        )
-        return tracking
-
     def _is_science_pointing(self, slew: Slew) -> bool:
         """Check if slew represents a science pointing (not a pass)."""
         return slew.obstype == ObsType.PPT and isinstance(slew, Slew)
 
-    def end_science_observation(self, utime: float | None = None) -> None:
-        """Mark the current held attitude as no longer collecting science. A
-        moving target being tracked is braked to rest from ``utime``, so the
-        next slew need not wait for the end of its track."""
+    def end_science_observation(self) -> None:
+        """Mark the current held attitude as no longer collecting science."""
         self.science_observation_active = False
-        if utime is None or self._tracked_slew is None or self._executor is None:
-            return
-        executor = self._advance_attitude(utime)
-        if executor.next_rest_time(utime) > utime:
-            executor.request_stop(utime, self.config.spacecraft_bus.attitude_control)
-        self._tracked_slew = None
-
-    def begin_safe_hold(self) -> None:
-        """Enter a recoverable planned SAFE hold without latching a fault."""
-        self.scheduled_safe_hold = True
-
-    def end_safe_hold(self) -> None:
-        self.scheduled_safe_hold = False
-
-    def begin_desaturation(self) -> None:
-        """A thruster momentum dump begins: the attitude held is its, and the
-        mode is DESAT once any slew into it is over."""
-        self.desaturation_active = True
-
-    def end_desaturation(self) -> None:
-        """The thruster momentum dump ends."""
-        self.desaturation_active = False
 
     def cancel_pending_slews(self, obsid: int) -> None:
         """Drop queued target slews for ``obsid`` that have not started yet."""
@@ -804,7 +613,6 @@ class ACS:
                 self.ephem,
                 self.solar_panel,
                 self.constraint,
-                science_attitude=False,
                 drive_state=self.solar_array_drive_state,
             )
         else:
@@ -1024,7 +832,6 @@ class ACS:
         self.command_queue.clear()
         self.current_pass = None
         self.science_observation_active = False
-        self.desaturation_active = False
         self.current_slew = None
         executor = self._advance_attitude(utime)
         self.last_slew = Slew.idle_hold(self.config, *executor.state.attitude, utime)
@@ -1098,25 +905,10 @@ class ACS:
         if self._is_in_pass_dwell(utime):
             return ACSMode.PASS
 
-        # A moving science target is followed at its rate while observed.
-        if (
-            self._tracked_slew is not None
-            and self._tracked_slew is self.last_slew
-            and self.science_observation_active
-        ):
-            return ACSMode.SCIENCE
-
         # Tracking can be braking after contact ends, independently of the
         # stale ingress-slew metadata. Do not report that moving tail as IDLE.
-        if any(abs(rate) > REST_RATE_DEG_S for rate in self.angular_velocity_body):
+        if any(abs(rate) > 1e-10 for rate in self.angular_velocity_body):
             return ACSMode.SLEWING
-
-        if self.scheduled_safe_hold:
-            return ACSMode.SAFE
-
-        # Holding for a thruster momentum dump
-        if self.desaturation_active:
-            return ACSMode.DESAT
 
         # Check if in SAA region
         if self.saa is not None and self.saa.insaa(utime):
@@ -1146,13 +938,6 @@ class ACS:
             return
         if self._attitude_guidance_disabled:
             return
-        if (
-            self.in_safe_mode
-            and self.config.spacecraft_bus.attitude_control.safe_mode_attitude
-            is not None
-        ):
-            # This pose was checked for the entire remaining hold.
-            return
         if self._is_actively_slewing(utime) or any(
             command.command_type != ACSCommandType.END_BATTERY_CHARGE
             for command in self.command_queue
@@ -1177,14 +962,13 @@ class ACS:
             self.constraint,
             reference_roll=self.roll,
             max_roll_delta=180.0,
-            science_attitude=False,
             drive_state=self.solar_array_drive_state,
         )
         target = (ra, dec, roll)
         distance, _ = _quaternion_delta(
             executor.state.quaternion, attitude_to_quat(*target)
         )
-        if distance > ATTITUDE_TOLERANCE_DEG:
+        if distance > 1e-8:
             executor.install(
                 AttitudeTrajectory.turn_from_state(
                     executor.state,
@@ -1266,8 +1050,7 @@ class ACS:
         def add(roll: float) -> None:
             normalized = roll % 360.0
             is_new = all(
-                abs(((normalized - existing + 180.0) % 360.0) - 180.0)
-                > ANGLE_TOLERANCE_DEG
+                abs(((normalized - existing + 180.0) % 360.0) - 180.0) > 1e-6
                 for existing in rolls
             )
             if is_new:
@@ -1308,7 +1091,7 @@ class ACS:
 
         grid: list[tuple[float, float]] = []
         for dec in range(-90, 91, IDLE_SAFE_ATTITUDE_GRID_STEP_DEG):
-            if abs(dec) == POLE_DEC_DEG:
+            if abs(dec) == 90:
                 grid.append((0.0, float(dec)))
                 continue
             for grid_ra in range(0, 360, IDLE_SAFE_ATTITUDE_GRID_STEP_DEG):
@@ -1331,7 +1114,7 @@ class ACS:
         """Install a zero-duration IDLE hold so future ticks keep the safe attitude."""
         executor = self._advance_attitude(utime)
         distance, _ = quaternion_attitude_delta(*executor.state.attitude, ra, dec, roll)
-        if distance > ATTITUDE_TOLERANCE_DEG:
+        if distance > 1e-8:
             raise AttitudeExecutionError("A hold cannot change the physical attitude")
         executor.hold(utime)
         hold = Slew.idle_hold(self.config, *executor.state.attitude, utime)
@@ -1339,7 +1122,6 @@ class ACS:
         self.current_slew = None
         self.last_slew = hold
         self.science_observation_active = False
-        self.desaturation_active = False
 
     def _is_in_charging_mode(self, utime: float) -> bool:
         """Check if spacecraft is in charging mode (dwelling at charge pointing).

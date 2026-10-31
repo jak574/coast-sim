@@ -8,7 +8,6 @@ import pytest
 from conops.config import ScienceData, TargetConfig
 from conops.config.observation_categories import ObservationCategory
 from conops.ditl import DITLLogStore, ReplanReason, RollingHorizonDITL
-from conops.schedulers import LongRangeAllocator
 from conops.simulation.passes import PassTimes
 from conops.targets import Pointing
 
@@ -211,54 +210,6 @@ class TestPassPrediction:
         assert any(e.obstype.name == "GSP" for e in ditl.plan)
         assert ditl.validate_plan_matches_execution() == []
 
-    def test_the_allocator_shares_the_runs_passes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An allocator with a data budget predicts the run's passes for its
-        downlink per bin; a rolling run gives it the passes it has predicted
-        for its plans, so the run still predicts once."""
-        config = _config(14, stations=True)
-        targets = [
-            _target(config, 100 + i, ra, dec, merit=90 - i, minutes=60, snapshot=20)
-            for i, (ra, dec) in enumerate(PATCH)
-        ]
-        for target in targets:
-            target.science_data = {"Default Instrument": ScienceData(rate_gbps=0.001)}
-        predictions: list[bool] = []
-        original = PassTimes.get
-
-        def counted(self: PassTimes, *args: object, **kwargs: object) -> None:
-            predictions.append(bool(kwargs.get("apply_scheduling", True)))
-            original(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(PassTimes, "get", counted)
-        allocator = LongRangeAllocator(
-            config,
-            BEGIN,
-            BEGIN + timedelta(hours=14),
-            bin_length=timedelta(hours=7),
-            solver="greedy",
-        )
-        ditl = RollingHorizonDITL(
-            config,
-            targets,
-            begin=BEGIN,
-            end=BEGIN + timedelta(hours=14),
-            horizon=timedelta(hours=6),
-            replan_interval=timedelta(hours=3),
-            allocator=allocator,
-        )
-        ditl.step_size = 60
-        assert ditl.calc()
-
-        assert predictions == [True]
-        assert ditl.allocation is not None
-        assert allocator.passes is not None
-        assert [p.begin for p in allocator.passes] == [
-            p.begin for p in ditl._run_passes or []
-        ]
-        assert ditl.validate_plan_matches_execution() == []
-
 
 def _long_observation() -> list[Pointing]:
     config = _config(3)
@@ -325,34 +276,6 @@ class TestTargetsOfOpportunity:
         assert rapid[0].interrupted_obsid == 1
         response = ditl.too_response_times()[1_000_001]
         assert response is not None and response <= 10 * MIN
-        assert ditl.too_register[0].executed
-        assert ditl.validate_plan_matches_execution() == []
-
-    def test_a_too_collected_by_its_deadline_waits_for_the_observation(self) -> None:
-        """A ToO that needs a rapid replan but can begin collecting by its
-        deadline once the observation under way ends waits for it, as it
-        does in dispatch: nothing is cut, the ToO follows the observation
-        and is on time."""
-        ditl = _run(
-            3,
-            _long_observation(),
-            toos=({**GRB, "deadline": T0 + 2 * HOUR},),
-            replan_interval=timedelta(hours=4),
-        )
-
-        rapid = [r for r in ditl.replans if r.reason is ReplanReason.RAPID]
-        assert len(rapid) == 1 and rapid[0].interrupted_obsid is None
-        science = [e for e in ditl.plan if e.obstype.name == "AT"]
-        assert [int(e.obsid) for e in science] == [1, 1_000_001]
-        assert float(science[0].end) - float(science[0].begin) >= 60 * MIN
-        too_entry = science[1]
-        assert too_entry.collection_begin is not None
-        assert float(too_entry.collection_begin) <= T0 + 2 * HOUR
-        assert float(too_entry.begin) >= float(science[0].end)
-        assert any(
-            "waits for observation 1 under way at the commit cutoff" in e.description
-            for e in ditl.log.events
-        )
         assert ditl.too_register[0].executed
         assert ditl.validate_plan_matches_execution() == []
 

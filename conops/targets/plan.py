@@ -14,12 +14,9 @@ from pydantic import (
     computed_field,
     field_serializer,
     field_validator,
-    model_validator,
 )
 
 from .._version import __version__
-from ..common import unixtime_from
-from .entries import AnyEntry, with_kind
 from .plan_entry import AttitudeRotationConventionSchema, PlanEntry
 
 if TYPE_CHECKING:
@@ -31,14 +28,7 @@ if TYPE_CHECKING:
 class TargetList(BaseModel):
     """List of potential targets for Spacecraft to observe"""
 
-    targets: list[SerializeAsAny[AnyEntry]] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _targets_with_kinds(cls, data: object) -> object:
-        if isinstance(data, dict) and isinstance(data.get("targets"), list):
-            data = {**data, "targets": [with_kind(t) for t in data["targets"]]}
-        return data
+    targets: list[PlanEntry] = Field(default_factory=list)
 
     def __getitem__(self, number: int) -> PlanEntry:
         return self.targets[number]
@@ -98,10 +88,12 @@ class AttitudeTimeseriesSchema(AttitudeRotationConventionSchema):
 
     @field_validator("plan_start", "plan_end", mode="before")
     @classmethod
-    def _coerce_optional_time(
-        cls, v: float | int | str | datetime | None
-    ) -> float | None:
-        return None if v is None else unixtime_from(v)
+    def _coerce_optional_time(cls, v: float | int | str | None) -> float | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return datetime.fromisoformat(v).timestamp()
+        return float(v)
 
     @field_serializer("plan_start", "plan_end")
     def _serialize_optional_time(self, v: float | None) -> str | None:
@@ -145,10 +137,12 @@ class OrbitStateTimeseriesSchema(BaseModel):
 
     @field_validator("plan_start", "plan_end", mode="before")
     @classmethod
-    def _coerce_optional_time(
-        cls, v: float | int | str | datetime | None
-    ) -> float | None:
-        return None if v is None else unixtime_from(v)
+    def _coerce_optional_time(cls, v: float | int | str | None) -> float | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return datetime.fromisoformat(v).timestamp()
+        return float(v)
 
     @field_serializer("plan_start", "plan_end")
     def _serialize_optional_time(self, v: float | None) -> str | None:
@@ -203,15 +197,7 @@ class Plan(BaseModel):
     roll_reference_axis: Literal["+Z"] = "+Z"
     roll_reference: Literal["projected_celestial_north"] = "projected_celestial_north"
     metadata: dict[str, object] | None = None
-    ground_contacts: list[tuple[float, float, str]] | None = Field(
-        default=None,
-        description=(
-            "Booked ground-station passes without spacecraft tracking, "
-            "as (begin Unix seconds, end Unix seconds, station code). "
-            "None predicts bookings; an empty list reserves no station time."
-        ),
-    )
-    entries: list[SerializeAsAny[AnyEntry]] = Field(default_factory=list)
+    entries: list[SerializeAsAny[PlanEntry]] = Field(default_factory=list)
     attitude_timeseries: AttitudeTimeseriesSchema | None = Field(
         default=None, exclude=True
     )
@@ -225,28 +211,12 @@ class Plan(BaseModel):
         return len(self.entries)
 
     @property
-    def _scheduled(self) -> list[PlanEntry]:
-        """The entries a run has placed in time; a request never scheduled
-        has no begin or end and says nothing about the plan's span."""
-        return [e for e in self.entries if not (e.begin == 0 and e.end == 0)]
-
-    @property
     def _start_ts(self) -> float:
-        scheduled = self._scheduled
-        return scheduled[0].begin if scheduled else 0.0
+        return self.entries[0].begin if self.entries else 0.0
 
     @property
     def _end_ts(self) -> float:
-        scheduled = self._scheduled
-        return scheduled[-1].end if scheduled else 0.0
-
-    @model_validator(mode="before")
-    @classmethod
-    def _entries_with_kinds(cls, data: object) -> object:
-        """A file written before entries carried a ``kind`` holds plain entries."""
-        if isinstance(data, dict) and isinstance(data.get("entries"), list):
-            data = {**data, "entries": [with_kind(e) for e in data["entries"]]}
-        return data
+        return self.entries[-1].end if self.entries else 0.0
 
     @computed_field  # type: ignore[prop-decorator]
     @property

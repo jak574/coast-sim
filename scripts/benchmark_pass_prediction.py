@@ -25,12 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 
-from scheduler.planning_scenario import (  # noqa: E402
-    BEGIN,
-    PATCH,
-    make_config,
-    make_target,
-)
+from scheduler.planning_scenario import BEGIN, PATCH, make_config, make_target  # noqa: E402
 
 from conops.ditl import RollingHorizonDITL  # noqa: E402
 from conops.simulation.passes import PassTimes  # noqa: E402
