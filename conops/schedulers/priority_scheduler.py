@@ -2239,9 +2239,21 @@ class PriorityScheduler:
         latest = block.latest_ready if block.latest_ready is not None else block.ready
         begin = min(begin, latest)
         block.ready = begin
-        block.end = min(begin + activity.duration_seconds, self.ctx.uend)
+        block.end = self._activity_end(activity, begin)
         block.entry.begin = begin
         block.entry.end = block.end
+
+    def _activity_end(self, activity: ScheduledActivity, begin: float) -> float:
+        """Keep a reserved activity whole across an internal planning cutoff.
+
+        Its tail is committed with it by a rolling run. Only the physical run
+        and the ephemeris limit how far that hold can be executed and checked.
+        """
+        return min(
+            begin + activity.duration_seconds,
+            self.ctx.simulation_end.timestamp(),
+            self.ctx.ephem_end,
+        )
 
     def _activity_ready(self, activity: ScheduledActivity) -> float:
         """When an activity is reserved from: its latest start, or after
@@ -2278,9 +2290,9 @@ class PriorityScheduler:
                 activity.obsid,
             )
             return
-        # Reserved within the horizon: a block that may begin late can end
-        # past it, and the plan holds it as far as the horizon goes.
-        end = min(ready + activity.duration_seconds, self.ctx.uend)
+        # A reservation beginning within the horizon keeps its tail for the
+        # next rolling plan, bounded by the physical run and ephemeris end.
+        end = self._activity_end(activity, ready)
         if ready > activity.latest_start:
             self._log(
                 activity.begin,
@@ -2317,8 +2329,7 @@ class PriorityScheduler:
         # its entry begins after what precedes it, at its start at the
         # earliest, when the plan is finished.
         late = activity.slides or ready > activity.latest_start
-        if late:
-            entry.end = end
+        entry.end = end
         block = _Block(
             entry=entry,
             attitude_in=attitude,
