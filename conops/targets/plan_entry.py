@@ -241,6 +241,7 @@ class PlanEntry(BaseModel):
         exclude_if=lambda v: v is None,
         description="Full activity hold start, including any part before this run",
     )
+    safe_hold: bool = Field(default=False, exclude_if=lambda v: v is False)
     activity_hold_end: float | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
@@ -251,7 +252,7 @@ class PlanEntry(BaseModel):
         exclude_if=lambda v: v is False,
         description=(
             "Whether this activity reserves a stationary hold after ingress; "
-            "slewing or SAFE during the hold then violates the plan"
+            "slewing or an unexpected hold mode violates the plan"
         ),
     )
     own_timing: ObservationTiming | None = Field(
@@ -512,6 +513,16 @@ class PlanEntry(BaseModel):
         ) or (
             self.activity_hold_end is not None
             and float(self.end) < self.activity_hold_end
+        )
+
+    @property
+    def activity_mode(self) -> ACSMode:
+        return (
+            ACSMode.SAFE
+            if self.safe_hold
+            else ACSMode.DESAT
+            if self.desaturation
+            else ACSMode.IDLE
         )
 
     @property

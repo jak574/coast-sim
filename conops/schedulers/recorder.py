@@ -17,7 +17,6 @@ from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from ..common.enums import ACSMode, ObsType
-from ..common.numerics import ROUNDOFF
 from ..config import MissionConfig
 from ..config.data_storage import RecorderView
 from ..ditl.plan_validator import entry_obstype
@@ -25,6 +24,9 @@ from ..simulation.coverage import StationCoverage
 from ..targets import PlanEntry
 from ..targets.plan_entry import extra_data_gb, instrument_modes_of
 from .consumable import ConsumableLedger, Removal
+
+_FLOW_ZERO_TOLERANCE_GB = 1e-12
+_AMOUNT_EQUAL_TOLERANCE_GB = 1e-9
 
 
 class DataFlow(NamedTuple):
@@ -36,7 +38,6 @@ class DataFlow(NamedTuple):
 
 
 RecorderAmount = float | tuple[DataFlow, ...]
-_VOLUME_TOLERANCE_GB = 1e-9
 
 
 def amount_total(amount: RecorderAmount) -> float:
@@ -63,16 +64,16 @@ def combine_amounts(
     return tuple(
         DataFlow(lo, hi, v)
         for (lo, hi), v in sorted(flows.items())
-        if abs(v) > ROUNDOFF
+        if abs(v) > _FLOW_ZERO_TOLERANCE_GB
     )
 
 
 def amounts_equal(a: RecorderAmount, b: RecorderAmount) -> bool:
     d = combine_amounts(a, b, -1.0)
     return (
-        abs(d) <= _VOLUME_TOLERANCE_GB
+        abs(d) <= _AMOUNT_EQUAL_TOLERANCE_GB
         if isinstance(d, (int, float))
-        else all(abs(f.volume) <= _VOLUME_TOLERANCE_GB for f in d)
+        else all(abs(f.volume) <= _AMOUNT_EQUAL_TOLERANCE_GB for f in d)
     )
 
 
