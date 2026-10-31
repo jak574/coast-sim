@@ -193,14 +193,30 @@ How a plan is built
    thruster momentum dump), so no science is placed across it. An activity holds the attitude of whatever precedes it in the
    plan: the science before it ends at the block with no slew back, the block holds
    that science's attitude, and the science after it slews from there. A snapshot
-   whose attitude ``IDLE`` cannot hold through the block, or from which the block
-   after the activity cannot be reached, is not placed before it. With nothing
+   whose attitude cannot be held through the block must leave time for a safe
+   ingress slew; a snapshot from which the activity or the block after it cannot
+   be reached is not placed before it. With nothing
    before it, the activity holds the attitude the plan starts from, or the one the
    fixed block before it leaves; where that cannot be held through the activity and
-   the idle time after it, the activity slews to the safe idle attitude of its start,
-   the one the simulation holds before its first command. An activity overlapping
-   a planning horizon is reserved for its intersection with that horizon, including
-   when already underway. A maintenance window, a calibration that needs the
+   the idle time after it, the planner searches deterministic safe-hold candidates
+   shared with dispatch: the initial idle attitude, nearby directions, array
+   pointing, Earth- and Sun-opposite directions and a sky grid, with roll
+   alternatives where roll affects safety. A candidate must be safe for the whole
+   hold and reachable by a path-validated slew, with time for the following block.
+   The entry begins with that ingress; ``activity_hold_begin`` marks the full
+   calibration's start after ingress. Sliding holds retain their full duration
+   after arrival, and their settled time and changed predecessor are rechecked.
+   After tracking a moving target, the handoff uses the final resting attitude
+   after braking, so the activity does not command a return to the body's arrival
+   position. Planned entries mark ``activity_requires_stationary``; validation
+   then rejects slewing or SAFE during the full hold, while legacy and flexible
+   dispatch holds retain their existing recovery semantics.
+   If no candidate fits, the planners raise
+   :class:`~conops.schedulers.ActivitySchedulingError`, naming the mandatory
+   activity, its start window and the failed reservation, instead of returning a
+   plan that omits it. An activity reserved at or beyond an internal horizon's end
+   is still deferred to a later plan.
+   A maintenance window, a calibration that needs the
    spacecraft still or an engineering block is an activity; ``DITL`` commands the
    plan's activity entries, and the plan validator checks that no science, contact or
    charge ran during one. Dispatch takes the same list: it ends the observation under
@@ -238,6 +254,12 @@ How a plan is built
    with the activity, so science cannot use its tail and its data is not
    generated again. The physical simulation end and the ephemeris end still
    bound the hold; an internal planning cutoff does not.
+   A replan retains an uncommitted activity whose nominal start has passed
+   while its slide window remains open. It reserves a new full hold after the
+   committed work, on an execution step, and does not treat the activity as
+   resumed. Committed and completed activities are excluded by identity so they
+   are not repeated. An unstarted activity whose window has already closed is
+   reported with ``ActivitySchedulingError``.
    In a partial run, dispatch and the planners resume a fixed activity that
    began earlier, holding only until its original end. Without earlier execution
    state, a sliding activity whose window is still open begins a whole hold at

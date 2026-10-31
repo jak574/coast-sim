@@ -15,7 +15,12 @@ from ..config.data_storage import DataStorage, RecorderView
 from ..config.solar_panel import SolarArrayDriveState
 from ..schedulers.allocator import Allocation, LongRangeAllocator
 from ..schedulers.battery import Addition, BatteryLedger
-from ..schedulers.context import Attitude, SchedulingContext, tracking_rest
+from ..schedulers.context import (
+    Attitude,
+    SchedulingContext,
+    science_rest,
+    tracking_rest,
+)
 from ..schedulers.local_search_scheduler import LocalSearchScheduler
 from ..schedulers.priority_scheduler import PriorityScheduler, StartState
 from ..schedulers.recorder import RecorderAmount, RecorderLedger, combine_amounts
@@ -850,12 +855,8 @@ class RollingHorizonDITL(DITL):
             activities=[
                 a
                 for a in self.activities
-                if a.begin >= start
-                or (
-                    utime == self.ustart
-                    and a.latest_start + a.duration_seconds > start
-                    and a.obsid not in reserved_activities
-                )
+                if a.obsid not in reserved_activities
+                and a.latest_start + a.duration_seconds > start
             ],
             **options,  # type: ignore[arg-type]
         )
@@ -1234,6 +1235,8 @@ class RollingHorizonDITL(DITL):
             if rest is not None:
                 rest_time, attitude = rest
                 return max(float(entry.end), rest_time), attitude
+        if entry.moves:
+            return science_rest(entry, self.config.spacecraft_bus.attitude_control)
         return float(entry.end), _final_attitude(entry)
 
     @staticmethod
