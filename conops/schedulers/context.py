@@ -7,7 +7,7 @@ ACS mode, which ground passes are available) using the same models
 therefore execute as planned, step for step.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 
 import numpy as np
@@ -26,7 +26,7 @@ from ..simulation.acs import ACS
 from ..simulation.attitude import AttitudeExecutionError, AttitudeTrajectory
 from ..simulation.coverage import StationCoverage, cut_windows
 from ..simulation.passes import Pass, PassTimes
-from ..simulation.roll import optimum_roll
+from ..simulation.roll import optimum_body_roll, optimum_roll
 from ..simulation.slew import Slew
 from ..simulation.target_tracking import target_tracking
 from ..targets import MovingPointing, PlanEntry, Pointing
@@ -184,6 +184,34 @@ class SchedulingContext:
             self._initial_attitudes.append((float(ra), float(dec), float(roll)))
         return self._initial_attitudes[index]
 
+    def idle_hold_candidates(self, near: Attitude, utime: float) -> Iterator[Attitude]:
+        """Deterministic alternative attitudes for a whole safe hold.
+
+        Share dispatch's candidate directions and rolls. The caller checks
+        the entire hold and the actual ingress path, not just this epoch.
+        """
+        yield self.initial_attitude(utime)
+        acs = ACS(config=self.config, log=DITLLog())
+        acs.ephem = self.ephem
+        acs.ra, acs.dec, acs.roll = near
+        for ra, dec in acs._idle_safe_attitude_candidates(utime):
+            preferred = optimum_body_roll(
+                ra,
+                dec,
+                utime,
+                self.ephem,
+                self.config.solar_panel,
+                self.config.constraint,
+                science_attitude=False,
+            )
+            rolls = (
+                [preferred]
+                if self.config.constraint.ignore_roll
+                else acs._idle_safe_roll_candidates(preferred)
+            )
+            for roll in rolls:
+                yield (ra, dec, roll)
+
     def optimum_roll(self, target: PlanEntry, utime: float) -> float:
         """Return the power-optimal instrument roll for a target at ``utime``."""
         ra, dec = target.position_at(utime)
@@ -337,7 +365,7 @@ class SchedulingContext:
         return violation
 
     def science_rest(
-        self, entry: PlanEntry, slew: Slew
+        self, entry: PlanEntry, slew: Slew | None = None
     ) -> tuple[float, Attitude] | None:
         """The departure state after science tracking and its physical brake.
 
@@ -345,6 +373,8 @@ class SchedulingContext:
         slew starts from the same attitude, at rest. None means the track or
         its brake cannot be flown safely within this planning horizon.
         """
+        if slew is None:
+            return science_rest(entry, self.config.spacecraft_bus.attitude_control)
         attitude = (float(slew.endra), float(slew.enddec), float(slew.endroll))
         if not entry.moves:
             return float(entry.end), attitude
@@ -563,6 +593,30 @@ class SchedulingContext:
         return tracking_rest(
             gspass, profile, acquire, self.config.spacecraft_bus.attitude_control
         )
+
+
+def science_rest(
+    entry: PlanEntry, limits: AttitudeControlSystem
+) -> tuple[float, Attitude]:
+    """Rest after tracking, including the terminal braking used by ACS.
+
+    Only the final tracking interval sets its terminal rate, so rebuilding
+    that interval gives the same stop without replaying the whole visit.
+    """
+    end = float(entry.end)
+    arrival = float(entry.begin) + entry.slewtime
+    step = ACS.TRACK_SAMPLE_SECONDS
+    if not entry.moves or end <= arrival + step:
+        return end, entry.target_body_attitude()
+    previous = arrival + (float(np.ceil((end - arrival) / step)) - 1) * step
+    trajectory = AttitudeTrajectory.tracking(
+        [
+            (previous, entry.target_body_attitude(at=previous)),
+            (end, entry.target_body_attitude(at=end)),
+        ],
+        limits,
+    )
+    return float(trajectory.end), trajectory.state(trajectory.end).attitude
 
 
 def tracking_samples(

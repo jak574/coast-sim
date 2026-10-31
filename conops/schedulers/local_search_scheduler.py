@@ -290,7 +290,11 @@ class LocalSearchScheduler(PriorityScheduler):
         held when that ends, and one that would then run into the block
         after it is left where it was reserved."""
         held = {
-            int(entry.obsid): float(entry.begin)
+            int(entry.obsid): (
+                entry.activity_hold_begin
+                if entry.activity_hold_begin is not None
+                else float(entry.begin) + entry.slewtime
+            )
             for entry in plan
             if entry_obstype(entry) == ObsType.ACTIVITY
         }
