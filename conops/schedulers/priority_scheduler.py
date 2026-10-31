@@ -1987,7 +1987,10 @@ class PriorityScheduler:
         placing it did. False, and the block is left out to be placed
         again, where what follows it cannot be reached from it."""
         assert block.slew is not None
-        index = self._insertion_index(block.ready)
+        # A previously inserted entry may have settled a sliding activity
+        # earlier. The retained slew must precede it even when arrival is
+        # after its current hold start; reconnecting settles the hold again.
+        index = self._insertion_index(block.slew_start)
         succ = self.timeline[index] if index < len(self.timeline) else None
         succ_slew = None
         if succ is not None:
