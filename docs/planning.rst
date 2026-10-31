@@ -753,25 +753,34 @@ through it:
 * the segments start at each sunrise, and the plan is checked at every segment's
   peak.
 
-The scheduler charges where it can. As it evaluates each placement, it puts a charge
-into every idle sunlit stretch of the timeline long enough for one and its two
-slews: slewing from the activity before to the charging attitude, found as emergency
-charging finds it, holding it while the charging mode's constraints allow until the
-stretch ends, and leaving the activity after it reachable from the charging attitude,
-shortened or dropped where it is not. A snapshot is placed only where the deficit,
-with those charges, stays within the limit from there to the end of the horizon.
-Where it does not, the scheduler tries the snapshot later in the same gap, after the
-charging time its idle sunlit start then leaves, before moving to a later gap; it is
-never shortened to fit, and the log says when a request waits for charge. The
-finished plan carries its charges as ``CHARGE`` entries, which ``DITL`` executes as it
-does contacts and :meth:`~conops.ditl.DITL.validate_plan_matches_execution` checks.
+The scheduler first evaluates the whole horizon without new charging manoeuvres.
+If passive generation and the available battery keep it above the planning level,
+it adds no charge, including during long sunlit idle gaps. A full battery now
+can still require a charge for a later deficit: the decision uses future loads,
+not only the initial state of charge.
+
+Where charging is needed, the scheduler builds geometry-feasible candidates in
+sunlit idle gaps. It checks the actual ingress, the reconnected successor's slew,
+IDLE generation before and after charging, saturation at the recharge level,
+eclipse, and finite array-drive behaviour. It removes candidates whose omission
+preserves battery feasibility and safe connections, then searches for shorter
+holds on the simulation grid. Each accepted shorter hold is checked against the
+whole horizon; this bounded search does not claim a globally optimal set of
+manoeuvres. Explicit or committed charging entries remain reserved.
+
+A snapshot is placed only where the resulting forecast stays within the battery
+limit through the end of the horizon. Where it does not, the scheduler can try the
+snapshot later in the gap, leaving time to charge first; it is never shortened to
+fit. A schedule that remains infeasible is still rejected. The finished plan
+carries the retained charges as ``CHARGE`` entries, which ``DITL`` executes and
+:meth:`~conops.ditl.DITL.validate_plan_matches_execution` checks.
 
 The ledger is the simulation's own arithmetic at the attitudes the simulation flies,
 so a plan it accepts keeps the battery above the level when executed. A spacecraft
 whose panels generate more than observing draws, such as a side-mounted array rolled
-towards the Sun, charges only in the sunlit idle time it has anyway and fills the
-day with science. One whose panels only generate pointing at the Sun charges in
-every idle sunlit stretch and refuses the science the battery cannot carry through
+towards the Sun, needs no discretionary charge when passive generation suffices.
+One whose panels only generate pointing at the Sun reserves necessary charges in idle
+sunlit time and refuses the science the battery cannot carry through
 the eclipse after it; it is then the lowest-merit science that waits, as with the
 recorder. Local search decodes its sequences through the same check;
 :class:`~conops.ditl.RollingHorizonDITL` starts each plan from the battery the

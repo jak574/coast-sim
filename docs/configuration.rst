@@ -490,8 +490,8 @@ that pose. The wheel reset occurs at firing end, once; an incomplete firing at
 the physical simulation end does not reset the wheels. A configured dump waits
 for an indivisible visit before turning and firing.
 
-This illustrative pose is a test input; Lazuli's firing rule remains a mission
-input. Place ``thruster_dump`` under
+This illustrative pose is a test input; the firing rule remains a mission
+configuration input. Place ``thruster_dump`` under
 ``spacecraft_bus.attitude_control.stored_momentum``. Its angles use the physical GCRS body-attitude convention of plan entries,
 including when the declared spacecraft frame has a +Z payload boresight.
 

@@ -119,7 +119,7 @@ def test_recharge_uses_the_current_sequence_steps_budgets(
 ):
     """Intermediate steps owe no teardown; the last owes no repeated setup.
 
-    Lazuli's recharge during the first step's ingress raised because the guard
+    Spacecraft's recharge during the first step's ingress raised because the guard
     charged that step the category's cleanup, reserved only after the last step.
     """
     timing = ObservationTiming(setup_seconds=43, cleanup_seconds=85, handoff_seconds=40)
