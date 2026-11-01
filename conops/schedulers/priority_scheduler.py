@@ -673,7 +673,8 @@ class PriorityScheduler:
                         self.dumps = [*kept, reserved]
                         self._log(
                             begin,
-                            f"{why}: thruster dump reserved before observation {obsid}",
+                            f"{why}: thruster dump reserved before observation {obsid}, "
+                            "whose slew would reach the capacity",
                             reserved.obsid,
                         )
                         self._keep_before(begin)
@@ -858,10 +859,16 @@ class PriorityScheduler:
         capacity = forecast.capacity_n_m_s
         crossing = forecast.first_crossing(self.timeline, capacity, demand=True)
         if crossing is not None:
+            dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
+            disposition = (
+                "with the dumps reserved"
+                if dump is not None
+                else "with no thrusters to dump it"
+            )
             self._log(
                 crossing,
                 f"The plan's forecast reaches the {capacity} N m s capacity at "
-                f"{unixtime2date(crossing)} with the dumps reserved",
+                f"{unixtime2date(crossing)} {disposition}",
             )
 
     def _dump_placement(
@@ -1079,7 +1086,20 @@ class PriorityScheduler:
                 self._place_activity(activity)
         # After the passes and activities, as the science was placed: each
         # kept block keeps its slew and re-slews what now follows it.
-        self._kept = [block for block in self._kept if self._insert_kept(block)]
+        retained = []
+        for block in self._kept:
+            if self._insert_kept(block):
+                retained.append(block)
+            else:
+                # A rejected retained block must be eligible for placement again,
+                # including the time before the previous momentum resume point.
+                self._resume_from = min(
+                    block.slew_start,
+                    self._resume_from
+                    if self._resume_from is not None
+                    else block.slew_start,
+                )
+        self._kept = retained
         kept = {id(block.entry) for block in self._kept}
         self._kept_visits = {}
         for block in self._kept:
@@ -1714,7 +1734,9 @@ class PriorityScheduler:
                 # The target's own windows, computed once and kept with
                 # it from plan to plan: a candidate at its pointing, or
                 # along its track, has the same.
-                if not target.windows:
+                if not target.windows or target._visibility_key is not None:
+                    # A caller may have queried only part of this target's span.
+                    # The planner needs complete coverage for its existing API.
                     target.visibility()
                 windows = [list(w) for w in target.windows]
             else:
@@ -2048,6 +2070,16 @@ class PriorityScheduler:
         # earlier. The retained slew must precede it even when arrival is
         # after its current hold start; reconnecting settles the hold again.
         index = self._insertion_index(block.slew_start)
+        if index > 0:
+            previous = self.timeline[index - 1]
+            if previous.is_activity and previous.ready == block.slew_start:
+                # A preceding retained observation can settle a sliding hold to
+                # exactly this start. Put this retained slew before the hold and
+                # reconnect it; placing it after would overlap the whole hold.
+                index -= 1
+        pred = self._pred_at(index)
+        if pred is not None and self.ctx.ceil_step(pred.end) > block.slew_start:
+            return False
         succ = self.timeline[index] if index < len(self.timeline) else None
         succ_slew = None
         if succ is not None:
@@ -3566,6 +3598,7 @@ class PriorityScheduler:
                 ss_max=step.duration_seconds,
                 step=step.name,
                 calibration=not step.science,
+                visit=request.visit if request.timed else None,
             )
             entry.exptime = step.duration_seconds
             steps.append(entry)
@@ -3600,6 +3633,7 @@ class PriorityScheduler:
             merit=request.merit.value,
             ss_min=request.minimum_snapshot,
             ss_max=target.ss_max,
+            visit=request.visit if request.timed else None,
         )
         visit_entry.exptime = sequence.science_seconds
         return _Visit(visit_entry, steps, slews, previous, float(steps[-1].end))

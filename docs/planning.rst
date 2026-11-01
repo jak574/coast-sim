@@ -124,10 +124,33 @@ computed along the track. Dispatch and the planners alike point it where the sle
 to it ends: the slew is timed to its position at the start and then to the position
 at that slew's end, and a planned entry carries that position, where the executor
 takes up the track.
+Asteroids use their NAIF/SPK IDs, for example ``body="20000624"`` for Hektor;
+``624`` is its permanent asteroid number and also a moon's NAIF ID. The
+`extended NAIF numbering scheme
+<https://naif.jpl.nasa.gov/pub/naif/toolkit_docs/FORTRAN/req/naif_ids.html>`_
+assigns numbered asteroids IDs based on 20,000,000 plus the asteroid number.
+COASTSim preserves the identifier through lookup and program serialization. The
+upstream ``rust_ephem`` adapter translates asteroid NAIF IDs into the
+`Horizons designation-search syntax
+<https://ssd-api.jpl.nasa.gov/doc/horizons.html>`_; programs do not need to carry
+that service-specific syntax. An older adapter may return no ephemeris for the
+otherwise valid ID. Fetch once using
+``Program.bind(refresh_tracks=True)`` and save the program to retain the track
+for offline execution. The dependency release must include the fix before using
+live small-body lookup in distributed notebooks.
 While it is observed the attitude follows the track at its rate, as a ground
 contact's profile is followed, and comes to rest when the observation ends; the ACS
 reports ``SCIENCE`` throughout, the plan validator expects the track's position at
 each sample, and the planners' battery ledger counts the attitude along the track.
+
+``Pointing.visibility(begin=..., end=...)`` evaluates only the selected interval
+on the original ephemeris grid, with adjacent samples to preserve boundary
+semantics. Bounds accept UTC datetimes, ISO strings or Unix seconds. Bounded
+queries accumulate known windows on the request; contained queries reuse those
+results, and wider or disjoint queries extend coverage. Changes to pointing,
+track, roll, ephemeris or configuration invalidate bounded results. Unknown
+intervals are not assumed visible. Calling ``visibility()`` without bounds
+restores the whole-ephemeris behavior, which queue intake and planners retain.
 Plan entries record the position at the slew's end and the track itself, which a
 plan replay without the track observes as a fixed pointing.
 
@@ -865,7 +888,12 @@ cross plateaus. The objective is merit-weighted science time, with each snapshot
 shares in the plan before it. A snapshot of a request with a deadline is worth less
 the later it starts, so ToOs and other time-critical requests are not pushed later
 than they need to be. The best plan found is returned, and it is never worse than the
-priority-first plan.
+priority-first plan. For a windowed visit, the deadline discount uses the
+``visit`` index stored on that observation's plan entry, including the group's
+window limits. Rescoring an earlier timeline therefore uses the same window as
+exact decoding, independently of which visit the request is currently trying
+to place. Sequence blocks and every exported step retain that same visit index.
+Scoring does not change placement state.
 
 Cadence visits keep their spacing, from each other and from locked visits, and each
 plan entry's ``merit`` is the value its snapshot has where it is placed, as in the
