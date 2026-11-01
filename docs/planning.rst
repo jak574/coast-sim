@@ -983,6 +983,11 @@ chunk are kept. The next chunk is solved from where the kept snapshots leave the
 spacecraft. Every plan therefore executes as planned and is never worse than the
 priority-first plan; ``solver_chunks_used`` shows which chunks the solver improved.
 
+The priority-first start and a supplied seed are decoded independently with their
+own sliding-activity reservations. Seed activity times apply only while evaluating
+the seed and are kept only if that seed wins the starting-plan comparison; a
+losing seed cannot move a mandatory block into the priority-first science.
+
 When a dispatch seed decodes to a better starting plan, that decoded plan is
 the incumbent for chunk hints and comparisons. Recorder and battery reservations
 for later observations come from its continuation decoded from the current
@@ -1318,7 +1323,8 @@ as ``+alloc``.
 Each :class:`~conops.benchmark.BenchmarkResult` reports, measured the same way for every
 contender:
 
-* science time and merit-weighted science;
+* science time and merit-weighted science, excluding executed sequence calibration;
+* calibration collection time separately as ``calibration_hours``;
 * time slewing, idle and in contact, and the number of observations;
 * each ToO's response time, and how many started by their deadline;
 * how many other requests with a deadline got their whole exposure;
