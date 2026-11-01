@@ -184,6 +184,28 @@ class _BodyEphemeris:
 
 
 class TestBodyLookup:
+    @pytest.mark.parametrize("identifier", ["624", "20000624", "20136108", "Jupiter"])
+    def test_explicit_body_identifier_and_saved_track_survive_program_roundtrip(
+        self, ephem: TLEEphemeris, identifier: str, tmp_path, monkeypatch
+    ) -> None:
+        from conops.targets import Program
+
+        config = MissionConfig(constraint=Constraint())
+        config.constraint.ephem = ephem
+        mover = MovingPointing(config=config, obsid=1, body=identifier, track=_track())
+        program = Program(begin=T0, end=T0 + 6 * HOUR, requests=[mover])
+        loaded = Program.load(program.save(tmp_path / "program.json"))
+        assert loaded.requests[0].body == identifier
+        assert loaded.requests[0].track == mover.track
+
+        def offline(*args, **kwargs):
+            raise AssertionError("A persisted track must not be fetched again")
+
+        monkeypatch.setattr("conops.targets.pointing.body_track", offline)
+        loaded.bind(config)
+        assert loaded.requests[0].body == identifier
+        assert loaded.requests[0].track == mover.track
+
     def test_needs_a_track_or_a_body(self) -> None:
         with pytest.raises(ValidationError, match="track or a body"):
             MovingPointing(obsid=1, name="m")

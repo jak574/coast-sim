@@ -497,7 +497,11 @@ class TestSequenceToOWhileObserving:
 
 
 class TestVisitUnderWayAndLowerRequests:
-    def test_a_visit_under_way_is_not_cut_for_a_lower_ranked_request(self) -> None:
+    @pytest.mark.parametrize("first_science", [False, True])
+    @pytest.mark.parametrize("repoint", [False, True])
+    def test_a_visit_under_way_is_not_cut_for_a_lower_ranked_request(
+        self, first_science: bool, repoint: bool
+    ) -> None:
         """A sequence visit that cannot wait for a lower-ranked request is
         admitted whole; its first step's pointing carries no deadline of its
         own, and the deadline dispatch computed for it then yielded to the
@@ -518,8 +522,15 @@ class TestVisitUnderWayAndLowerRequests:
             deadline=T0 + 10 * MIN,
             sequence=ObservationSequence(
                 steps=[
-                    SequenceStep(name="first", duration_seconds=2400),
-                    SequenceStep(name="second", duration_seconds=2400),
+                    SequenceStep(
+                        name="first", duration_seconds=2400, science=first_science
+                    ),
+                    SequenceStep(
+                        name="second",
+                        duration_seconds=2400,
+                        ra=PATCH[1][0] if repoint else None,
+                        dec=PATCH[1][1] if repoint else None,
+                    ),
                 ]
             ),
         )
