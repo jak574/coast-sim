@@ -21,6 +21,14 @@ Housekeeping Data
 -----------------
 
 Housekeeping records capture the complete spacecraft state at each simulation timestep.
+``collection_seconds`` is the executed collection duration within the step,
+excluding setup and cleanup. ``calibration=True`` identifies collection in a
+sequence's calibration step. Sum ``collection_seconds`` only where
+``calibration=False`` to measure science; calibration still consumes time, power
+and any configured calibration data. The benchmark reports these durations
+separately as ``science_hours`` and ``calibration_hours``. Older telemetry without
+the flag loads with ``False``; regenerate legacy sequence telemetry before using
+it for a science-only acceptance comparison.
 
 .. code-block:: python
 

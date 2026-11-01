@@ -258,8 +258,6 @@ class LocalSearchScheduler(PriorityScheduler):
         self.initial_score = self._timeline_score(science)
 
         self._fixed = fixed
-        if self.start_plan is not None:
-            self._settle_from(self.start_plan)
         # Released at their priority-first times, the snapshots decode to
         # the priority-first plan; moves release them one at a time.
         start = self._decode(
@@ -274,10 +272,18 @@ class LocalSearchScheduler(PriorityScheduler):
         )
         self.start_score = self._objective(start.final)
         if self.start_plan is not None:
+            # Decode each candidate with its own activity reservations. Moving
+            # the priority plan's holds to the seed's times before comparison
+            # can cut out priority science even when the seed is worse.
+            priority_fixed = self._fixed
+            self._fixed = [self._copy_block(block) for block in priority_fixed]
+            self._settle_from(self.start_plan)
             seeded = self._decode_plan(self.start_plan)
             self.seed_score = self._objective(seeded.final)
             if self.seed_score > self.start_score:
                 start, self.start_score = seeded, self.seed_score
+            else:
+                self._fixed = priority_fixed
         return start
 
     def _settle_from(self, plan: Plan) -> None:
