@@ -1293,6 +1293,8 @@ class QueueDITL(DITLMixin, DITLStats):
                             acs_mode=self.acs.acsmode,
                         )
                     return changed
+                if self._reserve_activity_cleanup(due, utime):
+                    return changed
                 if self._should_initiate_charging(utime):
                     # Before starting a block, decide whether its whole hold
                     # can wait out the alert. Do not begin a zero-length
@@ -1399,10 +1401,47 @@ class QueueDITL(DITLMixin, DITLStats):
         for activity in self._unstarted_activities():
             if activity.attitude.kind == "inherited" or activity.begin <= utime:
                 continue
-            slew = self._activity_ingress(activity, utime)
+            slew = self._activity_ingress(
+                activity, self._activity_release_time(utime, anticipate_collection=True)
+            )
             if slew.slewend + self.step_size >= activity.latest_start:
                 return activity
         return None
+
+    def _activity_release_time(
+        self, utime: float, *, anticipate_collection: bool = False
+    ) -> float:
+        """Earliest release after stopping future collection and paying teardown."""
+        ppt = self.ppt
+        if (
+            ppt is None
+            or ppt is self.charging_ppt
+            or ppt.collection_begin is None
+            or ppt.collection_end is None
+        ):
+            return utime
+        if utime <= ppt.collection_begin and not anticipate_collection:
+            return utime
+        post = self._ppt_timing(ppt).post_collection_seconds
+        return self._activity_model().ceil_step(
+            max(utime, min(ppt.end, max(utime, ppt.collection_begin) + post))
+        )
+
+    def _reserve_activity_cleanup(
+        self, activity: ScheduledActivity, utime: float
+    ) -> bool:
+        """Cut only future collection, then wait for its reserved teardown."""
+        release = self._activity_release_time(utime)
+        if release <= utime:
+            return False
+        self._reserve_cleanup(
+            utime,
+            decision_time=utime,
+            event_type="ACTIVITY",
+            before=f"scheduled activity {activity.name}",
+            waiting="the activity ingress",
+        )
+        return True
 
     def _activity_waits_for(
         self, activity: ScheduledActivity, utime: float
@@ -1425,7 +1464,10 @@ class QueueDITL(DITLMixin, DITLStats):
             and utime < activity.latest_start
         ):
             if activity.attitude.kind != "inherited":
-                ingress = self._activity_ingress(activity, utime)
+                ingress = self._activity_ingress(
+                    activity,
+                    self._activity_release_time(utime, anticipate_collection=True),
+                )
                 if ingress.slewend + self.step_size >= activity.latest_start:
                     return None
             return (
@@ -1907,6 +1949,10 @@ class QueueDITL(DITLMixin, DITLStats):
     ) -> None:
         self._activity_continuation = continuation
         self._charge_waiting_activity = None
+        if self._activity_release_time(utime) > utime:
+            raise ActivitySchedulingError(
+                activity, "observation cleanup/handoff has not finished before ingress"
+            )
         if self.ppt is not None:
             if self.ppt == self.charging_ppt:
                 self._terminate_charging_ppt(utime)
@@ -4645,7 +4691,11 @@ class QueueDITL(DITLMixin, DITLStats):
         telescope = (
             target.science_telescope() if issubclass(type(target), PlanEntry) else None
         )
-        slew.instrument_name = telescope.name if telescope is not None else None
+        slew.instrument_name = (
+            target.science_instrument_name()
+            if issubclass(type(target), PlanEntry)
+            else None
+        )
         slew.instrument_roll = instrument_roll
         if telescope is not None and not telescope.mounting.is_identity:
             target.roll = instrument_roll

@@ -305,7 +305,12 @@ How a plan is built
    same GCRS physical body-attitude convention as plan entries. This fixes the
    pose; the separate ``fixed`` activity flag fixes its start time.
    Dispatch prepares the required ingress as its start window approaches. The
-   planners reserve that ingress before the full hold, searching a sliding
+   look-ahead includes the current observation's cleanup and handoff budget,
+   including when collection has not started yet. Dispatch can cancel a pending
+   collection before it begins; once science has executed, only future collection
+   is shortened and its full teardown is paid before ingress. Already collected
+   science is never reclassified as cleanup to fit the hold.
+   The planners reserve that ingress before the full hold, searching a sliding
    window for a feasible time at the requested pose. An unsafe required pose
    is reported explicitly rather than replaced with another attitude. Replans
    retain the validated pose and hold, and the next observation departs directly
@@ -1089,6 +1094,13 @@ context so that their plans also execute as planned.
 
 Rolling-horizon replanning
 --------------------------
+
+The planner's default initial pose uses the same origin-time roll as a fresh
+ACS. It does not replay a command-free flight to each later candidate time:
+that hypothetical idle flight could fault even though the real spacecraft is
+following a valid plan. Candidate generation leaves fault management untouched;
+the actual ingress and hold still undergo their normal safety checks. A replan
+continues to use its supplied execution state.
 
 :class:`~conops.ditl.rolling_ditl.RollingHorizonDITL` simulates a mission that is
 planned on the ground and replanned periodically. It runs like
