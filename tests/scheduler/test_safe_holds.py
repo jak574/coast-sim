@@ -14,6 +14,7 @@ from conops.config import (
     ActivityAttitude,
     Instrument,
     MissionConfig,
+    ObservationTiming,
     SingleAxisSolarArrayDrive,
     SolarPanel,
     SolarPanelSet,
@@ -35,6 +36,83 @@ from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config, make_target
 from .test_activity_safety import _planner
 
 POLICY = ActivityAttitude(kind="power_positive", minimum_margin_w=100)
+
+
+def test_future_collection_must_not_consume_the_activity_handoff_window():
+    config = configuration(hours=2)
+    config.payload.observation_timing = ObservationTiming(cleanup_seconds=10 * MIN)
+    hold = ScheduledActivity(
+        name="Fixed hold before an exposure can finish teardown",
+        begin=T0 + 5 * MIN,
+        duration_seconds=20 * MIN,
+        fixed=True,
+        safe_hold=True,
+        attitude=ActivityAttitude(kind="fixed", ra_deg=105, dec_deg=10, roll_deg=0),
+    )
+    run = QueueDITL(
+        config=config, begin=BEGIN, end=BEGIN + timedelta(hours=2), activities=[hold]
+    )
+    run.ustart, run.uend, run.step_size = T0, T0 + 2 * HOUR, MIN
+    target = make_target(config, 100, 105, 10, minutes=30)
+    target.collection_begin = T0 + MIN
+    target.collection_end = T0 + 30 * MIN
+    target.end = T0 + 40 * MIN
+    run.ppt = target
+    assert run._manage_activities(T0, run.acs.ra, run.acs.dec, run.acs.roll)
+    assert run._active_activity is not None
+    assert run._active_activity.name == hold.name
+    assert run.ppt is None  # cancellation before collection needs no fictional cleanup
+
+
+@pytest.mark.parametrize("fixed", [True, False])
+@pytest.mark.parametrize("attitude_kind", ["fixed", "power_positive"])
+def test_safe_hold_reserves_cleanup_before_ingress(fixed, attitude_kind):
+    config = configuration(hours=4)
+    config.payload.observation_timing = ObservationTiming(
+        cleanup_seconds=300, handoff_seconds=120
+    )
+    pose = (
+        ActivityAttitude(kind="fixed", ra_deg=170, dec_deg=35, roll_deg=20)
+        if attitude_kind == "fixed"
+        else POLICY
+    )
+    hold = ScheduledActivity(
+        name="Required safe hold during a long exposure",
+        begin=T0 + HOUR,
+        duration_seconds=HOUR,
+        fixed=fixed,
+        slide_seconds=0 if fixed else 15 * MIN,
+        safe_hold=True,
+        attitude=pose,
+    )
+    run = QueueDITL(
+        config=config, begin=BEGIN, end=BEGIN + timedelta(hours=4), activities=[hold]
+    )
+    run.queue.add_request(
+        make_target(config, 100, 105, 10, minutes=150, snapshot=150, ss_min=5)
+    )
+    assert run.calc()
+    assert not run.validate_plan_matches_execution()
+    block = next(e for e in run.plan if e.obstype == ObsType.ACTIVITY)
+    assert block.activity_finishes
+    assert block.activity_hold_end - block.activity_hold_begin == HOUR
+    assert hold.begin <= block.activity_hold_begin <= hold.latest_start
+    before = [
+        e
+        for e in run.plan
+        if e.obstype in (ObsType.PPT, ObsType.AT) and e.end <= block.begin
+    ]
+    assert before
+    assert before[-1].collection_end + 420 <= block.begin
+    collected = sum(
+        float(h.collection_seconds or 0) for h in run.telemetry.housekeeping
+    )
+    planned = sum(
+        float(e.collection_end - e.collection_begin)
+        for e in run.plan
+        if e.collection_begin is not None and e.collection_end is not None
+    )
+    assert collected == pytest.approx(planned)
 
 
 def configuration(hours=4, payload_frame=False):

@@ -403,6 +403,7 @@ class Constraint(ConfigModel):
         self.__dict__.pop("roll_dependent_constraint", None)
         self._body_safety_key = None
         self.__dict__.pop("science_constraint_roll_dependent", None)
+        self._body_safety_key = None
 
     @staticmethod
     def _combine_constraints(
