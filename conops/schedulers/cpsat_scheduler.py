@@ -1104,6 +1104,8 @@ class CpSatScheduler(LocalSearchScheduler):
     def schedule(self) -> Plan:
         """Build the priority-first plan, solve chunk by chunk, and optionally
         polish, within the wheels' momentum where the configuration tracks it."""
+        self.search_iterations.clear()
+        self.search_limits.clear()
         return self._plan_within_momentum(self._plan_once)
 
     def _plan_once(self) -> Plan:

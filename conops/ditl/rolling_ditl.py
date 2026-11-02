@@ -65,6 +65,10 @@ class ReplanRecord(BaseModel):
             were kept over the priority-first plan's.
         solver_limits: What ended each chunk's search: optimal, the
             deterministic budget, the wall clock or the solver itself.
+        search_iterations: Changes tried in each local-search pass across
+            all candidate plans built for this replan, including rejected ones.
+        search_limits: What ended each corresponding local-search pass:
+            iteration budget, wall clock, or disabled.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -88,6 +92,8 @@ class ReplanRecord(BaseModel):
     solver_limits: list[str] = Field(default_factory=list)
     """What ended each chunk's search (see
     :func:`~conops.schedulers.cpsat_scheduler.search_ending`)."""
+    search_iterations: list[int] = Field(default_factory=list)
+    search_limits: list[str] = Field(default_factory=list)
 
 
 class _PlanSummary(BaseModel):
@@ -99,6 +105,8 @@ class _PlanSummary(BaseModel):
     solver_statuses: list[str] = Field(default_factory=list)
     solver_chunks_used: list[bool] = Field(default_factory=list)
     solver_limits: list[str] = Field(default_factory=list)
+    search_iterations: list[int] = Field(default_factory=list)
+    search_limits: list[str] = Field(default_factory=list)
 
     @classmethod
     def of(cls, scheduler: object, seed_entries: int) -> "_PlanSummary":
@@ -110,6 +118,7 @@ class _PlanSummary(BaseModel):
             return [str(v) for v in value] if isinstance(value, list) else []
 
         used = getattr(scheduler, "solver_chunks_used", None)
+        iterations = getattr(scheduler, "search_iterations", None)
         return cls(
             seed_entries=seed_entries,
             solver_statuses=strings("solver_statuses"),
@@ -117,6 +126,10 @@ class _PlanSummary(BaseModel):
                 [bool(v) for v in used] if isinstance(used, list) else []
             ),
             solver_limits=strings("solver_limits"),
+            search_iterations=(
+                [int(v) for v in iterations] if isinstance(iterations, list) else []
+            ),
+            search_limits=strings("search_limits"),
         )
 
 
@@ -258,6 +271,8 @@ class RollingHorizonDITL(DITL):
         self._last_seed_entries = 0
         self._last_plan = _PlanSummary()
         """What the last plan built reported (see :class:`_PlanSummary`)."""
+        self._replan_search_iterations: list[int] = []
+        self._replan_search_limits: list[str] = []
         self.allocator = allocator
         self.allocation_bonus = allocation_bonus
         self.allocation: Allocation | None = allocation
@@ -571,6 +586,8 @@ class RollingHorizonDITL(DITL):
         self, utime: float, reason: ReplanReason, triggers: Sequence[TOORequest]
     ) -> None:
         """Keep committed activities and plan the rest of the horizon again."""
+        self._replan_search_iterations = []
+        self._replan_search_limits = []
         # The first plan is built before the run, so nothing waits for it.
         cutoff = (
             self._ceil_step(utime)
@@ -657,6 +674,8 @@ class RollingHorizonDITL(DITL):
             solver_statuses=self._last_plan.solver_statuses,
             solver_chunks_used=self._last_plan.solver_chunks_used,
             solver_limits=self._last_plan.solver_limits,
+            search_iterations=self._replan_search_iterations,
+            search_limits=self._replan_search_limits,
         )
         self.replans.append(record)
         self.log.log_event(
@@ -862,6 +881,10 @@ class RollingHorizonDITL(DITL):
         )
         entries = scheduler.schedule().entries
         self._last_plan = _PlanSummary.of(scheduler, self._last_seed_entries)
+        # Rejected candidate plans can also have a load-dependent search.
+        # Keep every attempt's endings even if an earlier plan is selected.
+        self._replan_search_iterations.extend(self._last_plan.search_iterations)
+        self._replan_search_limits.extend(self._last_plan.search_limits)
         return (committed, dropped, [*pinned, *entries], len(scheduler.unplaced))
 
     def _interrupt_for(
