@@ -23,6 +23,40 @@ MONITOR = ObservationCategory(
 )
 
 
+def test_equal_value_does_not_postpone_the_priority_science() -> None:
+    config = _config(4)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    target = _target(config, 100, *PATCH[0], minutes=20)
+    scheduler = LocalSearchScheduler(
+        config,
+        [target],
+        BEGIN,
+        BEGIN + timedelta(hours=4),
+        time_limit=0,
+        max_iterations=0,
+        include_passes=False,
+    )
+    start = scheduler._start_from_priority_plan()
+    delayed = scheduler._decode(
+        [
+            s.model_copy(update={"release": float(s.release or T0) + HOUR})
+            for s in start.sequence
+        ]
+    )
+    assert scheduler._objective(delayed.final) == scheduler.initial_score
+    assert (
+        delayed.final.timeline[0].entry.collection_begin
+        > scheduler._greedy_timeline[0].entry.collection_begin
+    )
+    plan = scheduler._finish_best(delayed)
+    assert (
+        plan.entries[0].collection_begin
+        == scheduler._greedy_timeline[0].entry.collection_begin
+    )
+    assert _execute([target], plan, 4).validate_plan_matches_execution() == []
+
+
 def _targets(hours: int, config: MissionConfig | None = None) -> list[Pointing]:
     config = config if config is not None else _config(hours)
     return [

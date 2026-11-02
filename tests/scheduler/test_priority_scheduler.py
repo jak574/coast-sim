@@ -20,7 +20,12 @@ from conops.config import (
 )
 from conops.config.acs import ThermalSettlingStep
 from conops.config.observation_categories import ObservationCategory
-from conops.schedulers import PriorityScheduler, SchedulingContext
+from conops.schedulers import (
+    CpSatScheduler,
+    LocalSearchScheduler,
+    PriorityScheduler,
+    SchedulingContext,
+)
 from conops.schedulers.priority_scheduler import _Move
 from conops.simulation import Pass
 from conops.targets import Plan, PlanEntry, Pointing, ScheduledActivity
@@ -279,6 +284,49 @@ class TestSnapshots:
 
 
 class TestDeadlinesAndConstraints:
+    @pytest.mark.parametrize(
+        "scheduler_type", [PriorityScheduler, LocalSearchScheduler, CpSatScheduler]
+    )
+    def test_waits_for_an_opening_between_command_steps(self, scheduler_type) -> None:
+        """A short wait preserves an exact start instead of losing the visit."""
+        config = _config(2)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        acs = config.spacecraft_bus.attitude_control
+        acs.max_slew_rate = 360.0
+        acs.slew_acceleration = 360.0
+        target = _target(
+            config,
+            1,
+            105.0,
+            10.0,
+            minutes=10,
+            earliest_start=T0 + 103,
+            deadline=T0 + 103,
+        )
+        target.roll_deg = 0.0
+        options = (
+            {}
+            if scheduler_type is PriorityScheduler
+            else {"time_limit": 0, "max_iterations": 0}
+        )
+        scheduler = scheduler_type(
+            config,
+            [target],
+            BEGIN,
+            BEGIN + timedelta(hours=2),
+            step_size=60,
+            include_passes=False,
+            **options,
+        )
+        plan = scheduler.schedule()
+        (entry,) = _science(plan)
+        assert entry.collection_begin == T0 + 103
+        assert entry.exposure == 10 * MIN
+        assert entry.begin < entry.collection_begin - entry.slewtime
+        ditl = _execute(config, plan, 2, 60)
+        assert ditl.validate_plan_matches_execution() == []
+
     def test_collection_starts_by_the_deadline(self) -> None:
         config = _config(2)
         target = _target(config, 1, 105.0, 10.0, deadline=T0 + 30 * MIN)
