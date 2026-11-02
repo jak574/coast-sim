@@ -21,6 +21,10 @@ Housekeeping Data
 -----------------
 
 Housekeeping records capture the complete spacecraft state at each simulation timestep.
+Planned execution samples Sun and orbital state by each record's UTC timestamp.
+Starting inside a longer ephemeris, or using an execution step coarser than its
+sampling step, does not restart the orbital arrays at index zero. Stored-momentum
+integration uses the same time-aligned position and environmental samples.
 ``collection_seconds`` is the executed collection duration within the step,
 excluding setup and cleanup. ``calibration=True`` identifies collection in a
 sequence's calibration step. Sum ``collection_seconds`` only where
