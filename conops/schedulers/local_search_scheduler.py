@@ -280,7 +280,12 @@ class LocalSearchScheduler(PriorityScheduler):
             self._settle_from(self.start_plan)
             seeded = self._decode_plan(self.start_plan)
             self.seed_score = self._objective(seeded.final)
-            if self.seed_score > self.start_score:
+            if self._improves(
+                self.seed_score,
+                seeded.final.timeline,
+                self.start_score,
+                start.final.timeline,
+            ):
                 start, self.start_score = seeded, self.seed_score
             else:
                 self._fixed = priority_fixed
@@ -397,18 +402,66 @@ class LocalSearchScheduler(PriorityScheduler):
     def _finish_best(self, best: _Decoded) -> Plan:
         """Return the best plan found, or the priority-first plan if better."""
         best_score = self._objective(best.final)
-        if best_score >= self.initial_score:
+        if self._improves(
+            best_score, best.final.timeline, self.initial_score, self._greedy_timeline
+        ):
             self.score = best_score
             self._set_unplaced(best.final.remaining)
-            return self._finish(best.final.timeline)
-        self.score = self.initial_score
-        return self._finish(self._greedy_timeline)
+            timeline = best.final.timeline
+        else:
+            self.score = self.initial_score
+            timeline = self._greedy_timeline
+
+        return self._finish(timeline)
 
     # ── Objective ────────────────────────────────────────────────────────
 
     @staticmethod
     def _objective(state: _State) -> float:
         return state.score
+
+    def _improves(
+        self,
+        score: float,
+        timeline: Sequence[_Block],
+        incumbent_score: float,
+        incumbent: Sequence[_Block],
+        *,
+        accept_equal_timing: bool = False,
+    ) -> bool:
+        """Prefer more value, then earlier science, retaining an exact tie.
+
+        Postponing equal-valued science can lose it at a rolling commitment
+        boundary. Complete timing ties may reproduce a solver hint; the
+        search's best plan retains its incumbent on a complete tie.
+        A lower primary score is never accepted by this comparison.
+        """
+        if score < incumbent_score:
+            return False
+        if score > incumbent_score:
+            return True
+        early = self._frontloaded_science(timeline)
+        previous = self._frontloaded_science(incumbent)
+        return early > previous or (accept_equal_timing and early == previous)
+
+    def _frontloaded_science(self, timeline: Sequence[_Block]) -> float:
+        """Integral of fixed-merit science delivered before the horizon ends."""
+        total = 0.0
+        for block in timeline:
+            if block.is_fixed:
+                continue
+            request = self._by_obsid.get(int(block.entry.obsid))
+            merit = float(
+                request.target.merit if request is not None else block.entry.merit
+            )
+            for entry in block.steps or [block.entry]:
+                if entry.calibration:
+                    continue
+                begin, end = entry.collection_interval_between(
+                    float(entry.begin), float(entry.end)
+                )
+                total += merit * (end - begin) * (self.ctx.uend - (begin + end) * 0.5)
+        return total
 
     def _timeline_score(self, science: Sequence[_Block]) -> float:
         """Score a priority-first timeline's science blocks, in time order."""
@@ -790,7 +843,9 @@ class LocalSearchScheduler(PriorityScheduler):
             if score >= current_score or score >= history[slot]:
                 current, current_score = candidate, score
                 self.accepted += 1
-                if score > best_score:
+                if self._improves(
+                    score, candidate.final.timeline, best_score, best.final.timeline
+                ):
                     best, best_score = candidate, score
             history[slot] = current_score
         return best

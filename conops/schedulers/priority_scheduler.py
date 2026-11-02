@@ -3228,16 +3228,20 @@ class PriorityScheduler:
 
             collection_begin = float(slew.slewend) + timing.setup_seconds
             earliest_start = request.earliest_start
+            if (
+                earliest_start is not None
+                and 0.0 < earliest_start - collection_begin <= self.ctx.step_size
+            ):
+                # A command starts on a simulation step, but collection need
+                # not. Keep the feasible ingress and wait out the fraction
+                # of a step rather than delaying the entire observation.
+                # _check_snapshot validates the wait along with the hold.
+                collection_begin = earliest_start
             if earliest_start is not None and collection_begin < earliest_start:
-                # Start later by the shortfall, so collection begins at the
-                # earliest start if the slew takes as long. It need not: its
-                # duration changes with the instrument roll, so a longer slew
-                # there can leave this step too late for a deadline that an
-                # earlier step meets. So step back while the step before
-                # still begins collection by the earliest start. No earlier
-                # start can then do so: a slew's duration changes by far less
-                # than a step from one step to the next, so collection begins
-                # later the later the slew starts.
+                # Jump near the opening, retaining the preceding command
+                # step when its arrival leaves at most one step to wait.
+                # Slew duration can change with the roll at departure, so
+                # check earlier steps rather than trusting the estimate.
                 jump = max(
                     start + self.ctx.step_size,
                     self.ctx.ceil_step(start + earliest_start - collection_begin),
@@ -3248,7 +3252,7 @@ class PriorityScheduler:
                     and self._collection_begin_at(
                         target, pred, jump - self.ctx.step_size
                     )
-                    >= earliest_start
+                    >= earliest_start - self.ctx.step_size
                 ):
                     jump -= self.ctx.step_size
                 start = jump
