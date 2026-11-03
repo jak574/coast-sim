@@ -315,20 +315,31 @@ class Constraint(ConfigModel):
 
         held = self._held_over
         if held is not None and len(held) > 1:
-            # The pointing is being checked over these times: evaluate them
-            # all at once and keep each, as a check at each would compute it.
-            self._cache_misses += 1
-            flags = check_fn.in_constraint_batch(
-                ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
-                target_ras=[ra],
-                target_decs=[dec],
-                times=[self._sample_time(t) for t in held],
-                target_rolls=None if target_roll is None else [target_roll],
-            )
-            for t, flag in zip(held, np.asarray(flags).reshape(-1), strict=True):
-                self._cache[
-                    self._cache_key(constraint_type, ra, dec, t, target_roll)
-                ] = bool(flag)
+            # A later candidate often extends a hold already checked. Batch
+            # only its missing samples, retaining one time per cache key.
+            missing = {
+                sample_key: t
+                for t in held
+                if (
+                    sample_key := self._cache_key(
+                        constraint_type, ra, dec, t, target_roll
+                    )
+                )
+                not in self._cache
+            }
+            if missing:
+                self._cache_misses += 1
+                flags = check_fn.in_constraint_batch(
+                    ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
+                    target_ras=[ra],
+                    target_decs=[dec],
+                    times=[self._sample_time(t) for t in missing.values()],
+                    target_rolls=None if target_roll is None else [target_roll],
+                )
+                for sample_key, flag in zip(
+                    missing, np.asarray(flags).reshape(-1), strict=True
+                ):
+                    self._cache[sample_key] = bool(flag)
             if key in self._cache:
                 return self._cache[key]
 

@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import TYPE_CHECKING, cast
 
 import rust_ephem
@@ -1342,25 +1343,34 @@ class ACS:
     @staticmethod
     def _idle_safe_roll_candidates(optimal_roll: float) -> list[float]:
         """Try the solar-optimal roll first, then nearby grid-step alternatives."""
+        return list(
+            ACS._cached_idle_safe_roll_candidates(
+                optimal_roll, IDLE_SAFE_ATTITUDE_GRID_STEP_DEG, ANGLE_TOLERANCE_DEG
+            )
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=512)
+    def _cached_idle_safe_roll_candidates(
+        optimal_roll: float, grid_step: int, tolerance: float
+    ) -> tuple[float, ...]:
+        """Keep the pure roll calculation; callers receive their own list."""
         rolls: list[float] = []
 
         def add(roll: float) -> None:
             normalized = roll % 360.0
             is_new = all(
-                abs(((normalized - existing + 180.0) % 360.0) - 180.0)
-                > ANGLE_TOLERANCE_DEG
+                abs(((normalized - existing + 180.0) % 360.0) - 180.0) > tolerance
                 for existing in rolls
             )
             if is_new:
                 rolls.append(normalized)
 
         add(optimal_roll)
-        for offset in range(
-            IDLE_SAFE_ATTITUDE_GRID_STEP_DEG, 360, IDLE_SAFE_ATTITUDE_GRID_STEP_DEG
-        ):
+        for offset in range(grid_step, 360, grid_step):
             add(optimal_roll + offset)
             add(optimal_roll - offset)
-        return rolls
+        return tuple(rolls)
 
     def _idle_safe_attitude_candidates(self, utime: float) -> list[tuple[float, float]]:
         """Generate deterministic IDLE hold candidates, nearest current attitude first."""
