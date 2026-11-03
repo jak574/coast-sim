@@ -109,6 +109,9 @@ class SchedulingContext:
         self._own_timings: dict[int, ObservationTiming] = {}
         """Targets' own budgets, by obsid, in place of their categories'."""
         self._initial_pose: Attitude | None = None
+        self._idle_roll_cache: dict[tuple[float, float, float], float] = {}
+        """Power-optimal safe-hold rolls at exact directions and times in
+        this planning context, shared by repeated candidate searches."""
         self._activity_attitudes: dict[tuple[str, float, float], Attitude] = {}
         # A quaternion slew's path does not depend on when it starts, so one
         # slew per attitude pair is predicted and retimed for each start: its
@@ -217,15 +220,19 @@ class SchedulingContext:
         acs.ephem = self.ephem
         acs.ra, acs.dec, acs.roll = near
         for ra, dec in acs._idle_safe_attitude_candidates(utime):
-            preferred = optimum_body_roll(
-                ra,
-                dec,
-                utime,
-                self.ephem,
-                self.config.solar_panel,
-                self.config.constraint,
-                science_attitude=False,
-            )
+            key = (ra, dec, utime)
+            preferred = self._idle_roll_cache.get(key)
+            if preferred is None:
+                preferred = optimum_body_roll(
+                    ra,
+                    dec,
+                    utime,
+                    self.ephem,
+                    self.config.solar_panel,
+                    self.config.constraint,
+                    science_attitude=False,
+                )
+                self._idle_roll_cache[key] = preferred
             rolls = (
                 [preferred]
                 if self.config.constraint.ignore_roll

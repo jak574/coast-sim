@@ -95,7 +95,12 @@ def can_finish_before_recharge(
         return True
     charger = EmergencyCharging(config, log=DITLLog())
     pointing = charger.create_charging_pointing(
-        departure, context.ephem, attitude[0], attitude[1], drive_state=state
+        departure,
+        context.ephem,
+        attitude[0],
+        attitude[1],
+        drive_state=state,
+        lastroll=attitude[2],
     )
     if pointing is None:
         return False
