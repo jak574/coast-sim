@@ -1056,6 +1056,16 @@ or the ``solver`` itself. A chunk model CP-SAT finds invalid is one the schedule
 wrong, not a search that ran out of time: it raises a ``ValueError`` naming the model's
 fault rather than falling back to the priority-first plan.
 
+Limit endings are inferred from the solver's counters. An unfinished search near
+both limits is reported conservatively as ``wall clock``, so a possible
+load-dependent stop is not labelled deterministic. A completed optimality or
+infeasibility proof keeps its solver-proven ending even near the limits.
+
+These three lists describe the final momentum pass. To check every actual solver
+call in the latest ``schedule()``, inspect ``solver_search_statuses`` and
+``solver_search_limits``. They retain earlier passes even if a later pass finishes
+optimally; chunks that need no model contribute no search record.
+
 ``CpSatScheduler`` takes the arguments of ``LocalSearchScheduler``, plus:
 
 * ``solver_time_limit``: seconds CP-SAT may search, shared across the chunks
@@ -1188,6 +1198,13 @@ each plan by local search or with CP-SAT.
   rejected. Check for ``"wall clock"`` here when verifying repeatability: a later
   completed pass must not hide an earlier timeout. Both lists default to empty
   when reading older records or using a scheduler without local-search reporting.
+  The corresponding ``solver_search_statuses`` and ``solver_search_limits`` retain
+  every actual CP-SAT chunk search across all passes and candidate plans, including
+  rejected candidates. Check for ``"wall clock"`` in both search-limit lists when
+  auditing reproducibility. The existing ``solver_statuses``, ``solver_limits``
+  and ``solver_chunks_used`` keep their final-pass, selected-plan scope. Older
+  records default to empty cumulative lists; they cannot retrospectively prove
+  that earlier attempts avoided wall-clock limits.
 * ``ditl.too_response_times()`` gives the seconds from each ToO's submission to its
   first science, or None if it was never observed.
 * ``ditl.plan`` is the plan that was actually followed: the committed parts of

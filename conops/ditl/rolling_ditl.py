@@ -69,6 +69,9 @@ class ReplanRecord(BaseModel):
             all candidate plans built for this replan, including rejected ones.
         search_limits: What ended each corresponding local-search pass:
             iteration budget, wall clock, or disabled.
+        solver_search_statuses: Every actual CP-SAT chunk search's status
+            across all passes and candidate plans, including rejected ones.
+        solver_search_limits: What ended each corresponding CP-SAT search.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -94,6 +97,8 @@ class ReplanRecord(BaseModel):
     :func:`~conops.schedulers.cpsat_scheduler.search_ending`)."""
     search_iterations: list[int] = Field(default_factory=list)
     search_limits: list[str] = Field(default_factory=list)
+    solver_search_statuses: list[str] = Field(default_factory=list)
+    solver_search_limits: list[str] = Field(default_factory=list)
 
 
 class _PlanSummary(BaseModel):
@@ -107,6 +112,8 @@ class _PlanSummary(BaseModel):
     solver_limits: list[str] = Field(default_factory=list)
     search_iterations: list[int] = Field(default_factory=list)
     search_limits: list[str] = Field(default_factory=list)
+    solver_search_statuses: list[str] = Field(default_factory=list)
+    solver_search_limits: list[str] = Field(default_factory=list)
 
     @classmethod
     def of(cls, scheduler: object, seed_entries: int) -> "_PlanSummary":
@@ -130,6 +137,8 @@ class _PlanSummary(BaseModel):
                 [int(v) for v in iterations] if isinstance(iterations, list) else []
             ),
             search_limits=strings("search_limits"),
+            solver_search_statuses=strings("solver_search_statuses"),
+            solver_search_limits=strings("solver_search_limits"),
         )
 
 
@@ -273,6 +282,8 @@ class RollingHorizonDITL(DITL):
         """What the last plan built reported (see :class:`_PlanSummary`)."""
         self._replan_search_iterations: list[int] = []
         self._replan_search_limits: list[str] = []
+        self._replan_solver_search_statuses: list[str] = []
+        self._replan_solver_search_limits: list[str] = []
         self.allocator = allocator
         self.allocation_bonus = allocation_bonus
         self.allocation: Allocation | None = allocation
@@ -587,6 +598,8 @@ class RollingHorizonDITL(DITL):
         """Keep committed activities and plan the rest of the horizon again."""
         self._replan_search_iterations = []
         self._replan_search_limits = []
+        self._replan_solver_search_statuses = []
+        self._replan_solver_search_limits = []
         # The first plan is built before the run, so nothing waits for it.
         cutoff = (
             self._ceil_step(utime)
@@ -675,6 +688,8 @@ class RollingHorizonDITL(DITL):
             solver_limits=self._last_plan.solver_limits,
             search_iterations=self._replan_search_iterations,
             search_limits=self._replan_search_limits,
+            solver_search_statuses=self._replan_solver_search_statuses,
+            solver_search_limits=self._replan_solver_search_limits,
         )
         self.replans.append(record)
         self.log.log_event(
@@ -883,6 +898,10 @@ class RollingHorizonDITL(DITL):
         # Keep every attempt's endings even if an earlier plan is selected.
         self._replan_search_iterations.extend(self._last_plan.search_iterations)
         self._replan_search_limits.extend(self._last_plan.search_limits)
+        self._replan_solver_search_statuses.extend(
+            self._last_plan.solver_search_statuses
+        )
+        self._replan_solver_search_limits.extend(self._last_plan.solver_search_limits)
         return (committed, dropped, [*pinned, *entries], len(scheduler.unplaced))
 
     def _interrupt_for(
