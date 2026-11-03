@@ -1869,8 +1869,8 @@ class QueueDITL(DITLMixin, DITLStats):
         forecast at selection: when it ends and the attitude through it.
         Each step is held at its own pointing from when it begins, after the
         steps before it and the slews between them, with the attitude held
-        through those slews; a step's roll is the roll the first step's slew
-        ends at with the step's own offset, since a step elsewhere finds its
+        through those slews; a step's instrument roll is the first step's
+        commanded roll with its own offset, since a step elsewhere finds its
         power-optimal roll only when it is reached. The visit ends with the
         last step's cleanup."""
         run = self._sequence
@@ -1887,13 +1887,29 @@ class QueueDITL(DITLMixin, DITLStats):
             else float(slew.slewstart) + float(slew.slewtime)
         )
         first_offset = sequence.steps[0].roll_offset_deg or 0.0
+        first_roll = (
+            float(slew.instrument_roll)
+            if slew.instrument_roll is not None
+            else float(slew.endroll)
+        )
         held: list[tuple[float, tuple[float, float, float]]] = []
         for index, (start, step) in enumerate(zip(starts, sequence.steps, strict=True)):
             step_ra, step_dec = sequence.pointing_of(index, base_ra, base_dec)
-            roll = (
-                float(slew.endroll) + (step.roll_offset_deg or 0.0) - first_offset
-            ) % 360.0
-            held.append((collects + start, (step_ra, step_dec, roll)))
+            roll = (first_roll + (step.roll_offset_deg or 0.0) - first_offset) % 360.0
+            # Sequence coordinates and rolls belong to the step's instrument.
+            # Forecast torques in the physical body frame, as execution does.
+            pointing = parent.model_copy(
+                update={
+                    "ra": step_ra,
+                    "dec": step_dec,
+                    "instrument_name": (
+                        step.instrument_name
+                        if step.instrument_name is not None
+                        else parent.instrument_name
+                    ),
+                }
+            )
+            held.append((collects + start, self._target_body_attitude(pointing, roll)))
         end = (
             collects
             + starts[-1]
@@ -3470,6 +3486,7 @@ class QueueDITL(DITLMixin, DITLStats):
             ra,
             dec,
             drive_state=self.acs.solar_array_drive_state,
+            lastroll=self.acs.roll,
         )
         if charging_ppt is None:
             return
@@ -4073,10 +4090,16 @@ class QueueDITL(DITLMixin, DITLStats):
         # Handle charging PPT constraint checks (regardless of mode)
         if self.ppt == self.charging_ppt:
             # Check constraints for charging PPT even if mode hasn't transitioned yet
+            # The destination is a complete body pose. During its ingress,
+            # combining that direction with the current roll invents a pose
+            # that neither the charge command nor the executor requested.
+            pose = (
+                (self.acs.ra, self.acs.dec, self.acs.roll)
+                if mode == ACSMode.CHARGING
+                else (self.ppt.ra, self.ppt.dec, self.ppt.roll)
+            )
             violation = self._attitude_constraint_name_for_attitude(
-                self.ppt.ra,
-                self.ppt.dec,
-                self.acs.roll,
+                *pose,
                 utime,
                 ACSMode.CHARGING,
             )
