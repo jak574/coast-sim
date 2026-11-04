@@ -264,6 +264,11 @@ class LocalSearchScheduler(PriorityScheduler):
         self.initial_score = self._timeline_score(science)
 
         self._fixed = fixed
+        # A failed window was ruled out only for the priority order. The
+        # optimizers try different orders, where it may fit. Completed and
+        # committed visits are already excluded from visit_candidates.
+        for request in self._by_obsid.values():
+            request.skipped.clear()
         # Released at their priority-first times, the snapshots decode to
         # the priority-first plan; moves release them one at a time.
         start = self._decode(
