@@ -255,6 +255,11 @@ class Constraint(ConfigModel):
     _cache: dict[tuple[str, float, float, float, float | None], bool] = PrivateAttr(
         default_factory=dict
     )
+    _held_cache: dict[tuple[str, float, float, float, float | None], bool] = (
+        PrivateAttr(default_factory=dict)
+    )
+    """Batch samples keyed by exact inputs, apart from the rounded lookup.
+    A new pose in the same rounded bucket must still refresh the held span."""
     _cache_hits: int = PrivateAttr(default=0)
     _cache_misses: int = PrivateAttr(default=0)
     _body_frame_source: object | None = PrivateAttr(default=None)
@@ -315,17 +320,12 @@ class Constraint(ConfigModel):
 
         held = self._held_over
         if held is not None and len(held) > 1:
-            # A later candidate often extends a hold already checked. Batch
-            # only its missing samples, retaining one time per cache key.
+            # Reuse only exact batch inputs. Rounded buckets may contain
+            # another pose's answers, which a full batch used to replace.
             missing = {
-                sample_key: t
+                (constraint_type, ra, dec, t, target_roll): t
                 for t in held
-                if (
-                    sample_key := self._cache_key(
-                        constraint_type, ra, dec, t, target_roll
-                    )
-                )
-                not in self._cache
+                if (constraint_type, ra, dec, t, target_roll) not in self._held_cache
             }
             if missing:
                 self._cache_misses += 1
@@ -339,7 +339,13 @@ class Constraint(ConfigModel):
                 for sample_key, flag in zip(
                     missing, np.asarray(flags).reshape(-1), strict=True
                 ):
-                    self._cache[sample_key] = bool(flag)
+                    self._held_cache[sample_key] = bool(flag)
+            # Preserve full-batch refresh order, including rounded-key
+            # collisions and duplicate times, even when no native call ran.
+            for t in held:
+                self._cache[
+                    self._cache_key(constraint_type, ra, dec, t, target_roll)
+                ] = self._held_cache[(constraint_type, ra, dec, t, target_roll)]
             if key in self._cache:
                 return self._cache[key]
 
@@ -395,6 +401,7 @@ class Constraint(ConfigModel):
     def clear_cache(self) -> None:
         """Clear the constraint result cache. Call at step boundaries."""
         self._cache.clear()
+        self._held_cache.clear()
 
     def cache_stats(self) -> tuple[int, int]:
         """Return (hits, misses) for cache performance monitoring."""
@@ -466,7 +473,7 @@ class Constraint(ConfigModel):
         if key != self._body_safety_key:
             self._body_safety = frame.constraint_in_body(self.safety_constraint)
             self._body_safety_key = key
-            self._cache.clear()
+            self.clear_cache()
             for name in (
                 "hardware_safety_constraint_config",
                 "safety_constraint_config",
