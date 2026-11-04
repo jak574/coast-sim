@@ -15,7 +15,7 @@ from conops.ditl.rolling_ditl import ReplanRecord
 from conops.schedulers import CpSatScheduler, LocalSearchScheduler, PriorityScheduler
 from conops.schedulers import local_search_scheduler as search_module
 from conops.schedulers.priority_scheduler import program_shares
-from conops.targets import Plan, PlanEntry, Pointing
+from conops.targets import Plan, PlanEntry, Pointing, VisitWindow
 
 from .planning_scenario import BEGIN, CONSTRAINED, HOUR, MIN, PATCH, T0
 from .planning_scenario import make_config as _config
@@ -186,6 +186,55 @@ def test_equal_value_does_not_postpone_the_priority_science() -> None:
         == scheduler._greedy_timeline[0].entry.collection_begin
     )
     assert _execute([target], plan, 4).validate_plan_matches_execution() == []
+
+
+@pytest.mark.parametrize("scheduler_type", [LocalSearchScheduler, CpSatScheduler])
+@pytest.mark.parametrize("completed_before", [False, True])
+def test_optimizer_can_recover_a_visit_the_priority_order_could_not_fit(
+    scheduler_type, completed_before
+) -> None:
+    config = _config(2, weights=TargetConfig(urgency_weight=0))
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    filler = _target(config, 1, *PATCH[0], merit=1000, minutes=40)
+    windows = [VisitWindow(start=T0 + 10 * MIN, deadline=T0 + 15 * MIN)]
+    if completed_before:
+        windows.insert(0, VisitWindow(start=T0 - HOUR, deadline=T0 - 50 * MIN))
+    visit = Pointing(
+        config=config,
+        obsid=2,
+        ra=PATCH[0][0],
+        dec=PATCH[0][1],
+        merit=100,
+        ss_max=20 * MIN,
+        visit_windows=windows,
+    )
+    if completed_before:
+        visit.record_collection(T0 - 30 * MIN, 20 * MIN, visit=0)
+    options = (
+        dict(time_limit=30, max_iterations=50)
+        if scheduler_type is LocalSearchScheduler
+        else dict(solver_time_limit=30, solver_deterministic_time=1, workers=1)
+    )
+    scheduler = scheduler_type(
+        config,
+        [filler, visit],
+        BEGIN,
+        BEGIN + timedelta(hours=2),
+        include_passes=False,
+        seed=1,
+        **options,
+    )
+    plan = scheduler.schedule()
+    # The greedy order misses the narrow window. Reordering collects both
+    # whole snapshots: the timed visit first, then the unchanged filler.
+    assert [int(b.entry.obsid) for b in scheduler._greedy_timeline] == [1]
+    assert [int(e.obsid) for e in plan] == [2, 1]
+    assert plan.entries[0].visit == int(completed_before)
+    assert float(plan.entries[0].collection_begin) <= T0 + 15 * MIN
+    assert plan.entries[0].collection_seconds_between(T0, T0 + 2 * HOUR) == 20 * MIN
+    assert plan.entries[1].collection_seconds_between(T0, T0 + 2 * HOUR) == 40 * MIN
+    assert _execute([filler, visit], plan, 2).validate_plan_matches_execution() == []
 
 
 def _targets(hours: int, config: MissionConfig | None = None) -> list[Pointing]:
