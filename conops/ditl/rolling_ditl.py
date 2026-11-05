@@ -64,7 +64,7 @@ class ReplanRecord(BaseModel):
         solver_chunks_used: For each chunk, whether the solver's snapshots
             were kept over the priority-first plan's.
         solver_limits: What ended each chunk's search: optimal, the
-            deterministic budget, the wall clock or the solver itself.
+            deterministic budget, the wall clock, the solver itself, or reused.
         search_iterations: Changes tried in each local-search pass across
             all candidate plans built for this replan, including rejected ones.
         search_limits: What ended each corresponding local-search pass:
@@ -72,6 +72,8 @@ class ReplanRecord(BaseModel):
         solver_search_statuses: Every actual CP-SAT chunk search's status
             across all passes and candidate plans, including rejected ones.
         solver_search_limits: What ended each corresponding CP-SAT search.
+        solver_reused_chunks: Cached responses read across all candidate plans;
+            these are not counted as actual solver searches.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,6 +101,7 @@ class ReplanRecord(BaseModel):
     search_limits: list[str] = Field(default_factory=list)
     solver_search_statuses: list[str] = Field(default_factory=list)
     solver_search_limits: list[str] = Field(default_factory=list)
+    solver_reused_chunks: int = Field(default=0, ge=0)
 
 
 class _PlanSummary(BaseModel):
@@ -114,6 +117,7 @@ class _PlanSummary(BaseModel):
     search_limits: list[str] = Field(default_factory=list)
     solver_search_statuses: list[str] = Field(default_factory=list)
     solver_search_limits: list[str] = Field(default_factory=list)
+    solver_reused_chunks: int = 0
 
     @classmethod
     def of(cls, scheduler: object, seed_entries: int) -> "_PlanSummary":
@@ -126,6 +130,7 @@ class _PlanSummary(BaseModel):
 
         used = getattr(scheduler, "solver_chunks_used", None)
         iterations = getattr(scheduler, "search_iterations", None)
+        reused = getattr(scheduler, "solver_reused_chunks", 0)
         return cls(
             seed_entries=seed_entries,
             solver_statuses=strings("solver_statuses"),
@@ -139,6 +144,7 @@ class _PlanSummary(BaseModel):
             search_limits=strings("search_limits"),
             solver_search_statuses=strings("solver_search_statuses"),
             solver_search_limits=strings("solver_search_limits"),
+            solver_reused_chunks=reused if isinstance(reused, int) else 0,
         )
 
 
@@ -284,6 +290,7 @@ class RollingHorizonDITL(DITL):
         self._replan_search_limits: list[str] = []
         self._replan_solver_search_statuses: list[str] = []
         self._replan_solver_search_limits: list[str] = []
+        self._replan_solver_reused_chunks = 0
         self.allocator = allocator
         self.allocation_bonus = allocation_bonus
         self.allocation: Allocation | None = allocation
@@ -601,6 +608,7 @@ class RollingHorizonDITL(DITL):
         self._replan_search_limits = []
         self._replan_solver_search_statuses = []
         self._replan_solver_search_limits = []
+        self._replan_solver_reused_chunks = 0
         # The first plan is built before the run, so nothing waits for it.
         cutoff = (
             self._ceil_step(utime)
@@ -691,6 +699,7 @@ class RollingHorizonDITL(DITL):
             search_limits=self._replan_search_limits,
             solver_search_statuses=self._replan_solver_search_statuses,
             solver_search_limits=self._replan_solver_search_limits,
+            solver_reused_chunks=self._replan_solver_reused_chunks,
         )
         self.replans.append(record)
         self.log.log_event(
@@ -904,6 +913,7 @@ class RollingHorizonDITL(DITL):
             self._last_plan.solver_search_statuses
         )
         self._replan_solver_search_limits.extend(self._last_plan.solver_search_limits)
+        self._replan_solver_reused_chunks += self._last_plan.solver_reused_chunks
         return (committed, dropped, [*pinned, *entries], len(scheduler.unplaced))
 
     def _interrupt_for(
@@ -1245,9 +1255,9 @@ class RollingHorizonDITL(DITL):
                 (self._rest_after(e) for e in pending), key=lambda rest: rest[0]
             )
             return StartState(time=max(cutoff, rest_time), attitude=attitude)
-        if not committed:
-            # Never commanded: the scheduler replays the freshly started spacecraft.
-            return None
+        # Before the first command, the real ACS may already have an explicit
+        # initial pose. With no pending entry, keep the pose it actually holds;
+        # constructing a fresh ACS would silently replace that boundary state.
         return StartState(
             time=cutoff,
             attitude=(float(self.acs.ra), float(self.acs.dec), float(self.acs.roll)),
@@ -1278,6 +1288,9 @@ class RollingHorizonDITL(DITL):
                 rest_time, attitude = rest
                 return max(float(entry.end), rest_time), attitude
         if entry.moves:
+            handoff = self.acs.science_handoff_state(entry, float(entry.end))
+            if handoff is not None:
+                return handoff.utime, handoff.attitude
             return science_rest(entry, self.config.spacecraft_bus.attitude_control)
         return float(entry.end), _final_attitude(entry)
 

@@ -3258,8 +3258,32 @@ class PriorityScheduler:
                 start = jump
                 continue
             deadline = request.deadline
+            # A later departure can have a shorter thermal settle, avoidance
+            # path, or return slew. Bound it independently of this attempt's
+            # actual duration. Automatic roll and moving pointings also change
+            # the arrival pose, so their safe motion lower bound here is zero.
+            minimum_slew = (
+                self._shortest_slew_seconds(self._start_attitude(pred, start), attitude)
+                if not arrival_pointing.moves and arrival_pointing.roll_deg is not None
+                else 0.0
+            )
+            next_collection_bound = (
+                start + self.ctx.step_size + minimum_slew + timing.setup_seconds
+            )
             if deadline is not None and collection_begin > deadline:
-                return None
+                if next_collection_bound > deadline + TIME_TOLERANCE_S:
+                    return None
+                start += self.ctx.step_size
+                continue
+            placement_end = min(gap_end, horizon_end)
+            if collection_begin > placement_end:
+                # No collection or return can start after this reservation.
+                # In particular, do not route a successor slew at a time
+                # beyond the ephemeris. A later, shorter ingress can still fit.
+                if next_collection_bound > placement_end + TIME_TOLERANCE_S:
+                    return None
+                start += self.ctx.step_size
+                continue
 
             visit: _Visit | None = None
             departure = attitude
@@ -3290,7 +3314,20 @@ class PriorityScheduler:
             if visit is not None:
                 # A visit runs whole or not at all.
                 if visit.end > latest_end:
-                    if succ is not None and latest_end < window[1]:
+                    assert target.sequence is not None
+                    minimum_visit = sum(
+                        step.duration_seconds for step in target.sequence.steps
+                    ) + sum(
+                        timing.setup_seconds
+                        for step in target.sequence.steps[1:]
+                        if step.setup
+                    )
+                    if (
+                        next_collection_bound
+                        + minimum_visit
+                        + timing.post_collection_seconds
+                        > min(gap_end, horizon_end) + TIME_TOLERANCE_S
+                    ):
                         return None
                     start += self.ctx.step_size
                     continue
@@ -3348,24 +3385,17 @@ class PriorityScheduler:
                 collection_end = min(collection_end, cadence_end)
 
             if not _long_enough(collection_end - collection_begin, ss_min):
-                if succ is not None and latest_end < window[1]:
-                    # Starting later only leaves less room before the successor.
-                    return None
-                # The room before the window closes, or the horizon ends,
-                # shrinks as the start moves on, while a later slew takes at
-                # least the direct slew with the least settle. Once not even
-                # that leaves the minimum snapshot, no later start in this
-                # window does: the next window is tried, if there is one.
+                # Use the successor's actual reservation, without subtracting
+                # this attempt's return slew: that slew can shorten later too.
+                # Stop only when even an optimistic later arrival cannot fit.
                 room = (
-                    latest_end
+                    min(window[1], gap_end, horizon_end)
                     - timing.post_collection_seconds
                     - timing.setup_seconds
                     - (start + self.ctx.step_size)
                 )
-                if room < ss_min + self._shortest_slew_seconds(
-                    self._start_attitude(pred, start), attitude
-                ):
-                    if latest_end < window[1]:
+                if room < ss_min + minimum_slew - TIME_TOLERANCE_S:
+                    if min(gap_end, horizon_end) <= window[1]:
                         return None
                     upcoming = [w[0] for w in request.windows if w[0] > window[1]]
                     if not upcoming:
@@ -3426,15 +3456,26 @@ class PriorityScheduler:
         return float(slew.slewend) + self.ctx.setup_for(int(target.obsid))
 
     def _shortest_slew_seconds(self, start: Attitude, end: Attitude) -> float:
-        """The least a slew between two attitudes can take from any start:
-        the direct rotation with the least settle the ACS gives, the table's
-        first step or its settle time. A slew flown later cannot be shorter,
-        so the gap search stops stepping through a window once not even
-        this leaves room for a snapshot."""
+        """A conservative lower duration bound between fixed endpoint poses.
+
+        The fastest rate bounds any path, including per-axis routing; ignore
+        acceleration. The least settle includes the constant fallback used by
+        categories that skip the table, whose durations need not be monotonic.
+        Do not apply this pose-specific bound across changing rolls or tracks.
+        """
         acs = self.config.spacecraft_bus.attitude_control
-        distance, axis = quaternion_attitude_delta(*start, *end)
-        change = 0.0 if acs.thermal_settling else None
-        return float(scheduled_slew_time(acs.slew_time(distance, axis, change)))
+        distance, _ = quaternion_attitude_delta(*start, *end)
+        rate = (
+            max(acs.max_slew_rate_body)
+            if acs.max_slew_rate_body is not None
+            else acs.max_slew_rate
+        )
+        if distance <= 0 or rate <= 0:
+            return 0.0
+        settle = min(
+            [float(acs.settle_time), *(s.settle_seconds for s in acs.thermal_settling)]
+        )
+        return float(scheduled_slew_time(distance / rate + settle))
 
     def _visibility_needed_at(self, slew: Slew) -> float:
         """When a science target must be visible for ACS to fly ``slew`` to it.

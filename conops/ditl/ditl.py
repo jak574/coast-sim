@@ -421,7 +421,15 @@ class DITL(DITLMixin, DITLStats):
             _pos = np.asarray(
                 position_vectors(self.ephem, "gcrs")[ephem_index], dtype=np.float64
             )
-            earth_body_vector: list[float] = list(-_pos / np.linalg.norm(_pos))
+            earth_body_vector: list[float] = [
+                float(value)
+                for value in scbodyvector(
+                    np.radians(ra),
+                    np.radians(dec),
+                    np.radians(roll),
+                    -_pos / np.linalg.norm(_pos),
+                )
+            ]
             for_solid_angle_sr = (
                 self.constraint.instantaneous_field_of_regard(utime=self.utime[i])
                 if self.calculate_field_of_regard
@@ -893,7 +901,10 @@ class DITL(DITLMixin, DITLStats):
                     self._unload_stored_momentum(utime, entry.obsid)
         else:
             self.acs.cancel_pending_slews(entry.obsid)
-            self.acs.end_science_observation()
+            # The entry may end between ticks. Stop its installed tracking
+            # there, before advancing this tick, so the forecast brake and
+            # the next command use the same physical handoff.
+            self.acs.end_science_observation(min(float(entry.end), utime))
         self._active_entry = None
 
     def _command_entry(self, entry: PlanEntry, utime: float) -> bool:
@@ -931,7 +942,7 @@ class DITL(DITLMixin, DITLStats):
     def _command_activity_entry(self, entry: PlanEntry, utime: float) -> None:
         """Hold the entry's attitude in IDLE for the activity, slewing to it
         first where the spacecraft is elsewhere."""
-        self.acs.end_science_observation()
+        self.acs.end_science_observation(utime)
         if entry.desaturation:
             self.acs.begin_desaturation()
         if entry.activity_hold_begin is None:
