@@ -46,6 +46,7 @@ from ..schedulers.allocator import Allocation, LongRangeAllocator
 from ..schedulers.recorder import contact_downlink_gb
 from ..simulation.acs_command import ACSCommand
 from ..simulation.activity_charging import can_finish_before_recharge
+from ..simulation.attitude import AttitudeState, AttitudeTrajectory
 from ..simulation.emergency_charging import EmergencyCharging
 from ..simulation.idle_safety import IdleSafetyPlanner
 from ..simulation.momentum_budget import MomentumLimitError
@@ -2122,6 +2123,15 @@ class QueueDITL(DITLMixin, DITLStats):
         ppt = self.ppt if target is None else target
         if ppt is None:
             return None
+        if (
+            self._sequence is not None
+            and self._sequence.index == 0
+            and ppt.obsid == self._sequence.parent.obsid
+        ):
+            # The first step is admitted in place of its parent. Its exact
+            # ingress must still meet the visit's latest collection start.
+            # Subsequent steps belong to the already admitted whole visit.
+            return self._sequence.parent.current_deadline
         current = getattr(ppt, "current_deadline", None)
         if isinstance(current, (int, float)):
             return float(current)
@@ -2169,15 +2179,22 @@ class QueueDITL(DITLMixin, DITLStats):
             return timing
         return self._timing_for(ppt)
 
-    def _sequence_fits_sunlit_window(self, slew: Slew) -> bool:
+    def _sequence_fits_window(self, slew: Slew) -> bool:
         """Check the whole protected visit with grid-timed, physical step slews."""
         run = self._sequence
         ppt = self.ppt
-        if run is None or ppt is None or run.parent.forbids_eclipse() is not True:
+        if run is None or ppt is None:
             return True
         context = self._activity_model()
         parent = run.parent
         sequence = run.sequence
+        if (
+            ppt.collection_begin is None
+            or ppt.collection_end is None
+            or ppt.collection_end - ppt.collection_begin
+            < sequence.steps[0].duration_seconds - TIME_TOLERANCE_S
+        ):
+            return False
         cursor = (
             float(ppt.collection_begin or slew.slewend)
             + sequence.steps[0].duration_seconds
@@ -2208,6 +2225,11 @@ class QueueDITL(DITLMixin, DITLStats):
             if cursor > context.uend:
                 return False
             previous = pose
+        activity_begin = self._next_activity_begin(
+            float(slew.slewstart), protected_visit=True
+        )
+        if activity_begin is not None and context.ceil_step(cursor) > activity_begin:
+            return False
         return (
             parent.eclipse_violation(float(slew.slewend), context.ceil_step(cursor))
             is None
@@ -2428,11 +2450,18 @@ class QueueDITL(DITLMixin, DITLStats):
                 "Recharge interrupts observation before its cleanup/handoff budget "
                 "can be reserved; no executable observation timeline can be exported"
             )
+        previous_collection_begin = self.ppt.collection_begin
         previous_collection_end = self.ppt.collection_end
         self.ppt.end = deadline
         self.ppt.set_collection_window(timing)
         assert self.ppt.collection_end is not None
         self.ppt.collection_end = min(self.ppt.collection_end, previous_collection_end)
+        if previous_collection_begin is not None:
+            assert self.ppt.collection_begin is not None
+            self.ppt.collection_begin = min(
+                self.ppt.collection_end,
+                max(self.ppt.collection_begin, previous_collection_begin),
+            )
         if self.plan and self.plan[-1].begin == self.ppt.begin:
             self.plan[-1].end = deadline
             self.plan[-1].collection_begin = self.ppt.collection_begin
@@ -2781,7 +2810,15 @@ class QueueDITL(DITLMixin, DITLStats):
             float(_sun_bv[2]),
         ]
         _pos = np.asarray(position_vectors(self.ephem, "gcrs")[ei], dtype=np.float64)
-        earth_body_vector: list[float] = list(-_pos / np.linalg.norm(_pos))
+        earth_body_vector: list[float] = [
+            float(value)
+            for value in scbodyvector(
+                np.radians(ra),
+                np.radians(dec),
+                np.radians(roll),
+                -_pos / np.linalg.norm(_pos),
+            )
+        ]
 
         if mounted_science:
             assert self.ppt is not None
@@ -3017,9 +3054,19 @@ class QueueDITL(DITLMixin, DITLStats):
 
     @staticmethod
     def _apply_slew_metadata(
-        entry: PlanEntry, slew: Slew, *, update_end: bool = False
+        entry: PlanEntry,
+        slew: Slew,
+        *,
+        update_end: bool = False,
+        preserve_collection_window: bool = False,
     ) -> None:
-        """Copy executed slew timing and physical attitude onto a plan entry."""
+        """Copy slew timing and physical attitude onto a plan entry.
+
+        Execution may shorten a predicted slew. Preserve the admitted science
+        bounds when syncing it: an early arrival must not enlarge collection,
+        while a late arrival can still reduce the science that fits.
+        """
+        collection_begin, collection_end = entry.collection_begin, entry.collection_end
         entry.begin = int(slew.slewstart)
         entry.slewtime = int(round(slew.slewtime))
         entry.slew_rate_fraction = slew.rate_fraction
@@ -3062,6 +3109,17 @@ class QueueDITL(DITLMixin, DITLStats):
                 entry.collection_end = max(
                     entry.collection_begin,
                     min(entry.collection_end, slew._momentum_collection_end),
+                )
+            if (
+                preserve_collection_window
+                and collection_begin is not None
+                and collection_end is not None
+            ):
+                assert entry.collection_begin is not None
+                assert entry.collection_end is not None
+                entry.collection_begin = max(entry.collection_begin, collection_begin)
+                entry.collection_end = max(
+                    entry.collection_begin, min(entry.collection_end, collection_end)
                 )
 
     @staticmethod
@@ -3132,12 +3190,19 @@ class QueueDITL(DITLMixin, DITLStats):
             return
 
         if self.ppt is not None and self._entry_matches_science_slew(self.ppt, slew):
-            self._apply_slew_metadata(self.ppt, slew, update_end=True)
+            self._apply_slew_metadata(
+                self.ppt, slew, update_end=True, preserve_collection_window=True
+            )
 
         for entry in reversed(list(self.plan)):
             if self._entry_matches_science_slew(entry, slew):
                 update_end = entry.end >= entry.begin + DAY_SECONDS
-                self._apply_slew_metadata(entry, slew, update_end=update_end)
+                self._apply_slew_metadata(
+                    entry,
+                    slew,
+                    update_end=update_end,
+                    preserve_collection_window=True,
+                )
                 return
 
     def _sync_acs_slew_metadata(self) -> None:
@@ -3157,6 +3222,10 @@ class QueueDITL(DITLMixin, DITLStats):
         self, utime: float, execution_time: float
     ) -> tuple[float, float, float]:
         """Predict the physical start, including tracking as well as target slews."""
+        stop = getattr(self.acs, "science_stop_state", None)
+        state = stop(utime) if callable(stop) else None
+        if isinstance(state, AttitudeState) and state.utime <= execution_time:
+            return state.attitude
         return self.acs.predicted_attitude(execution_time)
 
     def _handle_mode_operations(
@@ -4361,6 +4430,24 @@ class QueueDITL(DITLMixin, DITLStats):
         """Validate pending motion as SLEWING and its subsequent hold as IDLE."""
         executor = self.acs._executor
         trajectory = executor._trajectory if executor is not None else None
+        stop = self.acs.science_stop_state(now)
+        if isinstance(stop, AttitudeState) and executor is not None:
+            # Admission will end this observation before commanding the
+            # replacement. Check that brake and its rest pose, rather than
+            # the tracking/ingress trajectory it will replace.
+            trajectory = AttitudeTrajectory.braking(
+                executor.predict(now), self.config.spacecraft_bus.attitude_control
+            )
+
+        def attitude_at(time: float) -> tuple[float, float, float]:
+            if isinstance(stop, AttitudeState):
+                return (
+                    trajectory.state(time).attitude
+                    if trajectory is not None
+                    else stop.attitude
+                )
+            return self.acs.predicted_attitude(time)
+
         hold_start = max(
             now,
             trajectory.end
@@ -4387,7 +4474,7 @@ class QueueDITL(DITLMixin, DITLStats):
                     break
                 if (
                     self._attitude_constraint_name_for_attitude(
-                        *self.acs.predicted_attitude(float(time)),
+                        *attitude_at(float(time)),
                         float(time),
                         ACSMode.SLEWING,
                     )
@@ -4396,7 +4483,7 @@ class QueueDITL(DITLMixin, DITLStats):
                     return float(time)
         if hold_start > end:
             return None
-        attitude = self.acs.predicted_attitude(end)
+        attitude = attitude_at(end)
         if self._idle_safety is not None:
             violation = self._idle_safety.first_violation(attitude, hold_start)
             return violation if violation - self._idle_safety.step < end else None
@@ -4641,6 +4728,10 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def _ppt_slew_execution_time(self, utime: float) -> float:
         """Return when a new slew can execute, waiting for an in-progress slew to finish."""
+        stop = getattr(self.acs, "science_stop_state", None)
+        state = stop(utime) if callable(stop) else None
+        if isinstance(state, AttitudeState):
+            return state.utime
         if self.acs.last_slew is not None and self.acs.last_slew.is_slewing(utime):
             return self.acs.last_slew.slewstart + self.acs.last_slew.slewtime
         # A moving target being tracked is braked when its observation ends,
@@ -5608,12 +5699,12 @@ class QueueDITL(DITLMixin, DITLStats):
                     return None
                 if not self._within_momentum(utime, ra, dec, slew):
                     return None
-            if not self._sequence_fits_sunlit_window(slew):
+            if not self._sequence_fits_window(slew):
                 self.log.log_event(
                     utime=utime,
                     event_type="QUEUE",
                     obsid=self.ppt.obsid,
-                    description="Protected visit rejected: the whole visit does not fit a sunlit observing window",
+                    description="Protected visit rejected: the whole visit does not fit before a required activity, eclipse or run boundary",
                     acs_mode=self.acs.acsmode,
                 )
                 self._retry_fetch_without_current_ppt(utime, ra, dec)
