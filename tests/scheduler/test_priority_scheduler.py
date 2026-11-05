@@ -8,10 +8,13 @@ import pytest
 from rust_ephem import SunConstraint
 
 from conops import DITL
-from conops.common import ObsType
+from conops.common import ObsType, SlewAlgorithm
+from conops.common.ephemeris import sun_vector_change_deg
 from conops.config import (
+    ActivityAttitude,
     Constraint,
     MissionConfig,
+    ObservationTiming,
     OnboardRecorder,
     Payload,
     ScienceData,
@@ -26,9 +29,16 @@ from conops.schedulers import (
     PriorityScheduler,
     SchedulingContext,
 )
-from conops.schedulers.priority_scheduler import _Move
+from conops.schedulers.priority_scheduler import StartState, _Move
 from conops.simulation import Pass
-from conops.targets import Plan, PlanEntry, Pointing, ScheduledActivity
+from conops.targets import (
+    ObservationSequence,
+    Plan,
+    PlanEntry,
+    Pointing,
+    ScheduledActivity,
+    SequenceStep,
+)
 
 from .planning_scenario import (
     BEGIN,
@@ -1247,6 +1257,151 @@ class TestCandidateVisibility:
 
 
 class TestGapSearchBound:
+    @pytest.mark.parametrize(
+        "planner_class", [PriorityScheduler, LocalSearchScheduler, CpSatScheduler]
+    )
+    def test_arrival_past_ephemeris_does_not_forecast_a_return(
+        self, planner_class: type[PriorityScheduler]
+    ) -> None:
+        config = _config(1)
+        config.constraint.sun_constraint = SunConstraint(min_angle=1)
+        config.constraint.earth_constraint = None
+        config.payload.observation_timing = ObservationTiming()
+        config.battery.planning_level = None
+        acs = config.spacecraft_bus.attitude_control
+        acs.slew_algorithm = SlewAlgorithm.CONSTRAINT_AVOIDING
+        acs.max_slew_rate = 0.1
+        initial = (105.0, 10.0, 0.0)
+        target = Pointing(
+            config=config,
+            obsid=702,
+            ra=285,
+            dec=-10,
+            roll_deg=0,
+            ss_min=60,
+            ss_max=60,
+            exptime=60,
+        )
+        hold = ScheduledActivity(
+            name="Final required hold",
+            obsid=991,
+            begin=T0 + 55 * MIN,
+            duration_seconds=5 * MIN,
+            fixed=True,
+            attitude=ActivityAttitude(
+                kind="fixed", ra_deg=initial[0], dec_deg=initial[1], roll_deg=initial[2]
+            ),
+        )
+        begin, end = BEGIN + timedelta(minutes=50), BEGIN + timedelta(hours=1)
+        options = {} if planner_class is PriorityScheduler else {"time_limit": 0}
+        plan = planner_class(
+            config,
+            [target],
+            begin,
+            end,
+            include_passes=False,
+            start_state=StartState(time=begin.timestamp(), attitude=initial),
+            activities=[hold],
+            **options,
+        ).schedule()
+        assert not [e for e in plan if e.obsid == target.obsid]
+        activity = next(e for e in plan if e.obsid == hold.obsid)
+        assert activity.activity_hold_begin == hold.begin
+        assert activity.activity_hold_end == hold.begin + hold.duration_seconds
+        run = DITL(
+            config=config,
+            ephem=config.constraint.ephem,
+            plan=Plan.model_validate_json(plan.model_dump_json()),
+            begin=begin,
+            end=end,
+        )
+        run.step_size = MIN
+        run.acs.ra, run.acs.dec, run.acs.roll = initial
+        assert run.calc()
+        assert run.validate_plan_matches_execution() == []
+        assert not sum(h.collection_seconds or 0 for h in run.telemetry.housekeeping)
+
+    @pytest.mark.parametrize("boundary", ["activity", "deadline"])
+    @pytest.mark.parametrize("sequence", [False, True])
+    def test_a_later_departure_can_cross_to_a_shorter_settle(
+        self, boundary: str, sequence: bool
+    ) -> None:
+        config = _config(2)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        config.payload.observation_timing = ObservationTiming()
+        config.battery.planning_level = None
+        start, finish = (240.0, 20.0, 0.0), (110.0, -20.0, 0.0)
+        ephem = config.constraint.ephem
+        assert ephem is not None
+        changes = [
+            sun_vector_change_deg(ephem, time, start, finish) for time in (T0, T0 + MIN)
+        ]
+        assert changes[0] > changes[1]
+        config.spacecraft_bus.attitude_control.thermal_settling = [
+            ThermalSettlingStep(
+                max_sun_vector_change_deg=sum(changes) / 2, settle_seconds=60
+            ),
+            ThermalSettlingStep(max_sun_vector_change_deg=180, settle_seconds=1800),
+        ]
+        target = Pointing(
+            config=config,
+            obsid=701,
+            ra=finish[0],
+            dec=finish[1],
+            roll_deg=finish[2],
+            ss_min=600,
+            ss_max=600,
+            exptime=600,
+            deadline=T0 + 1000 if boundary == "deadline" else None,
+            sequence=ObservationSequence(
+                steps=[
+                    SequenceStep(name="first", duration_seconds=300),
+                    SequenceStep(name="second", duration_seconds=300),
+                ]
+            )
+            if sequence
+            else None,
+        )
+        activities = (
+            [
+                ScheduledActivity(
+                    name="Required hold",
+                    obsid=990,
+                    begin=T0 + 20 * MIN,
+                    duration_seconds=40 * MIN,
+                    fixed=True,
+                )
+            ]
+            if boundary == "activity"
+            else []
+        )
+        end = BEGIN + timedelta(minutes=60)
+        plan = PriorityScheduler(
+            config,
+            [target],
+            BEGIN,
+            end,
+            include_passes=False,
+            start_state=StartState(time=T0, attitude=start),
+            activities=activities,
+        ).schedule()
+        science = [e for e in plan if e.obsid == target.obsid]
+        assert len(science) == (2 if sequence else 1)
+        assert float(science[0].begin) == T0 + MIN
+        assert science[0].settle_seconds == 60
+        replay = Plan.model_validate_json(plan.model_dump_json())
+        run = DITL(config=config, ephem=ephem, plan=replay, begin=BEGIN, end=end)
+        run.step_size = MIN
+        run.acs.ra, run.acs.dec, run.acs.roll = start
+        assert run.calc()
+        assert run.validate_plan_matches_execution() == []
+        assert sum(h.collection_seconds or 0 for h in run.telemetry.housekeeping) == 600
+        if activities:
+            hold = next(e for e in run.plan if e.obsid == 990)
+            assert hold.activity_hold_begin == T0 + 20 * MIN
+            assert hold.activity_hold_end == T0 + 60 * MIN
+
     def test_the_plan_is_the_one_an_exhaustive_scan_finds(self) -> None:
         """The gap search stops stepping through a window once not even the
         shortest possible slew leaves room for a snapshot; the plan is the

@@ -135,6 +135,17 @@ def test_an_addition_sampled_along_its_slew_together_matches() -> None:
     assert together.amount == pytest.approx(one_by_one.amount, abs=1e-9)
 
 
+def test_static_panel_additions_compare_equal_without_drive_profiles() -> None:
+    ledger = _ledger(_battery_config())
+    entry = _science_entry(ledger.config, T0 + 600.0, 20)
+    first = ledger.addition(entry)
+    repeated = ledger.addition(entry.model_copy())
+    assert first is not None and repeated is not None
+    assert first == repeated
+    assert first.profile == -1
+    assert ledger._profiles == []
+
+
 def _empty(ledger: BatteryLedger) -> tuple[tuple[Addition, ...], ...]:
     return tuple(() for _ in range(ledger.segments))
 
@@ -610,6 +621,8 @@ class TestSolarArrayDrive:
             stretch.attitude, ACSMode.IDLE, stretch.begin, stretch.end
         )
         assert hold is not None
+        assert hold.profile >= 0
+        assert ledger._profiles[hold.profile]
         deltas, left = ledger.driven_deltas(hold, ledger.drive_start)
         assert deltas == pytest.approx(hold.deltas) and left == ledger.drive_start
         turned, left = ledger.driven_deltas(hold, (60.0,))
