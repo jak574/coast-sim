@@ -13,6 +13,7 @@ from datetime import datetime
 import numpy as np
 import numpy.typing as npt
 import rust_ephem
+from rust_ephem.constraints import ConstraintResult, MovingVisibilityResult
 
 from ..common import ACSMode, ObsType, dtutcfromtimestamp
 from ..common.enums import SlewAlgorithm
@@ -28,7 +29,8 @@ from ..simulation.passes import Pass, PassTimes
 from ..simulation.roll import optimum_body_roll, optimum_roll
 from ..simulation.safe_hold import power_positive_attitudes
 from ..simulation.slew import Slew
-from ..targets import PlanEntry, Pointing, ScheduledActivity
+from ..targets import MovingPointing, PlanEntry, Pointing, ScheduledActivity
+from ..targets.track import TrackPoint, positions_along
 
 Attitude = tuple[float, float, float]
 """Spacecraft body attitude: RA, Dec and roll in degrees."""
@@ -133,7 +135,8 @@ class SchedulingContext:
             attitude_control.slew_algorithm == SlewAlgorithm.CONSTRAINT_AVOIDING
         )
         self._window_cache: dict[
-            tuple[int, float, float, str | None, str | None], list[tuple[float, float]]
+            tuple[int, float, float, str | None, str | None],
+            tuple[list[TrackPoint], int, list[tuple[float, float]]],
         ] = {}
         """Targets' visibility windows by obsid, pointing, step and
         instrument: a visit's step pointings are asked for again at every
@@ -247,9 +250,10 @@ class SchedulingContext:
 
     def optimum_roll(self, target: PlanEntry, utime: float) -> float:
         """Return the power-optimal instrument roll for a target at ``utime``."""
+        ra, dec = target.position_at(utime)
         return optimum_roll(
-            target.ra,
-            target.dec,
+            ra,
+            dec,
             utime,
             self.ephem,
             self.config.solar_panel,
@@ -431,6 +435,8 @@ class SchedulingContext:
         them before checking a specific roll. A mounted instrument's windows
         follow its science line of sight, not the body attitude.
         """
+        if isinstance(target, MovingPointing) and not target.track:
+            target.fetch_track()
         key = (
             int(target.obsid),
             float(target.ra),
@@ -439,8 +445,12 @@ class SchedulingContext:
             target.instrument_name,
         )
         cached = self._window_cache.get(key)
-        if cached is not None:
-            return list(cached)
+        if (
+            cached is not None
+            and cached[1] == len(target.track)
+            and (cached[0] is target.track or cached[0] == target.track)
+        ):
+            return list(cached[2])
         constraint = (
             target.roll_independent_visibility_constraint()
             if target.constraint is not None
@@ -449,12 +459,26 @@ class SchedulingContext:
         if constraint is None:
             windows = [(self.ustart, self.uend)]
         else:
-            result = constraint.evaluate(
-                ephemeris=self.ephem,
-                target_ra=target.ra,
-                target_dec=target.dec,
-                target_roll=None,
-            )
+            result: ConstraintResult | MovingVisibilityResult
+            if target.track:
+                times = list(self.ephem.timestamp)
+                ras, decs = positions_along(
+                    target.track, [float(t.timestamp()) for t in times]
+                )
+                result = constraint.evaluate_moving_body(
+                    self.ephem,
+                    target_ras=ras.tolist(),
+                    target_decs=decs.tolist(),
+                    times=times,
+                    target_roll=None,
+                )
+            else:
+                result = constraint.evaluate(
+                    ephemeris=self.ephem,
+                    target_ra=target.ra,
+                    target_dec=target.dec,
+                    target_roll=None,
+                )
             windows = [
                 (window.start_time.timestamp(), window.end_time.timestamp())
                 for window in result.visibility
@@ -462,7 +486,9 @@ class SchedulingContext:
         if target.forbids_eclipse() is True:
             windows = target.observing_windows(windows)
         windows = self.without_repoints(target, windows)
-        self._window_cache[key] = list(windows)
+        # Retain the immutable samples, so replacing a track cannot reuse
+        # another track's windows. The usual unchanged list compares by identity.
+        self._window_cache[key] = (target.track, len(target.track), list(windows))
         return windows
 
     def without_repoints(
