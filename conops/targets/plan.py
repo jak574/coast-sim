@@ -22,6 +22,7 @@ from ..common import unixtime_from
 from ..config.frame import SpacecraftFrame
 from .entries import AnyEntry, with_kind
 from .plan_entry import AttitudeRotationConventionSchema, PlanEntry
+from .pointing import Pointing
 
 if TYPE_CHECKING:
     import rust_ephem
@@ -491,6 +492,12 @@ class Plan(BaseModel):
         source = Path(path)
         raw = json.loads(source.read_text(encoding="utf-8"))
         plan = cls.model_validate(raw)
+        for saved, entry in zip(raw.get("entries", []), plan.entries, strict=True):
+            done = saved.get("done")
+            if isinstance(entry, Pointing) and isinstance(done, bool):
+                # Completion may come from a finished visit or snapshot,
+                # rather than an exhausted exposure. Keep the flown state.
+                entry.done = done
         if load_timeseries:
             for field, schema in (
                 ("attitude_timeseries", AttitudeTimeseriesSchema),
