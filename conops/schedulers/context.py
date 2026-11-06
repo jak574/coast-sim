@@ -31,7 +31,7 @@ from ..simulation.safe_hold import power_positive_attitudes
 from ..simulation.slew import Slew
 from ..simulation.target_tracking import target_tracking
 from ..targets import MovingPointing, PlanEntry, Pointing, ScheduledActivity
-from ..targets.track import positions_along
+from ..targets.track import TrackPoint, positions_along
 
 Attitude = tuple[float, float, float]
 """Spacecraft body attitude: RA, Dec and roll in degrees."""
@@ -135,7 +135,9 @@ class SchedulingContext:
         self._avoiding_paths = (
             attitude_control.slew_algorithm == SlewAlgorithm.CONSTRAINT_AVOIDING
         )
-        self._window_cache: dict[tuple[object, ...], list[tuple[float, float]]] = {}
+        self._window_cache: dict[
+            tuple[object, ...], tuple[list[TrackPoint], int, list[tuple[float, float]]]
+        ] = {}
         """Targets' visibility windows by obsid, pointing, step and
         instrument: a visit's step pointings are asked for again at every
         selection of a window."""
@@ -477,8 +479,12 @@ class SchedulingContext:
             tuple((point.utime, point.ra, point.dec) for point in target.track),
         )
         cached = self._window_cache.get(key)
-        if cached is not None:
-            return list(cached)
+        if (
+            cached is not None
+            and cached[1] == len(target.track)
+            and (cached[0] is target.track or cached[0] == target.track)
+        ):
+            return list(cached[2])
         constraint = (
             target.roll_independent_visibility_constraint()
             if target.constraint is not None
@@ -514,7 +520,9 @@ class SchedulingContext:
         if target.forbids_eclipse() is True:
             windows = target.observing_windows(windows)
         windows = self.without_repoints(target, windows)
-        self._window_cache[key] = list(windows)
+        # Retain the immutable samples, so replacing a track cannot reuse
+        # another track's windows. The usual unchanged list compares by identity.
+        self._window_cache[key] = (target.track, len(target.track), list(windows))
         return windows
 
     def without_repoints(
