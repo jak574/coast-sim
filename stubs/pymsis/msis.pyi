@@ -1,7 +1,10 @@
+from enum import IntEnum
+
 import numpy as np
 import numpy.typing as npt
-from enum import IntEnum
-from pymsis import msis00f as msis00f, msis20f as msis20f, msis21f as msis21f
+from pymsis import msis00f as msis00f
+from pymsis import msis20f as msis20f
+from pymsis import msis21f as msis21f
 from pymsis.utils import get_f107_ap as get_f107_ap
 
 class Variable(IntEnum):

@@ -31,7 +31,12 @@ SEQUENCE = ObservationSequence(
 
 
 def _scenario(block_hour: float, slide_hours: float):  # type: ignore[no-untyped-def]
-    config = _battery_config(BORESIGHT, stations=True)
+    config = _battery_config(BORESIGHT, stations=False)
+    # This fixture tests charging and sliding reservations. Station bookings
+    # and LEO keep-outs made some mandatory holds infeasible; contact and
+    # whole-hold safety are exercised by their dedicated scheduler tests.
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     targets = _targets(config)
     for n, (ra, dec) in enumerate(PATCH[:3]):
         opens = T0 + (block_hour + 0.5 + n) * HOUR
@@ -53,7 +58,7 @@ def _scenario(block_hour: float, slide_hours: float):  # type: ignore[no-untyped
         T0 + block_hour * HOUR,
         6 * HOUR,
         30 * 60.0,
-        until=T0 + HOURS * HOUR,
+        until=T0 + (HOURS - slide_hours - 0.5) * HOUR,
         slide_seconds=slide_hours * HOUR,
     )
     return config, targets, activities
@@ -66,16 +71,17 @@ def test_a_late_block_before_a_visit_plans_and_executes(  # type: ignore[no-unty
 ) -> None:
     config, targets, activities = _scenario(block_hour, slide_hours=1.0)
     options = {"time_limit": 0.5} if scheduler is LocalSearchScheduler else {}
-    plan = scheduler(
+    planner = scheduler(
         config,
         targets,
         BEGIN,
         BEGIN + timedelta(hours=HOURS),
         activities=activities,
         **options,
-    ).schedule()
+    )
+    plan = planner.schedule()
     blocks = [e for e in plan if e.obstype.name == "ACTIVITY"]
-    assert blocks
+    assert {e.obsid for e in blocks} == {a.obsid for a in planner.activities}
     assert all(float(e.end) <= T0 + HOURS * HOUR for e in blocks)
     ditl = _execute(config, plan)
     assert ditl.validate_plan_matches_execution() == []

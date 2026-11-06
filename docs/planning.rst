@@ -72,6 +72,13 @@ Building and executing a plan
    ditl.calc()
    assert ditl.validate_plan_matches_execution() == []
 
+Set ``config.constraint.science_in_eclipse=False`` to restrict observations to
+sunlit windows, with an optional ``science_in_eclipse`` override per observation
+category. Dispatch, priority, local-search and CP-SAT plans share this policy,
+including rolling ToOs and whole sequence visits. Natural and injected eclipses
+both apply. A stored plan that conflicts with the current policy must be rebuilt
+before execution. See the science-in-eclipse policy in :doc:`configuration`.
+
 A target's ``earliest_start`` and ``deadline`` (Unix seconds, a datetime or an
 ISO-8601 string) limit when its science collection may begin.
 
@@ -117,10 +124,33 @@ computed along the track. Dispatch and the planners alike point it where the sle
 to it ends: the slew is timed to its position at the start and then to the position
 at that slew's end, and a planned entry carries that position, where the executor
 takes up the track.
+Asteroids use their NAIF/SPK IDs, for example ``body="20000624"`` for Hektor;
+``624`` is its permanent asteroid number and also a moon's NAIF ID. The
+`extended NAIF numbering scheme
+<https://naif.jpl.nasa.gov/pub/naif/toolkit_docs/FORTRAN/req/naif_ids.html>`_
+assigns numbered asteroids IDs based on 20,000,000 plus the asteroid number.
+COASTSim preserves the identifier through lookup and program serialization. The
+upstream ``rust_ephem`` adapter translates asteroid NAIF IDs into the
+`Horizons designation-search syntax
+<https://ssd-api.jpl.nasa.gov/doc/horizons.html>`_; programs do not need to carry
+that service-specific syntax. An older adapter may return no ephemeris for the
+otherwise valid ID. Fetch once using
+``Program.bind(refresh_tracks=True)`` and save the program to retain the track
+for offline execution. The dependency release must include the fix before using
+live small-body lookup in distributed notebooks.
 While it is observed the attitude follows the track at its rate, as a ground
 contact's profile is followed, and comes to rest when the observation ends; the ACS
 reports ``SCIENCE`` throughout, the plan validator expects the track's position at
 each sample, and the planners' battery ledger counts the attitude along the track.
+
+``Pointing.visibility(begin=..., end=...)`` evaluates only the selected interval
+on the original ephemeris grid, with adjacent samples to preserve boundary
+semantics. Bounds accept UTC datetimes, ISO strings or Unix seconds. Bounded
+queries accumulate known windows on the request; contained queries reuse those
+results, and wider or disjoint queries extend coverage. Changes to pointing,
+track, roll, ephemeris or configuration invalidate bounded results. Unknown
+intervals are not assumed visible. Calling ``visibility()`` without bounds
+restores the whole-ephemeris behavior, which queue intake and planners retain.
 Plan entries record the position at the slew's end and the track itself, which a
 plan replay without the track observes as a fixed pointing.
 
@@ -193,12 +223,30 @@ How a plan is built
    thruster momentum dump), so no science is placed across it. An activity holds the attitude of whatever precedes it in the
    plan: the science before it ends at the block with no slew back, the block holds
    that science's attitude, and the science after it slews from there. A snapshot
-   whose attitude ``IDLE`` cannot hold through the block, or from which the block
-   after the activity cannot be reached, is not placed before it. With nothing
+   whose attitude cannot be held through the block must leave time for a safe
+   ingress slew; a snapshot from which the activity or the block after it cannot
+   be reached is not placed before it. With nothing
    before it, the activity holds the attitude the plan starts from, or the one the
    fixed block before it leaves; where that cannot be held through the activity and
-   the idle time after it, the activity slews to the safe idle attitude of its start,
-   the one the simulation holds before its first command. A maintenance window, a calibration that needs the
+   the idle time after it, the planner searches deterministic safe-hold candidates
+   shared with dispatch: the initial idle attitude, nearby directions, array
+   pointing, Earth- and Sun-opposite directions and a sky grid, with roll
+   alternatives where roll affects safety. A candidate must be safe for the whole
+   hold and reachable by a path-validated slew, with time for the following block.
+   The entry begins with that ingress; ``activity_hold_begin`` marks the full
+   calibration's start after ingress. Sliding holds retain their full duration
+   after arrival, and their settled time and changed predecessor are rechecked.
+   After tracking a moving target, the handoff uses the final resting attitude
+   after braking, so the activity does not command a return to the body's arrival
+   position. Planned entries mark ``activity_requires_stationary``; validation
+   then rejects slewing or SAFE during the full hold, while legacy and flexible
+   dispatch holds retain their existing recovery semantics.
+   If no candidate fits, the planners raise
+   :class:`~conops.schedulers.ActivitySchedulingError`, naming the mandatory
+   activity, its start window and the failed reservation, instead of returning a
+   plan that omits it. An activity reserved at or beyond an internal horizon's end
+   is still deferred to a later plan.
+   A maintenance window, a calibration that needs the
    spacecraft still or an engineering block is an activity; ``DITL`` commands the
    plan's activity entries, and the plan validator checks that no science, contact or
    charge ran during one. Dispatch takes the same list: it ends the observation under
@@ -226,6 +274,119 @@ How a plan is built
    entered through fault management alone. :func:`~conops.targets.activity.periodic_activities`
    builds a list of activities at a fixed interval from a first start, a count of them
    or as many as begin by a time, each with the same modes, data, ``fixed`` and slide.
+   For a partial dispatch run, an activity is expired when its latest start plus
+   its duration is at or before the run's beginning, and it is not executed.
+   Activities starting at or after the run's end do not block dispatch either.
+   Activity obsids are assigned from the full input list and remain unchanged
+   when the run's interval excludes earlier activities.
+   An activity reserved within a rolling planning horizon keeps its full hold
+   even when it ends beyond that horizon. Replans commit the remaining hold
+   with the activity, so science cannot use its tail and its data is not
+   generated again. The physical simulation end and the ephemeris end still
+   bound the hold; an internal planning cutoff does not.
+   A replan retains an uncommitted activity whose nominal start has passed
+   while its slide window remains open. It reserves a new full hold after the
+   committed work, on an execution step, and does not treat the activity as
+   resumed. Committed and completed activities are excluded by identity so they
+   are not repeated. An unstarted activity whose window has already closed is
+   reported with ``ActivitySchedulingError``.
+   In a partial run, dispatch and the planners resume a fixed activity that
+   began earlier, holding only until its original end. Without earlier execution
+   state, a sliding activity whose window is still open begins a whole hold at
+   the run's start; if the window has closed, the run assumes the latest
+   permitted start and resumes its remaining hold. These assumptions do not
+   reconstruct earlier attitude, recorder contents or momentum: the run's
+   configured initial conditions still apply. A saved plan carries the settled
+   hold bounds when an exact earlier reservation is available.
+   ``ScheduledActivity.attitude`` can request an explicit body pose with
+   :class:`~conops.config.activity_attitude.ActivityAttitude`. Its default
+   ``kind="inherited"`` keeps the existing inherited/safe-hold policy. A
+   ``kind="fixed"`` pose supplies ``ra_deg``, ``dec_deg`` and ``roll_deg`` in the
+   same GCRS physical body-attitude convention as plan entries. This fixes the
+   pose; the separate ``fixed`` activity flag fixes its start time.
+   Dispatch prepares the required ingress as its start window approaches. The
+   look-ahead includes the current observation's cleanup and handoff budget,
+   including when collection has not started yet. Dispatch can cancel a pending
+   collection before it begins; once science has executed, only future collection
+   is shortened and its full teardown is paid before ingress. Already collected
+   science is never reclassified as cleanup to fit the hold.
+   The planners reserve that ingress before the full hold, searching a sliding
+   window for a feasible time at the requested pose. An unsafe required pose
+   is reported explicitly rather than replaced with another attitude. Replans
+   retain the validated pose and hold, and the next observation departs directly
+   from it. ``periodic_activities`` accepts the same ``attitude`` argument;
+   ``Program`` JSON preserves it.
+   A recoverable engineering safe hold sets ``safe_hold=True``. Its stationary
+   part uses ACS ``SAFE`` power, constraint scopes and instrument modes; it
+   returns to scheduling at its end without latching fault safe mode.
+   ``periodic_activities`` accepts ``safe_hold`` too. To select a power-positive
+   hold, use::
+
+      attitude = ActivityAttitude(
+          kind="power_positive", minimum_margin_w=100,
+          prefer_ecliptic_poles=True,
+      )
+      hold = ScheduledActivity(
+          name="Engineering safe hold", begin=start, duration_seconds=36000,
+          safe_hold=True, attitude=attitude,
+      )
+
+   The selector tries the mean J2000 ecliptic poles for the declared spacecraft
+   boresight, with one-degree rolls, followed by a deterministic coarse sky/roll
+   grid. Candidates must clear the hold mode's constraints at every ephemeris
+   sample, including eclipse, and generate more than the bus plus payload load
+   and ``minimum_margin_w`` at every sunlit sample. Eclipse still drains the
+   battery. An entirely shadowed hold cannot establish a sunlit power margin.
+   This is a sampled candidate search, not a proof that no continuous solution
+   exists. It currently supports fixed body-mounted arrays; finite panel drives
+   are explicitly rejected because their ingress drive-state forecast is not
+   yet included. The planners also check ingress and surrounding reservations;
+   dispatch checks one pose over the union of possible holds in a sliding
+   window, conservatively rejecting a window that needs different poses.
+   Infeasibility raises ``ActivitySchedulingError`` rather than silently changing
+   the requested policy or omitting the hold. Thruster firing poses remain
+   inherited or fixed; the power-positive policy does not define thruster
+   geometry.
+
+   Activity entries store ``activity_hold_begin`` and ``activity_hold_end`` for
+   that full hold, while ``begin`` and ``end`` bound the portion in this run.
+   ``activity_partial`` reports missing time at either boundary;
+   ``activity_finishes`` says whether the interval reaches the full hold's end.
+   A resumed activity logs ``resumes`` and has no new ``fixed_data_gb``; its
+   start data is not generated again. A hold cut short at the run end logs
+   ``stops before completion``. A partial dump unloads the wheels only if its
+   remaining hold reaches the full end, in execution and in both the planner's
+   and rolling replan's momentum forecasts. Older plans without hold metadata
+   continue to use their entry bounds as the full hold bounds.
+   **Emergency recharge in dispatch.** A battery alert can wait for a block
+   when a step-by-step forecast keeps the remaining hold, any eclipse wait,
+   and the actual slew to useful charging above the physical discharge floor.
+   The forecast includes the block's modes, panel generation, saturation and
+   executed finite-drive state. It does not mutate the live drive or charging
+   state. The alert threshold is distinct from this safety floor.
+
+   If the block cannot finish safely and a valid emergency charging manoeuvre
+   can be dispatched, dispatch closes its executed segment before that manoeuvre. Its ``activity_interruption`` records
+   the time, reason ``emergency_recharge``, unexecuted seconds and disposition.
+   Ordinary holds resume their remaining duration after the battery alert clears;
+   a dump restarts its full firing duration so partial firing never resets the
+   wheels. Resumed segments carry ``activity_resumed=True``, retain the original
+   activity ID and do not generate the once-only data again. ``activity_partial``
+   identifies the fragments; the final fragment can also have
+   ``activity_finishes=True``.
+
+   A block due during emergency charging waits with its full duration retained.
+   A critically low battery is checked before beginning a new block or generating
+   its start data. Deferral and resumption may exceed the original start window
+   as a logged safety override. A paused block waits through an eclipse that
+   ends charging early, until recharge has cleared the alert, and through a
+   ground contact already under way. If the physical run ends first, interruption
+   metadata retains the unfinished work; no zero-length execution entry is
+   invented. Charging and its actual ingress are exported as separate ``CHARGE``
+   entries, with their actual instrument modes. Saved execution plans replay
+   those fragments and charges; planned runs continue to execute only their
+   recorded commands rather than adding unplanned charges.
+
    A thruster momentum dump is an activity
    dispatch calls for itself, when the stored momentum reaches the planning level of
    the wheels' capacity (see the stored momentum under :doc:`configuration`), and
@@ -369,9 +530,9 @@ executed:
   last visit either, so it is not revisited as soon as nothing outranks it. The
   priority-first scheduler and local search place each visit at the
   earliest fit once it is due; CP-SAT keeps the same spacing between a target's
-  candidates and discounts a visit by ``earliness_weight`` for each cadence it waits
-  after falling due, a cadence after the visit before it, up to ``earliness_weight``
-  in all.
+  candidates. With an explicit positive ``earliness_weight``, it discounts a visit
+  for each cadence it waits after falling due, a cadence after the visit before it,
+  up to ``earliness_weight`` in all. The default applies no value discount.
 
 When :class:`~conops.ditl.RollingHorizonDITL` replans, observations it has already
 committed but not finished collecting count too: their exposure towards their
@@ -652,25 +813,34 @@ through it:
 * the segments start at each sunrise, and the plan is checked at every segment's
   peak.
 
-The scheduler charges where it can. As it evaluates each placement, it puts a charge
-into every idle sunlit stretch of the timeline long enough for one and its two
-slews: slewing from the activity before to the charging attitude, found as emergency
-charging finds it, holding it while the charging mode's constraints allow until the
-stretch ends, and leaving the activity after it reachable from the charging attitude,
-shortened or dropped where it is not. A snapshot is placed only where the deficit,
-with those charges, stays within the limit from there to the end of the horizon.
-Where it does not, the scheduler tries the snapshot later in the same gap, after the
-charging time its idle sunlit start then leaves, before moving to a later gap; it is
-never shortened to fit, and the log says when a request waits for charge. The
-finished plan carries its charges as ``CHARGE`` entries, which ``DITL`` executes as it
-does contacts and :meth:`~conops.ditl.DITL.validate_plan_matches_execution` checks.
+The scheduler first evaluates the whole horizon without new charging manoeuvres.
+If passive generation and the available battery keep it above the planning level,
+it adds no charge, including during long sunlit idle gaps. A full battery now
+can still require a charge for a later deficit: the decision uses future loads,
+not only the initial state of charge.
+
+Where charging is needed, the scheduler builds geometry-feasible candidates in
+sunlit idle gaps. It checks the actual ingress, the reconnected successor's slew,
+IDLE generation before and after charging, saturation at the recharge level,
+eclipse, and finite array-drive behaviour. It removes candidates whose omission
+preserves battery feasibility and safe connections, then searches for shorter
+holds on the simulation grid. Each accepted shorter hold is checked against the
+whole horizon; this bounded search does not claim a globally optimal set of
+manoeuvres. Explicit or committed charging entries remain reserved.
+
+A snapshot is placed only where the resulting forecast stays within the battery
+limit through the end of the horizon. Where it does not, the scheduler can try the
+snapshot later in the gap, leaving time to charge first; it is never shortened to
+fit. A schedule that remains infeasible is still rejected. The finished plan
+carries the retained charges as ``CHARGE`` entries, which ``DITL`` executes and
+:meth:`~conops.ditl.DITL.validate_plan_matches_execution` checks.
 
 The ledger is the simulation's own arithmetic at the attitudes the simulation flies,
 so a plan it accepts keeps the battery above the level when executed. A spacecraft
 whose panels generate more than observing draws, such as a side-mounted array rolled
-towards the Sun, charges only in the sunlit idle time it has anyway and fills the
-day with science. One whose panels only generate pointing at the Sun charges in
-every idle sunlit stretch and refuses the science the battery cannot carry through
+towards the Sun, needs no discretionary charge when passive generation suffices.
+One whose panels only generate pointing at the Sun reserves necessary charges in idle
+sunlit time and refuses the science the battery cannot carry through
 the eclipse after it; it is then the lowest-merit science that waits, as with the
 recorder. Local search decodes its sequences through the same check;
 :class:`~conops.ditl.RollingHorizonDITL` starts each plan from the battery the
@@ -723,7 +893,12 @@ cross plateaus. The objective is merit-weighted science time, with each snapshot
 shares in the plan before it. A snapshot of a request with a deadline is worth less
 the later it starts, so ToOs and other time-critical requests are not pushed later
 than they need to be. The best plan found is returned, and it is never worse than the
-priority-first plan.
+priority-first plan. For a windowed visit, the deadline discount uses the
+``visit`` index stored on that observation's plan entry, including the group's
+window limits. Rescoring an earlier timeline therefore uses the same window as
+exact decoding, independently of which visit the request is currently trying
+to place. Sequence blocks and every exported step retain that same visit index.
+Scoring does not change placement state.
 
 Cadence visits keep their spacing, from each other and from locked visits, and each
 plan entry's ``merit`` is the value its snapshot has where it is placed, as in the
@@ -752,12 +927,22 @@ priority-first scheduler.
 * ``seed``: random seed, defaulting to the configuration's;
 * ``neighborhood``: how many positions apart a swap or move can be (default 3);
 * ``history_length``: length of the late-acceptance history (default 50);
-* ``earliness_weight``: fraction of a deadline request's value lost if it starts at
+* ``earliness_weight``: optional fraction of a deadline request's value lost if it starts at
   its deadline rather than at the start of the horizon, or at its earliest start if
-  that is later (default 0.5). It must be at most 1, so a late snapshot is always
-  worth more than none.
+  that is later (default 0). Valid science keeps its full value by default;
+  equal-valued plans prefer earlier deadline science, then earlier science overall.
+  Set a positive value only when delay
+  should reduce science value. It must be at most 1; values below 1 keep a late
+  snapshot worth more than none.
 
 Ground passes and locked entries stay where the priority-first plan put them.
+
+``scheduler.search_iterations`` and ``scheduler.search_limits`` record every
+local-search pass in the latest ``schedule()`` call, including momentum replans.
+An ending is ``"iteration budget"``, ``"wall clock"`` or ``"disabled"`` (zero
+time or zero requested changes). The scalar ``iterations`` reports only the
+last pass; it cannot establish that all earlier passes completed their budgets.
+These diagnostics also cover CP-SAT's optional local-search polishing.
 
 **Limitations.** Only requests with a deadline are rewarded for starting early. Each
 change is decoded from the point it touches, so a search of a few thousand changes
@@ -837,6 +1022,23 @@ chunk are kept. The next chunk is solved from where the kept snapshots leave the
 spacecraft. Every plan therefore executes as planned and is never worse than the
 priority-first plan; ``solver_chunks_used`` shows which chunks the solver improved.
 
+The priority-first start and a supplied seed are decoded independently with their
+own sliding-activity reservations. Seed activity times apply only while evaluating
+the seed and are kept only if that seed wins the starting-plan comparison; a
+losing seed cannot move a mandatory block into the priority-first science.
+
+When a dispatch seed decodes to a better starting plan, that decoded plan is
+the incumbent for chunk hints and comparisons. Recorder and battery reservations
+for later observations come from its continuation decoded from the current
+prefix, rather than from the unrelated priority-first timeline. Recorder
+reservations include the actual shortened collection, sequence calibration data,
+and contact ingress changes, separately for each store. They subtract the old
+current-chunk prefix so its optional replacements are not counted twice. Battery
+reservations use the continuation's actual blocks and drive history. A snapshot
+that exact decoding cannot place contributes no fixed science load. An accepted
+chunk invalidates the old continuation, which is decoded again from the new
+prefix before the next chunk.
+
 The exact decoding also applies the rules the model leaves out: visits stay a cadence
 clear of locked visits of the same target, ``slew_before_visible`` lets a slew start
 before its target rises, and each plan entry's ``merit`` is the value its snapshot has
@@ -856,6 +1058,16 @@ ended each chunk's search: ``optimal``, the ``deterministic budget``, the ``wall
 or the ``solver`` itself. A chunk model CP-SAT finds invalid is one the scheduler built
 wrong, not a search that ran out of time: it raises a ``ValueError`` naming the model's
 fault rather than falling back to the priority-first plan.
+
+Limit endings are inferred from the solver's counters. An unfinished search near
+both limits is reported conservatively as ``wall clock``, so a possible
+load-dependent stop is not labelled deterministic. A completed optimality or
+infeasibility proof keeps its solver-proven ending even near the limits.
+
+These three lists describe the final momentum pass. To check every actual solver
+call in the latest ``schedule()``, inspect ``solver_search_statuses`` and
+``solver_search_limits``. They retain earlier passes even if a later pass finishes
+optimally; chunks that need no model contribute no search record.
 
 ``CpSatScheduler`` takes the arguments of ``LocalSearchScheduler``, plus:
 
@@ -898,6 +1110,13 @@ context so that their plans also execute as planned.
 
 Rolling-horizon replanning
 --------------------------
+
+The planner's default initial pose uses the same origin-time roll as a fresh
+ACS. It does not replay a command-free flight to each later candidate time:
+that hypothetical idle flight could fault even though the real spacecraft is
+following a valid plan. Candidate generation leaves fault management untouched;
+the actual ingress and hold still undergo their normal safety checks. A replan
+continues to use its supplied execution state.
 
 :class:`~conops.ditl.rolling_ditl.RollingHorizonDITL` simulates a mission that is
 planned on the ground and replanned periodically. It runs like
@@ -977,6 +1196,18 @@ each plan by local search or with CP-SAT.
   how many entries of the run's start plan seeded it, and for a CP-SAT plan the
   solver's status for each chunk, whether each chunk's snapshots were kept and what
   ended each chunk's search.
+  Its ``search_iterations`` and ``search_limits`` include every local-search pass
+  from all candidate plans built during that replan, including candidates later
+  rejected. Check for ``"wall clock"`` here when verifying repeatability: a later
+  completed pass must not hide an earlier timeout. Both lists default to empty
+  when reading older records or using a scheduler without local-search reporting.
+  The corresponding ``solver_search_statuses`` and ``solver_search_limits`` retain
+  every actual CP-SAT chunk search across all passes and candidate plans, including
+  rejected candidates. Check for ``"wall clock"`` in both search-limit lists when
+  auditing reproducibility. The existing ``solver_statuses``, ``solver_limits``
+  and ``solver_chunks_used`` keep their final-pass, selected-plan scope. Older
+  records default to empty cumulative lists; they cannot retrospectively prove
+  that earlier attempts avoided wall-clock limits.
 * ``ditl.too_response_times()`` gives the seconds from each ToO's submission to its
   first science, or None if it was never observed.
 * ``ditl.plan`` is the plan that was actually followed: the committed parts of
@@ -1160,7 +1391,8 @@ as ``+alloc``.
 Each :class:`~conops.benchmark.BenchmarkResult` reports, measured the same way for every
 contender:
 
-* science time and merit-weighted science;
+* science time and merit-weighted science, excluding executed sequence calibration;
+* calibration collection time separately as ``calibration_hours``;
 * time slewing, idle and in contact, and the number of observations;
 * each ToO's response time, and how many started by their deadline;
 * how many other requests with a deadline got their whole exposure;

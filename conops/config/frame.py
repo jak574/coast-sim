@@ -17,10 +17,18 @@ import numpy.typing as npt
 from pydantic import Field, model_validator
 
 from ..common.numerics import NEGLIGIBLE_NORM, UNIT_MAGNITUDE_TOLERANCE
-from ..common.vector import quaternion_rotate_vector, rotation_matrix_to_quaternion
+from ..common.vector import (
+    attitude_to_quat,
+    quat_to_attitude,
+    quaternion_rotate_vector,
+    quaternion_to_rotation_matrix,
+    rotation_matrix_to_quaternion,
+)
 from ._base import ConfigModel
 
 if TYPE_CHECKING:
+    from rust_ephem.constraints import ConstraintConfig
+
     from .instrument import InstrumentMounting
 
 Vector = tuple[float, float, float]
@@ -120,6 +128,71 @@ class SpacecraftFrame(ConfigModel):
         vector = self.body_from_canonical.T @ np.asarray(body, dtype=np.float64)
         vector[np.abs(vector) < NEGLIGIBLE_NORM] = 0.0
         return float(vector[0]), float(vector[1]), float(vector[2])
+
+    def body_attitude(self, ra: float, dec: float, roll: float) -> Vector:
+        """Express a reference-boresight attitude in physical body coordinates."""
+        if self.is_identity:
+            return ra, dec, roll
+        return self.mounting.body_attitude(ra, dec, roll)
+
+    def canonical_attitude(self, ra: float, dec: float, roll: float) -> Vector:
+        """Express a physical body attitude about the reference boresight."""
+        if self.is_identity:
+            return ra, dec, roll
+        rotation = self.body_from_canonical.T @ quaternion_to_rotation_matrix(
+            attitude_to_quat(ra, dec, roll)
+        )
+        ra, dec, roll = quat_to_attitude(rotation_matrix_to_quaternion(rotation))
+        if np.hypot(rotation[0, 0], rotation[0, 1]) < NEGLIGIBLE_NORM:
+            # At a pole, asin of a rounded matrix element can invent a
+            # milliarcsecond departure. Preserve the exact polar direction.
+            return 0.0, float(np.copysign(90.0, rotation[0, 2])), roll
+        return ra, dec, roll
+
+    def constraint_in_body(self, constraint: "ConstraintConfig") -> "ConstraintConfig":
+        """Place an unmounted reference-boresight constraint in body coordinates.
+
+        Explicit boresight-offset subtrees already describe body hardware and
+        are preserved. Other leaves follow this frame, including its clocking.
+        """
+        from rust_ephem.constraints import (
+            AndConstraint,
+            AtLeastConstraint,
+            BoresightOffsetConstraint,
+            NotConstraint,
+            OrConstraint,
+            XorConstraint,
+        )
+
+        if self.is_identity or isinstance(constraint, BoresightOffsetConstraint):
+            return constraint
+        if isinstance(constraint, NotConstraint):
+            return constraint.model_copy(
+                update={"constraint": self.constraint_in_body(constraint.constraint)}
+            )
+        if isinstance(
+            constraint, (AndConstraint, OrConstraint, XorConstraint, AtLeastConstraint)
+        ):
+            return constraint.model_copy(
+                update={
+                    "constraints": [
+                        self.constraint_in_body(c) for c in constraint.constraints
+                    ]
+                }
+            )
+        matrix = self.body_from_canonical
+        pitch = np.arctan2(-matrix[2, 0], np.hypot(matrix[0, 0], matrix[1, 0]))
+        if np.hypot(matrix[0, 0], matrix[1, 0]) > IDENTITY_TOLERANCE:
+            roll = np.arctan2(matrix[2, 1], matrix[2, 2])
+            yaw = np.arctan2(matrix[1, 0], matrix[0, 0])
+        else:
+            roll = 0.0
+            yaw = np.arctan2(-matrix[0, 1], matrix[1, 1])
+        return constraint.boresight_offset(
+            roll_deg=float(np.degrees(roll)),
+            pitch_deg=float(np.degrees(pitch)),
+            yaw_deg=float(np.degrees(yaw)),
+        )
 
     @property
     def mounting(self) -> "InstrumentMounting":

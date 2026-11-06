@@ -391,6 +391,7 @@ def ditl(mock_config_detailed, mock_ephem) -> DITL:
             dec=0.0,
             obsid=1,
             obstype="science",
+            calibration=False,
             begin=0.0,
             end=float("inf"),
             collection_begin=None,

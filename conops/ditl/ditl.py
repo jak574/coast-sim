@@ -275,6 +275,9 @@ class DITL(DITLMixin, DITLStats):
         ## DITL LOOP
         ##
         for i in range(simlen):
+            # A partial run or a coarser execution step need not share the
+            # ephemeris's array origin or sample count.
+            ephem_index = int(self.ephem.index(dtutcfromtimestamp(self.utime[i])))
             # Advance the current plan entry. Plan entries are not guaranteed to
             # be time-ordered, so only fall back to a full lookup when the
             # cached entry no longer covers this timestep.
@@ -406,8 +409,8 @@ class DITL(DITLMixin, DITLStats):
                 np.radians(dec),
                 np.radians(roll),
                 radec2vec(
-                    np.radians(float(self.ephem.sun_ra_deg[i])),
-                    np.radians(float(self.ephem.sun_dec_deg[i])),
+                    np.radians(float(self.ephem.sun_ra_deg[ephem_index])),
+                    np.radians(float(self.ephem.sun_dec_deg[ephem_index])),
                 ),
             )
             sun_body_vector: list[float] = [
@@ -415,8 +418,18 @@ class DITL(DITLMixin, DITLStats):
                 float(_sun_bv[1]),
                 float(_sun_bv[2]),
             ]
-            _pos = np.asarray(position_vectors(self.ephem, "gcrs")[i], dtype=np.float64)
-            earth_body_vector: list[float] = list(-_pos / np.linalg.norm(_pos))
+            _pos = np.asarray(
+                position_vectors(self.ephem, "gcrs")[ephem_index], dtype=np.float64
+            )
+            earth_body_vector: list[float] = [
+                float(value)
+                for value in scbodyvector(
+                    np.radians(ra),
+                    np.radians(dec),
+                    np.radians(roll),
+                    -_pos / np.linalg.norm(_pos),
+                )
+            ]
             for_solid_angle_sr = (
                 self.constraint.instantaneous_field_of_regard(utime=self.utime[i])
                 if self.calculate_field_of_regard
@@ -478,7 +491,7 @@ class DITL(DITLMixin, DITLStats):
             )
             _q = attitude_to_quat(ra, dec, roll)
             momentum_sample = self._update_stored_momentum(
-                self.utime[i], _pos, _q, index=i
+                self.utime[i], _pos, _q, index=ephem_index
             )
             active = self._active_entry
             self._momentum_at_capacity(
@@ -499,6 +512,7 @@ class DITL(DITLMixin, DITLStats):
                 roll_offset_deg=roll_offset_deg,
                 acs_mode=mode,
                 collection_seconds=collection_seconds,
+                calibration=self.ppt is not None and self.ppt.calibration is True,
                 panel_illumination=panel_illumination,
                 solar_array_drive_angles=drive_angles,
                 instrument_modes=self._instrument_modes_telemetry(mode, self.utime[i]),
@@ -629,6 +643,12 @@ class DITL(DITLMixin, DITLStats):
                 self.telemetry.data.append(pd)
 
         if (
+            self._active_entry is not None
+            and self._active_entry.obstype == ObsType.ACTIVITY
+            and not self.acs.in_safe_mode
+        ):
+            self._finish_active_entry(self.uend)
+        if (
             self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_enabled
             is True
         ):
@@ -704,6 +724,20 @@ class DITL(DITLMixin, DITLStats):
             (entry for entry in self.plan if float(entry.end) > self.ustart),
             key=lambda entry: float(entry.begin),
         )
+        for entry in self._entries_to_command:
+            if entry_obstype(entry) not in PLAN_SCIENCE_OBSTYPES:
+                continue
+            begin = max(self.ustart, float(entry.begin) + float(entry.slewtime))
+            end = min(self.uend, float(entry.end))
+            eclipse = (
+                entry.eclipse_violation(begin, end)
+                if entry.forbids_eclipse() is True
+                else None
+            )
+            if eclipse is not None:
+                raise ValueError(
+                    f"Plan entry {entry.obsid} violates its science-in-eclipse policy at {eclipse}"
+                )
         self._next_entry_index = 0
         self._active_entry: PlanEntry | None = None
         self._active_pass: Pass | None = None
@@ -786,6 +820,13 @@ class DITL(DITLMixin, DITLStats):
             return False
         changed = False
         if (
+            self._active_entry is not None
+            and self._active_entry.safe_hold
+            and self._active_entry.activity_hold_begin is not None
+            and utime >= self._active_entry.activity_hold_begin
+        ):
+            self.acs.begin_safe_hold()
+        if (
             self._active_pass is not None
             and self.acs.current_pass is None
             and self._active_pass.in_pass(utime)
@@ -841,19 +882,29 @@ class DITL(DITLMixin, DITLStats):
             self.acs.request_end_battery_charge(utime)
         elif obstype == ObsType.ACTIVITY:
             self.acs.cancel_pending_slews(entry.obsid)
+            entry.end = min(float(entry.end), utime)
             self.log.log_event(
                 utime=utime,
                 event_type="ACTIVITY",
-                description=f"Scheduled activity {entry.name} ends",
+                description=(
+                    f"Scheduled activity {entry.name} "
+                    f"{'ends' if entry.activity_finishes else 'stops before completion'}"
+                ),
                 obsid=entry.obsid,
                 acs_mode=self.acs.acsmode,
             )
+            if entry.safe_hold:
+                self.acs.end_safe_hold()
             if entry.desaturation:
                 self.acs.end_desaturation()
-                self._unload_stored_momentum(utime, entry.obsid)
+                if entry.activity_finishes:
+                    self._unload_stored_momentum(utime, entry.obsid)
         else:
             self.acs.cancel_pending_slews(entry.obsid)
-            self.acs.end_science_observation()
+            # The entry may end between ticks. Stop its installed tracking
+            # there, before advancing this tick, so the forecast brake and
+            # the next command use the same physical handoff.
+            self.acs.end_science_observation(min(float(entry.end), utime))
         self._active_entry = None
 
     def _command_entry(self, entry: PlanEntry, utime: float) -> bool:
@@ -891,10 +942,22 @@ class DITL(DITLMixin, DITLStats):
     def _command_activity_entry(self, entry: PlanEntry, utime: float) -> None:
         """Hold the entry's attitude in IDLE for the activity, slewing to it
         first where the spacecraft is elsewhere."""
-        self.acs.end_science_observation()
+        self.acs.end_science_observation(utime)
         if entry.desaturation:
             self.acs.begin_desaturation()
-        self._add_activity_data(float(entry.fixed_data_gb), entry)
+        if entry.activity_hold_begin is None:
+            entry.activity_hold_begin = float(entry.begin) + entry.slewtime
+        if entry.activity_hold_end is None:
+            entry.activity_hold_end = float(entry.end)
+        if entry.safe_hold and utime >= entry.activity_hold_begin:
+            self.acs.begin_safe_hold()
+        resumed = entry.activity_resumed or entry.activity_hold_begin < self.ustart
+        entry.begin = max(float(entry.begin), self.ustart)
+        entry.end = min(float(entry.end), self.uend)
+        if resumed:
+            entry.fixed_data_gb = 0.0
+        else:
+            self._add_activity_data(float(entry.fixed_data_gb), entry)
         distance, _ = quaternion_attitude_delta(
             self.acs.ra, self.acs.dec, self.acs.roll, entry.ra, entry.dec, entry.roll
         )
@@ -910,7 +973,7 @@ class DITL(DITLMixin, DITLStats):
         self.log.log_event(
             utime=utime,
             event_type="ACTIVITY",
-            description=f"Scheduled activity {entry.name} begins",
+            description=f"Scheduled activity {entry.name} {'resumes' if resumed else 'begins'}",
             obsid=entry.obsid,
             acs_mode=self.acs.acsmode,
         )

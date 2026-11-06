@@ -343,6 +343,14 @@ The default is the frame COAST has always computed in, boresight +X and the Sun'
 * a :class:`~conops.config.Telescope` given neither a ``mounting`` nor a ``boresight``
   takes the frame's mounting, so science RA/Dec and roll convert to the body attitude
   as for any mounted telescope (see `Telescope Instruments`_); one given either keeps it;
+* a request naming a plain instrument without a mounting follows the bus's
+  declared boresight and clocking. The recorded instrument name remains that of
+  the configured instrument, including during moving-target tracking;
+* unmounted ``safety_constraint`` and ACS ``slew_constraint`` cones follow the
+  declared reference boresight. Explicit boresight-offset subtrees already describe
+  body hardware and are preserved. Slew waypoints are chosen in the reference
+  frame and transformed into physical body axes before execution and per-axis
+  timing; merely relabelling exported quaternions cannot make a frame conversion;
 * :func:`~conops.config.create_solar_panel_vector` and
   :func:`~conops.config.create_star_tracker_vector` take ``frame=`` and return their
   vectors in the mission's frame, so a ``'boresight'`` panel faces the frame's
@@ -481,6 +489,33 @@ cadences without replanning the science schedule.
 
 Momentum-constrained queue scheduling
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``ThrusterDumpConfig.attitude`` accepts the same
+:class:`~conops.config.activity_attitude.ActivityAttitude` as scheduled holds.
+The default is inherited. With a required fixed pose, dispatch and the planners
+reserve the ingress turn as well as the full ``duration_seconds`` of firing at
+that pose. The wheel reset occurs at firing end, once; an incomplete firing at
+the physical simulation end does not reset the wheels. A configured dump waits
+for an indivisible visit before turning and firing.
+
+This illustrative pose is a test input; the firing rule remains a mission
+configuration input. Place ``thruster_dump`` under
+``spacecraft_bus.attitude_control.stored_momentum``. Its angles use the physical GCRS body-attitude convention of plan entries,
+including when the declared spacecraft frame has a +Z payload boresight.
+
+.. code-block:: yaml
+
+   thruster_dump:
+     duration_seconds: 120.0
+     residual_fraction: 0.0
+     attitude:
+       kind: fixed
+       ra_deg: 105.0
+       dec_deg: 10.0
+       roll_deg: 25.0
+
+Power-positive scheduled safe holds and fault-mode guidance are the next
+consumers of this attitude model.
 
 Set ``stored_momentum.enforce_capacity`` with a finite positive spherical actuator
 momentum limit in ``stored_momentum.capacity_n_m_s`` to enable admission and
@@ -1567,6 +1602,9 @@ The :class:`~conops.config.Constraint` defines pointing constraints for the spac
 * ``sun_constraint``: Minimum angle from the Sun
 * ``anti_sun_constraint``: Maximum angle from anti-Sun direction
 * ``moon_constraint``: Minimum angle from the Moon
+* ``science_in_eclipse`` (bool, default ``True``): Whether observations may run
+  in eclipse. Set ``False`` to restrict observing to sunlit intervals; an
+  observation category can override this default. See `Science in eclipse`_.
 * ``eclipse_intervals``: Intervals, each a ``(start, end)`` pair in Unix seconds, datetimes or ISO-8601 strings, during which the spacecraft is taken to be in eclipse whatever the ephemeris says, for a test of an eclipse the orbit does not give. The constraint's eclipse test, the solar panels, the bus and instrument eclipse power, the planners' battery ledger, the momentum sources' Sun, telemetry and the timeline plots all see them
 * ``earth_constraint``: Minimum angle from Earth limb
 * ``panel_constraint``: Solar panel pointing constraint
@@ -1589,6 +1627,49 @@ The :class:`~conops.config.Constraint` defines pointing constraints for the spac
 
    # Set ephemeris at runtime
    constraint.ephem = ephemeris
+
+Science in eclipse
+^^^^^^^^^^^^^^^^^^
+
+Set the policy before creating requests or binding a program:
+
+.. code-block:: python
+
+   from conops.config import ObservationCategory
+
+   config.constraint.science_in_eclipse = False
+   config.observation_categories.categories.append(
+       ObservationCategory(
+           name="Eclipse-capable follow-up", obsid_min=9000, obsid_max=9999,
+           science_in_eclipse=True,
+       )
+   )
+
+``ObservationCategory.science_in_eclipse=None`` inherits the mission default;
+``True`` allows that category to observe during eclipse, and ``False`` forbids it.
+The default mission value preserves existing behaviour. The resolved policy is
+available through ``config.science_in_eclipse_for(obsid)`` and is shared by
+request visibility, dispatch, all three planners and rolling replanning, including
+Targets of Opportunity and moving targets. Protected sequences must fit wholly
+inside a permitted window. Setup and cleanup hold times also fit inside that
+window; the slew into it may start earlier if the existing slew rules permit it.
+
+Both the ephemeris's natural eclipses and ``eclipse_intervals`` apply. Natural
+window boundaries use rust-ephem's ephemeris resolution; injected intervals use
+half-open bounds, including boundaries between simulation ticks. Science credit
+and data collection are clipped before a forbidden interval. A saved plan that
+violates the policy is rejected before execution: regenerate the plan after
+changing its observing policy or eclipses.
+
+This policy controls observation availability. Instrument standby modes and
+``eclipse_power_w`` still come from the mission's load configuration. Scheduled
+activities retain their explicit modes, and hardware keep-outs still apply to
+slews and holds. Synthetic eclipse activities are no longer needed solely to
+prohibit science; keep an activity when it represents a separate required
+operation or a particular instrument mode.
+
+Roll-dependent stray light
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A stray-light patch, a region beside the boresight into which a bright body scatters light, is written as a ``rust_ephem`` field-of-view polygon on ``science_constraint``: a :class:`~rust_ephem.constraints.BodyConstraint` for the Sun, Moon or Earth, or a :class:`~rust_ephem.constraints.BrightStarConstraint` for a list of stars, each with the patch as ``fov_polygon`` in the instrument frame (gnomonic degrees; at zero roll +v points north and +u east, and a roll is the position angle of +v east of north). Leave ``roll_deg`` unset so the roll in question is used. The patch turns with the instrument, so where it sits on the sky depends on the roll: the check is applied to science attitudes at their roll, named ``Science`` in the violation names, and the roll optimiser tests the candidate rolls in power order and takes the first that keeps the patch clear, or the power-optimal roll when none does. Charging, safe-mode and idle attitudes take the power-optimal roll regardless.
 
@@ -1778,6 +1859,9 @@ Each :class:`~conops.config.ObservationCategory` also carries:
 * ``antenna_repoints`` (``allowed``, ``reported`` or ``forbidden``, default ``allowed``):
   What an antenna repoint during one of the category's observations means; ``forbidden``
   keeps the category's snapshots between repoints (see :doc:`communications`)
+* ``science_in_eclipse`` (bool or ``None``, default ``None``): Override the
+  mission's eclipse observing policy, or inherit it with ``None`` (see
+  `Science in eclipse`_)
 * ``interruptible`` (bool, default ``True``): Whether a Target of Opportunity may cut
   short the category's observations (see :doc:`target_of_opportunity`)
 * ``skip_thermal_settling`` (bool, default ``False``): Whether a slew into one of the
@@ -2189,3 +2273,25 @@ For detailed API documentation, see:
 * :class:`~conops.config.CommunicationsSystem`
 * :class:`~conops.config.ObservationCategories`
 * :class:`~conops.config.VisualizationConfig`
+
+Power-positive fault safe mode
+-----------------------------
+
+``AttitudeControlSystem.safe_mode_attitude`` optionally takes the same
+:class:`~conops.config.activity_attitude.ActivityAttitude` used by scheduled
+holds. ``None`` preserves the existing guidance. For fixed body-mounted panels,
+``ActivityAttitude(kind="power_positive")`` selects a feasible fixed pose with
+positive net generation at every sunlit sample through the remaining ephemeris,
+including the configured bus and payload SAFE loads. Ecliptic-pole preference
+uses ``SpacecraftBus.frame`` to orient the declared boresight; it does not assume
+body +X. A fixed request is also supported, with its full hold and ingress
+checked for attitude safety, without a promise of positive power.
+
+The chosen whole-hold pose is retained rather than replaced by the legacy
+per-step charging heuristic. If no sampled pose and ingress qualify,
+:class:`~conops.simulation.safe_hold.SafeHoldUnavailableError` is raised explicitly;
+there is no unverified fallback. Fault SAFE remains latched and normal commands
+remain rejected. This differs from ``ScheduledActivity(safe_hold=True)``, whose
+SAFE interval ends with the activity. The power-positive policy supports fixed
+body-mounted arrays, uses the ephemeris sampling, and permits battery draw in
+eclipse; see :doc:`planning` for the candidate search and margin settings.

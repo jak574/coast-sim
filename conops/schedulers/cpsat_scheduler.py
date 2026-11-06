@@ -25,8 +25,11 @@ executes as planned.
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import pairwise
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
@@ -79,6 +82,80 @@ _EMPTY_CHAIN = 2
 """A chain of the start and end sentinels alone holds no task."""
 
 
+_SOLVED_CHUNK_CACHE_SIZE = 16
+"""Compiled end-of-horizon models retained within one schedule at most."""
+
+
+@dataclass
+class _SolvedChunk:
+    shape: tuple[int, int, str]
+    model: cp_model.CpModel
+    solver: cp_model.CpSolver
+    status: str
+    statistics: str | None = None
+    text: str | None = None
+
+
+class _SolveProbe(NamedTuple):
+    shape: tuple[int, int, str]
+    statistics: str | None
+    text: str | None
+
+
+class _ChunkSolveCache:
+    """Reuse completed deterministic searches of exactly equal compiled models.
+
+    Cheap shape/statistics filters avoid serializing every model. A hit still
+    requires complete model-text equality, including hints and all resource
+    coefficients. Owned snapshots prevent a later model edit changing what a
+    cached response solved. Responses are read through the current chunk's
+    variables and target mapping, then decoded against the current exact state.
+    """
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[int, _SolvedChunk] = OrderedDict()
+        self._serial = 0
+        self.hits = 0
+
+    def find(
+        self, model: cp_model.CpModel, parameters: str
+    ) -> tuple[_SolvedChunk | None, _SolveProbe]:
+        shape = (len(model.proto.variables), len(model.proto.constraints), parameters)
+        statistics = text = None
+        for number, cached in reversed(self._entries.items()):
+            if cached.shape != shape:
+                continue
+            if statistics is None:
+                statistics = model.model_stats()
+            if cached.statistics is None:
+                cached.statistics = cached.model.model_stats()
+            if cached.statistics != statistics:
+                continue
+            if text is None:
+                text = str(model.proto)
+            if cached.text is None:
+                cached.text = str(cached.model.proto)
+            if cached.text == text:
+                self._entries.move_to_end(number)
+                self.hits += 1
+                return cached, _SolveProbe(shape, statistics, text)
+        return None, _SolveProbe(shape, statistics, text)
+
+    def remember(
+        self,
+        probe: _SolveProbe,
+        model: cp_model.CpModel,
+        solver: cp_model.CpSolver,
+        status: str,
+    ) -> None:
+        self._serial += 1
+        self._entries[self._serial] = _SolvedChunk(
+            probe.shape, model.clone(), solver, status, probe.statistics, probe.text
+        )
+        if len(self._entries) > _SOLVED_CHUNK_CACHE_SIZE:
+            self._entries.popitem(last=False)
+
+
 def _kb_up(gb: float) -> int:
     return int(np.ceil(gb * _KB_PER_GB - _KB_ROUNDING))
 
@@ -103,7 +180,7 @@ class _ChunkRecorder(NamedTuple):
     """Housekeeping generated in each segment, outside its contact."""
     fixed: list[int]
     """Science already planned in each segment: before the chunk, locked, or
-    the priority-first plan's snapshots after it."""
+    the selected incumbent's snapshots after it."""
     removal: list[int]
     """What the contact at the start of each segment downlinks."""
     removal_accrual: list[int]
@@ -141,7 +218,7 @@ class _ChunkBattery(NamedTuple):
     """Watts drawn by a slew in each run."""
     fixed: list[int]
     """Energy already planned in each run, relative to its idle power: the
-    passes in the chunk and the priority-first plan's snapshots after it."""
+    passes in the chunk and the selected incumbent's snapshots after it."""
     limit: int
     """The planning limit as a deficit."""
     floor: int
@@ -320,6 +397,7 @@ class _ChunkModel:
         self.allocated_left = dict(allocated_left or {})
         """Allocated seconds left in each span the candidates can use."""
         model = self.model = cp_model.CpModel()
+        self.solve_cache: _ChunkSolveCache | None = None
         self.arrival = [
             model.new_int_var(*task.arrival, f"arrival{k}")
             for k, task in enumerate(tasks)
@@ -952,20 +1030,41 @@ class _ChunkModel:
         # Presolve can take longer than a short time limit leaves a chunk, and
         # the search does better with the time.
         solver.parameters.cp_model_presolve = False
-        status = solver.solve(self.model)
-        status_name = solver.status_name(status)
-        if status == cp_model.MODEL_INVALID:
-            raise ValueError(
-                f"CP-SAT found the chunk's model invalid: {solver.solution_info()}"
-            )
-        ended = search_ending(
-            status_name,
-            float(solver.wall_time),
-            time_limit,
-            float(solver.deterministic_time),
-            deterministic_time,
+        cache = (
+            self.solve_cache
+            if workers == 1 and deterministic_time is not None
+            else None
         )
-        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        cached = None
+        probe = None
+        if cache is not None:
+            cached, probe = cache.find(self.model, str(solver.parameters))
+        if cached is not None:
+            solver, status_name, ended = cached.solver, cached.status, "reused"
+        else:
+            status = solver.solve(self.model)
+            status_name = solver.status_name(status)
+            if status == cp_model.MODEL_INVALID:
+                raise ValueError(
+                    f"CP-SAT found the chunk's model invalid: {solver.solution_info()}"
+                )
+            ended = search_ending(
+                status_name,
+                float(solver.wall_time),
+                time_limit,
+                float(solver.deterministic_time),
+                deterministic_time,
+            )
+            if (
+                cache is not None
+                and probe is not None
+                and (
+                    ended == "deterministic budget"
+                    or status_name in ("OPTIMAL", "INFEASIBLE")
+                )
+            ):
+                cache.remember(probe, self.model, solver, status_name)
+        if status_name not in ("OPTIMAL", "FEASIBLE"):
             return status_name, ended, None
 
         chosen = sorted(
@@ -1001,16 +1100,23 @@ def search_ending(
     """What ended a chunk's search: ``"optimal"`` where the solver proved its
     answer, ``"deterministic budget"`` where that budget was reached,
     ``"wall clock"`` where the wall-clock limit was, else ``"solver"`` for a
-    search the solver ended itself, as for an infeasible model."""
+    search the solver ended itself, as for an infeasible model.
+
+    Limit endings are inferred from the counters. An unfinished search near
+    both limits is conservatively wall-limited, so a possible load-dependent
+    stop is not reported as deterministic. Completed proofs take precedence.
+    """
     if status == "OPTIMAL":
         return "optimal"
+    if status == "INFEASIBLE":
+        return "solver"
+    if wall_seconds >= LIMIT_REACHED_FRACTION * time_limit:
+        return "wall clock"
     if (
         deterministic_time is not None
         and deterministic_seconds >= LIMIT_REACHED_FRACTION * deterministic_time
     ):
         return "deterministic budget"
-    if wall_seconds >= LIMIT_REACHED_FRACTION * time_limit:
-        return "wall clock"
     return "solver"
 
 
@@ -1090,7 +1196,11 @@ class CpSatScheduler(LocalSearchScheduler):
         self.solver_statuses: list[str] = []
         """CP-SAT's final status for each chunk, such as OPTIMAL or FEASIBLE."""
         self.solver_limits: list[str] = []
-        """What ended each chunk's search (see :func:`search_ending`)."""
+        """What ended each chunk's search, or ``reused`` for a cached response."""
+        self.solver_search_statuses: list[str] = []
+        """Every actual chunk search's status across this schedule's passes."""
+        self.solver_search_limits: list[str] = []
+        """What ended each corresponding search, including earlier passes."""
         self.solver_chunks_used: list[bool] = []
         """For each chunk, whether the solver's snapshots were kept; if not,
         the priority-first plan's were, as they scored better."""
@@ -1098,11 +1208,24 @@ class CpSatScheduler(LocalSearchScheduler):
         """Objective of the solver's plan after exact decoding."""
         self.solver_seconds = 0.0
         """Wall-clock time spent building, solving and decoding chunks."""
+        self._solve_cache = _ChunkSolveCache()
+
+    @property
+    def solver_reused_chunks(self) -> int:
+        """Responses reused across this schedule's momentum passes, not searches."""
+        return self._solve_cache.hits
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, solve chunk by chunk, and optionally
         polish, within the wheels' momentum where the configuration tracks it."""
-        return self._plan_within_momentum(self._plan_once)
+        self.search_iterations.clear()
+        self.search_limits.clear()
+        self.solver_search_statuses.clear()
+        self.solver_search_limits.clear()
+        self._solve_cache = _ChunkSolveCache()
+        plan = self._plan_within_momentum(self._plan_once)
+        plan = self._refine_settled_plan(plan)
+        return self._augment_selected_plan(plan)
 
     def _plan_once(self) -> Plan:
         start = self._start_from_priority_plan()
@@ -1138,9 +1261,10 @@ class CpSatScheduler(LocalSearchScheduler):
 
         states = [self._initial_state()]
         sequence: list[_Snapshot] = []
-        # The rest of the priority-first plan decoded on from the current
-        # state, state by state. Decoding is what a chunk costs besides its
-        # solve, and while chunks keep that plan the decoding is the same, so
+        # The rest of the selected start plan (priority-first or a better
+        # dispatch seed), decoded state by state from the current prefix.
+        # Besides solving, decoding is the chunk's cost. While chunks keep
+        # that plan the decoding is the same, so
         # it is carried from chunk to chunk rather than done again.
         rest: list[_State] | None = None
         chunk_end = self.ctx.ustart
@@ -1150,12 +1274,12 @@ class CpSatScheduler(LocalSearchScheduler):
                 # A pass planning on from a dump keeps the science before it.
                 continue
             state = states[-1]
-            # The chunk leaves the rest of the priority-first plan room to
+            # The chunk leaves the rest of the selected start plan room to
             # follow it unchanged: it finishes before that plan's next slew and
             # leaves the exposure collected later to it. Its snapshots are kept
             # only if, followed by the rest of that plan, they score at least
             # as well as that plan does from here, so the result is never worse
-            # than the priority-first plan.
+            # than that incumbent from the same state.
             planned = self._released_between(start, chunk_begin, chunk_end)
             later = self._released_between(start, chunk_end, self.ctx.uend)
             if rest is None or rest[0] is not state:
@@ -1172,11 +1296,17 @@ class CpSatScheduler(LocalSearchScheduler):
                 per_chunk,
                 budget,
                 finish if finish is not None else self.ctx.uend,
-                later,
+                _Decoded.model_construct(sequence=later, states=rest[len(planned) :]),
             )
-            used = (
-                solved is not None
-                and self._final_score(state, solved + later) >= unchanged
+            final = (
+                self._final_state(state, solved + later) if solved is not None else None
+            )
+            used = final is not None and self._improves(
+                self._objective(final),
+                final.timeline,
+                unchanged,
+                rest[-1].timeline,
+                accept_equal_timing=True,
             )
             self.solver_chunks_used.append(used)
             if used:
@@ -1203,7 +1333,7 @@ class CpSatScheduler(LocalSearchScheduler):
 
     @staticmethod
     def _released_between(start: _Decoded, begin: float, end: float) -> list[_Snapshot]:
-        """The priority-first plan's snapshots whose slews start in ``[begin, end)``."""
+        """The selected start plan's snapshots released in ``[begin, end)``."""
         return [
             snapshot
             for snapshot in start.sequence
@@ -1212,9 +1342,13 @@ class CpSatScheduler(LocalSearchScheduler):
 
     def _final_score(self, state: _State, sequence: Sequence[_Snapshot]) -> float:
         """Objective after decoding ``sequence`` from ``state``."""
+        return self._objective(self._final_state(state, sequence))
+
+    def _final_state(self, state: _State, sequence: Sequence[_Snapshot]) -> _State:
+        """Exactly decode a candidate once for both value and timing."""
         for snapshot in sequence:
             state = self._step(state, snapshot)
-        return self._objective(state)
+        return state
 
     def _chunk_origin(self, state: _State) -> tuple[float, Attitude]:
         """Return when and from which attitude the next snapshot can start."""
@@ -1233,14 +1367,14 @@ class CpSatScheduler(LocalSearchScheduler):
         time_limit: float,
         budget: dict[int, float],
         finish: float,
-        later: Sequence[_Snapshot] = (),
+        continuation: _Decoded | None = None,
     ) -> list[_Snapshot] | None:
         """Choose and order the snapshots that start in one chunk.
 
         ``budget`` is the most exposure the chunk may collect for each request,
-        every snapshot ends by ``finish``, and ``later`` are the priority-first
-        plan's snapshots after the chunk, whose data the recorder must also
-        hold. Returns None if the solver found no solution in time.
+        every snapshot ends by ``finish``. ``continuation`` is the incumbent
+        after the chunk, decoded from the current state, whose data and energy
+        must also fit. Returns None if the solver found no solution in time.
         """
         origin_time, origin_attitude = self._chunk_origin(state)
         if origin_time >= chunk_end:
@@ -1263,12 +1397,14 @@ class CpSatScheduler(LocalSearchScheduler):
                 task.slew_in = min(others) if others else 0
         chunk_seconds = int(round(chunk_end - origin_time))
         recorder = [
-            self._chunk_recorder(state, later, origin_time, ledger, offset, tasks)
+            self._chunk_recorder(
+                state, continuation, origin_time, ledger, offset, tasks
+            )
             for _, ledger, offset in self._ledger.members
             if ledger.active
         ]
         battery = (
-            self._chunk_battery(state, later, origin_time, tasks)
+            self._chunk_battery(state, continuation, origin_time, tasks)
             if self._battery.active
             else None
         )
@@ -1286,6 +1422,12 @@ class CpSatScheduler(LocalSearchScheduler):
         chunk.add_hint(
             self._hint(tasks, planned, origin_time, slews, budget, chunk_seconds)
         )
+        # Observed reusable models are at the horizon's end. Restrict probing
+        # and snapshot retention there; intermediate chunks' downstream
+        # reservations usually change with each dump. Exact decoding below
+        # always uses the current attitude, momentum and resource state.
+        if chunk_end == self.ctx.uend:
+            chunk.solve_cache = self._solve_cache
         status, ended, snapshots = chunk.solve(
             time_limit,
             self.workers,
@@ -1295,12 +1437,15 @@ class CpSatScheduler(LocalSearchScheduler):
         )
         self.solver_statuses.append(status)
         self.solver_limits.append(ended)
+        if ended != "reused":
+            self.solver_search_statuses.append(status)
+            self.solver_search_limits.append(ended)
         return snapshots
 
     def _chunk_recorder(
         self,
         state: _State,
-        later: Sequence[_Snapshot],
+        continuation: _Decoded | None,
         origin_time: float,
         ledger: RecorderLedger,
         offset: int,
@@ -1309,24 +1454,19 @@ class CpSatScheduler(LocalSearchScheduler):
         """The recorder from the chunk's segment to the end of the horizon.
 
         What is already planned counts as fixed: the science placed before the
-        chunk, locked entries, and the priority-first plan's snapshots after
-        the chunk, in the segments their slews start in.
+        chunk, locked entries, and the decoded incumbent after the chunk.
+        The continuation's ledger delta includes actual collection intervals,
+        sequence calibration data and any reconnected contact ingress; its
+        prefix is subtracted so the chunk's old snapshots are not counted.
         """
         volumes = list(state.volumes[offset : offset + ledger.segments])
-        for snapshot in later:
-            assert snapshot.release is not None
-            target = self._by_obsid[snapshot.obsid].target
-            block = next(
-                b
-                for b in self._greedy_timeline
-                if int(b.entry.obsid) == snapshot.obsid
-                and float(b.entry.begin) == snapshot.release
-            )
-            assert block.entry.collection_begin is not None
-            for segment, volume in ledger.science_additions(
-                target, snapshot.seconds, float(block.entry.collection_begin)
-            ):
-                volumes[segment] = combine_amounts(volumes[segment], volume)
+        if continuation is not None:
+            before = continuation.states[0].volumes
+            after = continuation.final.volumes
+            for segment in range(ledger.segments):
+                index = offset + segment
+                extra = combine_amounts(after[index], before[index], -1.0)
+                volumes[segment] = combine_amounts(volumes[segment], extra)
         first = ledger.segment(origin_time)
         entering = ledger.level_at(volumes, origin_time)
         accrual, fixed, removal = ledger.model_vectors(volumes, origin_time)
@@ -1359,7 +1499,7 @@ class CpSatScheduler(LocalSearchScheduler):
     def _chunk_battery(
         self,
         state: _State,
-        later: Sequence[_Snapshot],
+        continuation: _Decoded | None,
         origin_time: float,
         tasks: Sequence[_Task],
     ) -> _ChunkBattery:
@@ -1367,7 +1507,7 @@ class CpSatScheduler(LocalSearchScheduler):
 
         What is already planned counts as fixed, relative to each run's idle
         power, exactly as the ledger counts it: the passes after the cursor
-        and the priority-first plan's snapshots after the chunk.
+        and the decoded incumbent's science after the chunk.
         """
         ledger = self._battery
         limit = ledger.limit
@@ -1412,32 +1552,38 @@ class CpSatScheduler(LocalSearchScheduler):
 
         # What is already planned, exactly as the ledger counts it, step by
         # step in the run of each step, relative to the run's idle power: the
-        # passes after the cursor, and the priority-first plan's snapshots
-        # released after the chunk, which the chunk must leave room for.
+        # passes after the cursor, and the decoded incumbent after the chunk,
+        # which the chunk must leave room for.
         fixed = [0] * runs
         step_size = self.ctx.step_size
-        releases = {snapshot.release for snapshot in later}
-        blocks = [
-            *(b for b in state.timeline[state.cursor :] if b.is_pass),
-            *(
-                b
-                for b in self._greedy_timeline
-                if not b.is_pass
-                and not b.is_charge
-                and float(b.entry.begin) in releases
-            ),
+        groups = [
+            ([b for b in state.timeline[state.cursor :] if b.is_pass], state.energy)
         ]
-        # With a solar-array drive, as the walk counts them where the plan's
-        # additions leave the drive; a block not in the plan at its own deltas.
-        counted = ledger.walk_deltas(state.energy)
-        for block in blocks:
-            addition = self._block_addition(block)
-            steps = ledger.steps(addition.begin, addition.end)
-            for utime, delta in zip(steps, counted.get(addition, addition.deltas)):
-                if utime < origin_time:
-                    continue
-                r = run_of(float(utime))
-                fixed[r] += int(np.ceil(delta * 3600.0)) - idle[r] * step_size
+        if continuation is not None:
+            groups.append(
+                (
+                    [
+                        after.timeline[after.cursor - 1]
+                        for before, after in pairwise(continuation.states)
+                        if after.cursor > before.cursor
+                    ],
+                    continuation.final.energy,
+                )
+            )
+        # Fixed passes keep the current prefix's drive history. Later science
+        # uses its decoded continuation; skipped snapshots add no block/energy.
+        for blocks, energy in groups:
+            if not blocks:
+                continue
+            counted = ledger.walk_deltas(energy)
+            for block in blocks:
+                addition = self._block_addition(block)
+                steps = ledger.steps(addition.begin, addition.end)
+                for utime, delta in zip(steps, counted.get(addition, addition.deltas)):
+                    if utime < origin_time:
+                        continue
+                    r = run_of(float(utime))
+                    fixed[r] += int(np.ceil(delta * 3600.0)) - idle[r] * step_size
         entering = ledger.level_at(state.energy, origin_time) * 3600.0
         return _ChunkBattery(
             edges=edges,
@@ -1458,7 +1604,9 @@ class CpSatScheduler(LocalSearchScheduler):
         ledger = self._battery
         if not ledger.active:
             return (0, 0)
-        attitude = target.target_body_attitude(self.ctx.instrument_roll(target, when))
+        attitude = target.target_body_attitude(
+            self.ctx.instrument_roll(target, when), at=when
+        )
         lit = next(
             (
                 float(s)
@@ -1648,8 +1796,9 @@ class CpSatScheduler(LocalSearchScheduler):
                         latest = min(latest, int(slot_deadline - origin_time - setup))
                     if latest < earliest or window[0] >= chunk_end - origin_time:
                         continue
+                    when = max(w0, origin_time)
                     attitude = target.target_body_attitude(
-                        ctx.instrument_roll(target, max(w0, origin_time))
+                        ctx.instrument_roll(target, when), at=when
                     )
                     attitudes = (attitude, attitude)
                     task_overhead = overhead
@@ -1658,15 +1807,14 @@ class CpSatScheduler(LocalSearchScheduler):
                         # between its steps and any step setup are part of
                         # its length, and it leaves the spacecraft at its
                         # last step.
-                        when = max(w0, origin_time)
                         first = target.step_pointing(0)
                         last_step = target.step_pointing(len(target.sequence.steps) - 1)
                         attitudes = (
                             first.target_body_attitude(
-                                ctx.instrument_roll(first, when)
+                                ctx.instrument_roll(first, when), at=when
                             ),
                             last_step.target_body_attitude(
-                                ctx.instrument_roll(last_step, when)
+                                ctx.instrument_roll(last_step, when), at=when
                             ),
                         )
                         task_overhead = overhead + int(
@@ -1694,7 +1842,7 @@ class CpSatScheduler(LocalSearchScheduler):
                         (self._allocated_factor - 1.0) * self._value(request, shares),
                     )
                     data = self._candidate_data(target)
-                    power = self._candidate_power(target, max(w0, origin_time))
+                    power = self._candidate_power(target, when)
                     if visit is not None:
                         # One visit per window.
                         copies = 1
