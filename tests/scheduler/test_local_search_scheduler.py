@@ -553,7 +553,7 @@ class TestEarliness:
         plan = scheduler.schedule()
 
         assert [obsid for obsid, _, _ in _science(plan)] == [2, 1]
-        assert scheduler.score > scheduler.initial_score
+        assert scheduler.score == scheduler.initial_score == (60 + 50) * 20 * MIN
 
     def test_earliest_start_is_kept_by_every_change(self) -> None:
         config = _config(3)
