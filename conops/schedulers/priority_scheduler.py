@@ -1098,16 +1098,18 @@ class PriorityScheduler:
         for entry in self.locked:
             if id(entry) not in kept:
                 self._place_locked(entry)
-        if self.include_passes:
-            for gspass in self.ctx.predict_passes():
-                if gspass.requires_tracking:
-                    self._place_pass(gspass)
+        # Mandatory holds reserve their windows before optional contacts;
+        # a contact can be acquired later or omitted when it cannot fit.
         for activity in sorted([*self.activities, *self.dumps], key=lambda a: a.begin):
             if (
                 activity.begin < self.ctx.uend
                 and activity.latest_start + activity.duration_seconds > self.ctx.ustart
             ):
                 self._place_activity(activity)
+        if self.include_passes:
+            for gspass in self.ctx.predict_passes():
+                if gspass.requires_tracking:
+                    self._place_pass(gspass)
         # After the passes and activities, as the science was placed: each
         # kept block keeps its slew and re-slews what now follows it.
         retained = []
@@ -1985,11 +1987,10 @@ class PriorityScheduler:
 
     def _idle_limit(self, pred: _Block | None, earliest: float, until: float) -> float:
         """Return the latest step a slew can start while ``pred``'s held attitude stays safe."""
-        if pred is None:
-            # Before its first command ACS keeps the initial attitude safe itself.
-            return until
+        # The first command also needs a known, safe origin. Autonomous idle
+        # recovery cannot be assumed to leave the pose used by this plan.
         violation = self.ctx.first_hold_violation(
-            pred.attitude_out, earliest, until, ACSMode.IDLE
+            self._start_attitude(pred, earliest), earliest, until, ACSMode.IDLE
         )
         return until if violation is None else violation
 
@@ -2483,7 +2484,9 @@ class PriorityScheduler:
         """When an activity is reserved from: its latest start, or after
         each activity already on the timeline that is under way then, as
         one due while another is under way begins when that one ends."""
-        ready = activity.latest_start
+        physical_end = min(self.ctx.simulation_end.timestamp(), self.ctx.ephem_end)
+        latest_in_run = max(activity.begin, physical_end - activity.duration_seconds)
+        ready = min(activity.latest_start, latest_in_run)
         if activity.begin < self.ctx.ustart <= activity.latest_start:
             # With no earlier execution state, an open slide window starts
             # a new whole hold at the partial run's beginning.

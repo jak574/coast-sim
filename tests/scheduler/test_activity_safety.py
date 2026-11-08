@@ -363,3 +363,34 @@ def test_a_calibration_after_tracking_holds_the_final_attitude(kind, rolling):
     entry.activity_requires_stationary = False
     assert ditl.validate_plan_matches_execution() == []
     ditl.mode[index] = original
+
+
+@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+def test_a_sliding_hold_finishes_inside_the_physical_run(kind):
+    config = _config()
+    scheduler, options = _planner(kind)
+    activity = ScheduledActivity(
+        name="Calibration before shutdown",
+        begin=T0 + 3 * HOUR,
+        duration_seconds=30 * MIN,
+        slide_seconds=2 * HOUR,
+        data_gb=1.5,
+    )
+    end = BEGIN + timedelta(hours=4)
+    planner = scheduler(
+        config, [], BEGIN, end, activities=[activity], include_passes=False, **options
+    )
+    [entry] = planner.schedule().entries
+    assert T0 + 3 * HOUR <= entry.activity_hold_begin <= T0 + 3.5 * HOUR
+    assert entry.activity_hold_end - entry.activity_hold_begin == 30 * MIN
+    assert float(entry.end) == entry.activity_hold_end <= end.timestamp()
+    assert entry.fixed_data_gb == activity.data_gb
+    first_violation = planner.ctx.first_hold_violation(
+        planner.ctx.initial_attitude(T0), T0, entry.activity_hold_begin, ACSMode.IDLE
+    )
+    assert first_violation is not None
+    assert float(entry.begin) < first_violation
+    run = DITL(config, plan=Plan(entries=[entry]), begin=BEGIN, end=end)
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
+    assert run.fault_management.events == []
