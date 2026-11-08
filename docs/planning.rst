@@ -244,6 +244,12 @@ How a plan is built
    position. Planned entries mark ``activity_requires_stationary``; validation
    then rejects slewing or SAFE during the full hold, while legacy and flexible
    dispatch holds retain their existing recovery semantics.
+   Mandatory activities reserve their windows before optional ground contacts,
+   which can be acquired later or omitted when they cannot fit. Where its window
+   permits, a sliding hold starts early enough to finish before the physical run
+   ends. Before the first command, the initial pose must also remain safe until
+   ingress; the planner commands that slew before the first keep-out violation
+   and validates the destination through the wait and whole hold.
    If no candidate fits, the planners raise
    :class:`~conops.schedulers.ActivitySchedulingError`, naming the mandatory
    activity, its start window and the failed reservation, instead of returning a
