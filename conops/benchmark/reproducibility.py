@@ -5,7 +5,6 @@ wall-clock timings belong outside the compared record; do not round away a
 different attitude or dispatch boundary to make a run appear repeatable.
 """
 
-from dataclasses import asdict
 from typing import Any
 
 from ..ditl.queue_ditl import QueueDITL
@@ -64,9 +63,9 @@ def execution_record(
         "entries": [e.model_dump(mode="json") for e in simulation.plan],
         "events": [e.model_dump(mode="json") for e in simulation.log],
         "toos": [t.model_dump(mode="json") for t in simulation.too_register],
-        "categories": [asdict(s) for s in simulation.summary_by_category()],
-        "groups": [asdict(s) for s in simulation.summary_by_group()],
-        "visits": [asdict(s) for s in simulation.visit_table(per_window=True)],
+        "categories": [s.model_dump() for s in simulation.summary_by_category()],
+        "groups": [s.model_dump() for s in simulation.summary_by_group()],
+        "visits": [s.model_dump() for s in simulation.visit_table(per_window=True)],
         "instrument_mode_hours": simulation.instrument_mode_hours(),
         "housekeeping": [
             h.model_dump(mode="json") for h in simulation.telemetry.housekeeping

@@ -119,16 +119,18 @@ def test_reused_exact_samples_restore_values_overwritten_by_a_nearby_pose(held_c
     ] == [180]
 
 
-def test_distinct_times_in_one_rounded_bucket_keep_full_batch_order(held_check):
+def test_fractional_times_keep_their_answers_across_reordered_batches(held_check):
     constraint, check = held_check
     check.in_constraint_batch.side_effect = lambda **kw: np.array(
         [[t.timestamp() > 0.5 for t in kw["times"]]]
     )
     with constraint.held_over([0.1, 0.9, 60.0]):
-        assert constraint._cached_check("sensor", 10, 20, 0.1, check)
+        assert not constraint._cached_check("sensor", 10, 20, 0.1, check)
+        assert constraint._cached_check("sensor", 10, 20, 0.9, check)
     with constraint.held_over([0.9, 0.1, 120.0]):
-        constraint._cached_check("sensor", 10, 20, 120, check)
-        assert not constraint._cached_check("sensor", 10, 20, 0.9, check)
+        assert constraint._cached_check("sensor", 10, 20, 120, check)
+        assert constraint._cached_check("sensor", 10, 20, 0.9, check)
+        assert not constraint._cached_check("sensor", 10, 20, 0.1, check)
     assert [
         t.timestamp()
         for t in check.in_constraint_batch.call_args_list[0].kwargs["times"]
