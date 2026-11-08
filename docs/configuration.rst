@@ -514,8 +514,8 @@ including when the declared spacecraft frame has a +Z payload boresight.
        dec_deg: 10.0
        roll_deg: 25.0
 
-Power-positive scheduled safe holds and fault-mode guidance are the next
-consumers of this attitude model.
+Power-positive scheduled safe holds and fault-mode guidance also use this
+attitude model; see :ref:`power-positive-fault-safe-mode`.
 
 Set ``stored_momentum.enforce_capacity`` with a finite positive spherical actuator
 momentum limit in ``stored_momentum.capacity_n_m_s`` to enable admission and
@@ -2274,8 +2274,10 @@ For detailed API documentation, see:
 * :class:`~conops.config.ObservationCategories`
 * :class:`~conops.config.VisualizationConfig`
 
+.. _power-positive-fault-safe-mode:
+
 Power-positive fault safe mode
------------------------------
+------------------------------
 
 ``AttitudeControlSystem.safe_mode_attitude`` optionally takes the same
 :class:`~conops.config.activity_attitude.ActivityAttitude` used by scheduled
