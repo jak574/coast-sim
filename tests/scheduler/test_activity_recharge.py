@@ -1,7 +1,7 @@
 """Emergency recharge preserves truthful scheduled-hold execution records."""
 
 from datetime import timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -312,3 +312,33 @@ def test_finish_forecast_advances_finite_drives_without_changing_live_state():
     state = config.solar_panel.initial_drive_state()
     assert can_finish_before_recharge(config, context, drive_state=state, **kwargs)
     assert state == config.solar_panel.initial_drive_state()
+
+
+def test_a_deferred_block_waits_for_handoff_without_losing_its_override():
+    original = QueueDITL._activity_waits_for
+    waited = False
+
+    def wait_once(run, activity, utime):
+        nonlocal waited
+        if (
+            activity.name == "Calibration"
+            and activity.begin > T0 + 6 * HOUR
+            and run.charging_ppt is None
+            and not run.battery.battery_alert
+            and not waited
+        ):
+            waited = True
+            return "the handoff under way"
+        return original(run, activity, utime)
+
+    with patch.object(QueueDITL, "_activity_waits_for", wait_once):
+        run = run_case(critical=True, critical_offset=0)
+    assert waited
+    [entry] = [e for e in run.plan if e.name == "Calibration"]
+    assert entry.activity_finishes and not entry.activity_partial
+    assert float(entry.end) - float(entry.begin) == HOUR
+    assert float(entry.end) - entry.activity_hold_begin == HOUR
+    assert not run._charge_deferred_activities
+    assert [
+        c.args[0] for c in run._add_activity_data.call_args_list if c.args[0] > 0
+    ] == [0.25]

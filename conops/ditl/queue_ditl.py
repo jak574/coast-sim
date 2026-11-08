@@ -1287,7 +1287,6 @@ class QueueDITL(DITLMixin, DITLStats):
                         utime
                     ):
                         return changed
-                    self._charge_deferred_activities.remove(due.obsid)
                     due = due.model_copy(
                         update={"begin": utime, "fixed": False, "slide_seconds": 0.0}
                     )
@@ -1332,6 +1331,8 @@ class QueueDITL(DITLMixin, DITLStats):
                             self._defer_activity_for_charging(due, utime)
                             return True
                 self._begin_activity(due, utime, (ra, dec, roll))
+                assert due.obsid is not None
+                self._charge_deferred_activities.discard(due.obsid)
                 changed = True
         return changed
 
