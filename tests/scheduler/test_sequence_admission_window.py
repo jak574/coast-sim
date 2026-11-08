@@ -51,7 +51,12 @@ def test_first_sequence_step_keeps_the_parent_admission_deadline(
     slew = queue._new_ppt_slew(step, T0)
     slew.slewstart, slew.slewend, slew.slewtime = T0, T0 + 60, 60
     assert (
-        queue._validate_ppt_slew(step, slew, T0, _ObservationRequest(T0, 60, None))
+        queue._validate_ppt_slew(
+            step,
+            slew,
+            T0,
+            _ObservationRequest(start=T0, requested=60, recorder_room=None),
+        )
         is None
     )
     assert any("after its deadline" in e.description for e in queue.log.events)

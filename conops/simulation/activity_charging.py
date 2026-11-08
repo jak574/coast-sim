@@ -1,7 +1,6 @@
 """Forecast whether a scheduled hold can finish before emergency recharge."""
 
 from collections.abc import Mapping
-from dataclasses import replace
 
 from ..common import ACSMode, ObsType
 from ..common.numerics import ROUNDOFF
@@ -36,7 +35,7 @@ def can_finish_before_recharge(
     if charge_wh < floor - ROUNDOFF:
         return False
     end = min(hold_end, context.uend)
-    state = replace(drive_state)
+    state = drive_state.model_copy()
 
     def fly(begin: float, stop: float, *, charge_slew: Slew | None = None) -> bool:
         nonlocal charge_wh, state

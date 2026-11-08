@@ -335,6 +335,35 @@ class ACS:
         and its brake without changing execution; rebuilding a short track
         from the shortened entry would discard its nonzero terminal rate.
         """
+        state = self.science_tracking_state(entry, utime)
+        if state is None:
+            return None
+        braking = AttitudeTrajectory.braking(
+            state, self.config.spacecraft_bus.attitude_control
+        )
+        return braking.state(braking.end) if braking is not None else state
+
+    def pass_tracking_state(self, gspass: Pass, utime: float) -> AttitudeState | None:
+        """Predict this installed contact without replacing its flown profile."""
+        current = self.current_pass
+        if (
+            current is None
+            or self._executor is None
+            or (current.obsid, current.station, current.begin)
+            != (gspass.obsid, gspass.station, gspass.begin)
+        ):
+            return None
+        return self._executor.predict(utime)
+
+    def science_tracking_state(
+        self, entry: "PlanEntry", utime: float
+    ) -> AttitudeState | None:
+        """Predict this installed science track without advancing execution.
+
+        A retained entry can end earlier than the originally installed track.
+        Resource forecasts must use its actual state at that cutoff before
+        predicting the stop, rather than reconstructing a shorter track.
+        """
         slew = self._tracked_slew
         if (
             slew is None
@@ -345,11 +374,7 @@ class ACS:
             or utime < float(slew.slewend)
         ):
             return None
-        state = self._executor.predict(utime)
-        braking = AttitudeTrajectory.braking(
-            state, self.config.spacecraft_bus.attitude_control
-        )
-        return braking.state(braking.end) if braking is not None else state
+        return self._executor.predict(utime)
 
     def executed_attitude(self, utime: float) -> Attitude:
         """The attitude flown at ``utime``, a time up to the present, from
@@ -753,7 +778,7 @@ class ACS:
         tracking = self._tracking_after(slew, trajectory, slew.motion_limits)
         if tracking is not None:
             trajectory = AttitudeTrajectory(
-                (*trajectory.legs, *tracking.legs), tracking.end
+                legs=(*trajectory.legs, *tracking.legs), end=tracking.end
             )
         executor.install(trajectory, momentum_end=slew._momentum_hold_end)
         self._tracked_slew = slew if tracking is not None else None

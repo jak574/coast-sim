@@ -6,11 +6,11 @@ the departure attitude is reserved, not executed if another target is admitted.
 This is deliberately not a global schedule/CMG-steering optimizer.
 """
 
-from dataclasses import dataclass
 from math import ceil, floor
 from typing import TYPE_CHECKING
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 from ..common import ACSMode, ObsType
 from ..common.numerics import ATTITUDE_TOLERANCE_DEG
@@ -25,8 +25,9 @@ if TYPE_CHECKING:
     from ..targets import Pointing
 
 
-@dataclass(frozen=True)
-class MomentumObservation:
+class MomentumObservation(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     slew: Slew
     end: float
     recovery: Slew
@@ -248,7 +249,9 @@ class MomentumObservationPlanner:
                         slew._momentum_collection_begin = collection_begin
                         slew._momentum_collection_end = collection_begin + collection
                         if collection > best_collection:
-                            best = MomentumObservation(slew, end, recovery)
+                            best = MomentumObservation(
+                                slew=slew, end=end, recovery=recovery
+                            )
                             best_collection = collection
                         # A full snapshot needs no further roll search.
                         # Otherwise try other rolls before accepting

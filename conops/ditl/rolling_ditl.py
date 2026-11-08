@@ -1,9 +1,10 @@
 """Simulate a spacecraft that follows a plan rebuilt on a rolling horizon."""
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from functools import partial
 
 import numpy as np
 import rust_ephem
@@ -18,12 +19,20 @@ from ..schedulers.battery import Addition, BatteryLedger
 from ..schedulers.context import (
     Attitude,
     SchedulingContext,
+    contact_tracking,
     science_rest,
+    science_tracking,
     tracking_rest,
 )
 from ..schedulers.local_search_scheduler import LocalSearchScheduler
 from ..schedulers.priority_scheduler import PriorityScheduler, StartState
-from ..schedulers.recorder import RecorderAmount, RecorderLedger, combine_amounts
+from ..schedulers.recorder import (
+    RecorderAmount,
+    RecorderLedger,
+    activity_data_time,
+    combine_amounts,
+)
+from ..simulation.attitude import AttitudeState, AttitudeTrajectory
 from ..simulation.passes import Pass
 from ..simulation.slew import Slew
 from ..targets import Plan, PlanEntry, Pointing, ScheduledActivity, assign_obsids
@@ -1045,7 +1054,7 @@ class RollingHorizonDITL(DITL):
         for entry in committed:
             if (
                 entry_obstype(entry) == ObsType.ACTIVITY
-                and utime <= float(entry.begin) < start
+                and utime <= activity_data_time(entry) < start
             ):
                 for segment, volume in ledger.activity_additions(entry):
                     volumes[segment] = combine_amounts(volumes[segment], volume)
@@ -1155,8 +1164,8 @@ class RollingHorizonDITL(DITL):
     ) -> tuple[float, float, float] | None:
         """The stored momentum when the plan takes over at ``start``, in
         inertial coordinates, for the plan's forecast: the momentum now,
-        with what the committed activities add until then integrated at the
-        attitudes they hold, the spacecraft's own where none is under way.
+        with the committed ingress slews and holds integrated along their
+        body attitudes. Gaps hold the pose left by the preceding command.
         None where momentum is not tracked or no sample has set it yet."""
         tracker = self._stored_momentum_tracker
         if tracker is None:
@@ -1166,44 +1175,110 @@ class RollingHorizonDITL(DITL):
             return None
         if start <= utime:
             return (float(momentum[0]), float(momentum[1]), float(momentum[2]))
-        holds = sorted(
-            (
-                (float(e.begin), float(e.end), e)
-                for e in committed
-                if float(e.end) > utime and float(e.begin) < start
-            ),
-            key=lambda hold: hold[0],
-        )
-
-        def attitude_at(at: float) -> Attitude:
-            for begin, end, entry in holds:
-                if begin <= at < end:
-                    if entry.spacecraft_attitude is not None:
-                        return entry.spacecraft_attitude
-                    return (float(entry.ra), float(entry.dec), float(entry.roll))
-            return self.acs.predicted_attitude(at)
-
-        # Each committed dump that ends before the start unloads the wheels.
         dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
-        unloads = sorted(
-            float(e.end)
-            for e in committed
-            if e.desaturation and e.activity_finishes and utime < float(e.end) <= start
-        )
         ahead = np.asarray(momentum, dtype=np.float64)
         cursor = utime
-        for at in [*unloads, start]:
-            if at > cursor:
-                after = self._forecast_momentum(
-                    cursor, at, attitude_at, start_eci_n_m_s=ahead
-                ).end_eci_n_m_s
-                if after is not None:
-                    ahead = after
-                cursor = at
-            if at < start or at in unloads:
-                if dump is not None and at in unloads:
-                    ahead = ahead * dump.residual_fraction
+        previous: Attitude = (
+            float(self.acs.ra),
+            float(self.acs.dec),
+            float(self.acs.roll),
+        )
+
+        def integrate(
+            end: float,
+            attitude_at: Callable[[float], Attitude],
+            slew: Slew | None = None,
+        ) -> None:
+            nonlocal ahead, cursor
+            if end <= cursor:
+                return
+            after = self._forecast_momentum(
+                cursor, end, attitude_at, start_eci_n_m_s=ahead, slew=slew
+            ).end_eci_n_m_s
+            if after is not None:
+                ahead = after
+            cursor = end
+
+        for entry in sorted(committed, key=lambda e: float(e.begin)):
+            if float(entry.begin) >= start:
+                continue
+            tracking = self._committed_tracking_motion(entry)
+            rest_time = tracking[1] if tracking is not None else float(entry.end)
+            if rest_time <= utime:
+                continue
+            # Idle before an unflown command holds the preceding body pose.
+            integrate(min(start, float(entry.begin)), lambda at: previous)
+            slew = self._committed_slew(entry, previous, utime)
+            end = min(start, float(entry.end))
+            if slew is not None:
+                integrate(min(end, float(slew.slewend)), slew.attitude, slew)
+            pose = entry.spacecraft_attitude or entry.target_body_attitude()
+            if tracking is not None:
+                track_begin, _, attitude_at = tracking
+                integrate(min(start, track_begin), lambda at: pose)
+                integrate(min(start, rest_time), attitude_at)
+                pose = attitude_at(rest_time)
+            else:
+                integrate(end, lambda at: pose)
+            if (
+                dump is not None
+                and entry.desaturation
+                and entry.activity_finishes
+                and utime < float(entry.end) <= start
+            ):
+                ahead = ahead * dump.residual_fraction
+            previous = (
+                self._rest_after(entry)[1]
+                if tracking is None and entry_obstype(entry) == ObsType.GSP
+                else pose
+            )
+        integrate(start, lambda at: previous)
         return (float(ahead[0]), float(ahead[1]), float(ahead[2]))
+
+    def _committed_tracking_motion(
+        self, entry: PlanEntry
+    ) -> tuple[float, float, Callable[[float], Attitude]] | None:
+        """Acquisition, rest and attitude along tracked science or a contact."""
+        end = float(entry.end)
+        limits = self.config.spacecraft_bus.attitude_control
+        predict: Callable[[float], AttitudeState | None]
+        future: Callable[[], AttitudeTrajectory | None]
+        if entry.moves:
+            acquire = float(entry.begin) + float(entry.slewtime or 0)
+            predict = partial(self.acs.science_tracking_state, entry)
+            future = partial(science_tracking, entry, limits)
+        elif entry_obstype(entry) == ObsType.GSP:
+            gspass = self._entry_passes.get(id(entry))
+            if gspass is None or not gspass.requires_tracking:
+                return None
+            acquire = float(entry.contact_begin or entry.begin)
+            predict = partial(self.acs.pass_tracking_state, gspass)
+            future = partial(contact_tracking, gspass, acquire, limits)
+        else:
+            return None
+        state = predict(end)
+        if state is not None:
+            # Retained entries can cut the originally installed motion. Brake
+            # from its actual terminal state rather than a rebuilt short track.
+            brake = AttitudeTrajectory.braking(state, limits)
+            rest = float(brake.end) if brake is not None else end
+
+            def installed(at: float) -> Attitude:
+                if at > end and brake is not None:
+                    return brake.state(at).attitude
+                predicted = predict(min(at, end))
+                assert predicted is not None
+                return predicted.attitude
+
+            return acquire, rest, installed
+        trajectory = future()
+        if trajectory is None:
+            return None
+        return (
+            float(trajectory.start),
+            max(end, float(trajectory.end)),
+            lambda at: trajectory.state(at).attitude,
+        )
 
     def _committed_slew(
         self, entry: PlanEntry, start: Attitude, utime: float

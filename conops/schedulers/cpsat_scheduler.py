@@ -27,13 +27,13 @@ from __future__ import annotations
 import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import pairwise
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Generic, NamedTuple, TypeVar
 
 import numpy as np
 import numpy.typing as npt
+from pydantic import BaseModel, ConfigDict
 
 from ..common import ACSMode
 from ..common.ephemeris import sun_direction
@@ -84,14 +84,19 @@ _EMPTY_CHAIN = 2
 
 
 _SOLVED_CHUNK_CACHE_SIZE = 16
-"""Compiled end-of-horizon models retained within one schedule at most."""
+"""Compiled model snapshots retained per solve-cache store at most."""
 
 
-@dataclass
-class _SolvedChunk:
+_ModelT = TypeVar("_ModelT")
+_SolverT = TypeVar("_SolverT")
+
+
+class _SolvedChunk(BaseModel, Generic[_ModelT, _SolverT]):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     shape: tuple[int, int, str]
-    model: cp_model.CpModel
-    solver: cp_model.CpSolver
+    model: _ModelT
+    solver: _SolverT
     status: str
     statistics: str | None = None
     text: str | None = None
@@ -114,13 +119,15 @@ class _ChunkSolveCache:
     """
 
     def __init__(self) -> None:
-        self._entries: OrderedDict[int, _SolvedChunk] = OrderedDict()
+        self._entries: OrderedDict[
+            int, _SolvedChunk[cp_model.CpModel, cp_model.CpSolver]
+        ] = OrderedDict()
         self._serial = 0
         self.hits = 0
 
     def find(
         self, model: cp_model.CpModel, parameters: str
-    ) -> tuple[_SolvedChunk | None, _SolveProbe]:
+    ) -> tuple[_SolvedChunk[cp_model.CpModel, cp_model.CpSolver] | None, _SolveProbe]:
         shape = (len(model.proto.variables), len(model.proto.constraints), parameters)
         statistics = text = None
         for number, cached in reversed(self._entries.items()):
@@ -151,7 +158,12 @@ class _ChunkSolveCache:
     ) -> None:
         self._serial += 1
         self._entries[self._serial] = _SolvedChunk(
-            probe.shape, model.clone(), solver, status, probe.statistics, probe.text
+            shape=probe.shape,
+            model=model.clone(),
+            solver=solver,
+            status=status,
+            statistics=probe.statistics,
+            text=probe.text,
         )
         if len(self._entries) > _SOLVED_CHUNK_CACHE_SIZE:
             self._entries.popitem(last=False)
@@ -1210,11 +1222,12 @@ class CpSatScheduler(LocalSearchScheduler):
         self.solver_seconds = 0.0
         """Wall-clock time spent building, solving and decoding chunks."""
         self._solve_cache = _ChunkSolveCache()
+        self._intermediate_solve_cache = _ChunkSolveCache()
 
     @property
     def solver_reused_chunks(self) -> int:
         """Responses reused across this schedule's momentum passes, not searches."""
-        return self._solve_cache.hits
+        return self._solve_cache.hits + self._intermediate_solve_cache.hits
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, solve chunk by chunk, and optionally
@@ -1224,6 +1237,7 @@ class CpSatScheduler(LocalSearchScheduler):
         self.solver_search_statuses.clear()
         self.solver_search_limits.clear()
         self._solve_cache = _ChunkSolveCache()
+        self._intermediate_solve_cache = _ChunkSolveCache()
         plan = self._plan_within_momentum(self._plan_once)
         plan = self._refine_settled_plan(plan)
         return self._augment_selected_plan(plan)
@@ -1423,12 +1437,17 @@ class CpSatScheduler(LocalSearchScheduler):
         chunk.add_hint(
             self._hint(tasks, planned, origin_time, slews, budget, chunk_seconds)
         )
-        # Observed reusable models are at the horizon's end. Restrict probing
-        # and snapshot retention there; intermediate chunks' downstream
-        # reservations usually change with each dump. Exact decoding below
-        # always uses the current attitude, momentum and resource state.
-        if chunk_end == self.ctx.uend:
-            chunk.solve_cache = self._solve_cache
+        # Dumps can leave intermediate chunks unchanged too. The cache checks
+        # the complete current model and solver parameters, including hints
+        # and downstream resource reservations; it never reuses a timeline.
+        # Decode the response against the current tasks and physical state.
+        # Keep final responses in their existing store: many intermediate
+        # models must not evict a final model that the prior cache retained.
+        chunk.solve_cache = (
+            self._solve_cache
+            if chunk_end == self.ctx.uend
+            else self._intermediate_solve_cache
+        )
         status, ended, snapshots = chunk.solve(
             time_limit,
             self.workers,
@@ -1772,7 +1791,9 @@ class CpSatScheduler(LocalSearchScheduler):
                         k,
                     )
                     for k in request.open_visits(
-                        state.last_visit.get(obsid), origin_time
+                        state.last_visit.get(obsid),
+                        origin_time,
+                        after_visit=state.last_visit_window.get(obsid),
                     )
                 ]
             for w0, w1 in request.windows:

@@ -84,6 +84,8 @@ class _State(BaseModel):
     """The same by observation group, for the groups' time budgets."""
     last_visit: dict[int, float]
     """When each cadence target was last observed, collected or planned."""
+    last_visit_window: dict[int, int] = {}
+    """The actual window of each timed visit, independent of sequence overhead."""
     volumes: tuple[RecorderAmount, ...]
     """Science production planned in each segment of the recorder ledger."""
     energy: tuple[Additions, ...]
@@ -254,6 +256,7 @@ class LocalSearchScheduler(PriorityScheduler):
             for n, span in enumerate(spans)
         }
         self._initial_last_visit = dict(self._last_visit)
+        self._initial_last_visit_window = dict(self._last_visit_window)
         self._initial_categories = dict(self._category_seconds)
         self._initial_groups = dict(self._group_seconds)
         self._initial_volumes = tuple(self._volumes)
@@ -289,24 +292,41 @@ class LocalSearchScheduler(PriorityScheduler):
             ]
         )
         self.start_score = self._objective(start.final)
-        if self.start_plan is not None:
-            # Decode each candidate with its own activity reservations. Moving
-            # the priority plan's holds to the seed's times before comparison
-            # can cut out priority science even when the seed is worse.
-            priority_fixed = self._fixed
+        priority_fixed = self._fixed
+        priority_volumes, priority_energy = self._initial_volumes, self._initial_energy
+        best_fixed = priority_fixed
+        best_volumes, best_energy = priority_volumes, priority_energy
+        self.seed_score = None
+        for candidate, dispatch_seed in (
+            (self.start_plan, True),
+            (self._momentum_seed, False),
+        ):
+            if candidate is None:
+                continue
+            # Each contender owns its hold reservations. A new dump can
+            # change the priority order while the preceding optimized plan
+            # still fits. Repair it with the same exact decoder checks.
             self._fixed = [self._copy_block(block) for block in priority_fixed]
-            self._settle_from(self.start_plan)
-            seeded = self._decode_plan(self.start_plan)
-            self.seed_score = self._objective(seeded.final)
+            self._initial_volumes, self._initial_energy = (
+                priority_volumes,
+                priority_energy,
+            )
+            self._settle_from(candidate)
+            seeded = self._decode_plan(candidate)
+            candidate_score = self._objective(seeded.final)
+            if dispatch_seed:
+                self.seed_score = candidate_score
             if self._improves(
-                self.seed_score,
+                candidate_score,
                 seeded.final.timeline,
                 self.start_score,
                 start.final.timeline,
             ):
-                start, self.start_score = seeded, self.seed_score
-            else:
-                self._fixed = priority_fixed
+                start, self.start_score = seeded, candidate_score
+                best_fixed = self._fixed
+                best_volumes, best_energy = self._initial_volumes, self._initial_energy
+            self._fixed = best_fixed
+            self._initial_volumes, self._initial_energy = best_volumes, best_energy
         return start
 
     def _settle_from(self, plan: Plan) -> None:
@@ -318,6 +338,7 @@ class LocalSearchScheduler(PriorityScheduler):
         a locked entry or science kept from the pass before, runs past is
         held when that ends, and one that would then run into the block
         after it is left where it was reserved."""
+        original = [self._copy_block(block) for block in self._fixed]
         held = {
             int(entry.obsid): (
                 entry.activity_hold_begin
@@ -343,6 +364,9 @@ class LocalSearchScheduler(PriorityScheduler):
                 continue
             self._settle_block(block, begin)
             block.latest_ready = block.ready
+        changes = self._fixed_data_changes(original, self._fixed)
+        self._initial_volumes = self._ledger.add_all(self._initial_volumes, changes)
+        self._initial_energy = self._charged_energy(self._fixed)
 
     def _decode_plan(self, plan: Plan) -> _Decoded:
         """Decode a plan's science as a start sequence: one snapshot per
@@ -554,6 +578,7 @@ class LocalSearchScheduler(PriorityScheduler):
         trial._rest_of = {}
         trial.unplaced = []
         trial._kept_visits = {}
+        trial._kept_visit_windows = {}
         trial._locked_visits = defaultdict(list)
         selected_visits: dict[int, set[int]] = defaultdict(set)
         for block in trial.timeline:
@@ -853,6 +878,7 @@ class LocalSearchScheduler(PriorityScheduler):
             categories=dict(self._initial_categories),
             groups=dict(self._initial_groups),
             last_visit=dict(self._initial_last_visit),
+            last_visit_window=dict(self._initial_last_visit_window),
             volumes=self._initial_volumes,
             energy=self._initial_energy,
             allocated_left=dict(self._initial_allocated),
@@ -901,7 +927,11 @@ class LocalSearchScheduler(PriorityScheduler):
                 else self.ctx.ustart
             )
             request.select_visit(
-                request.next_visit(last, max(cursor_time, not_before or cursor_time)),
+                request.next_visit(
+                    last,
+                    max(cursor_time, not_before or cursor_time),
+                    after_visit=state.last_visit_window.get(obsid),
+                ),
                 self.ctx,
             )
             if request.visit is None:
@@ -928,7 +958,7 @@ class LocalSearchScheduler(PriorityScheduler):
             # after a contact that makes room.
             additions = [
                 *self._block_additions(block),
-                *self._ingress_deltas(succ, succ_slew),
+                *self._following_data_changes(block, timeline[index:], succ_slew),
             ]
             if not self._ledger.fits_all(state.volumes, additions):
                 continue
@@ -963,10 +993,13 @@ class LocalSearchScheduler(PriorityScheduler):
                     request.group.name, 0.0
                 ) + _collection_seconds(block)
             last_visit = state.last_visit
+            last_visit_window = state.last_visit_window
             if (
                 request.cadence is not None or request.timed
             ) and block.entry.collection_end is not None:
                 last_visit = {**last_visit, obsid: float(block.entry.collection_end)}
+                if block.entry.visit is not None:
+                    last_visit_window = {**last_visit_window, obsid: block.entry.visit}
             return _State.model_construct(
                 timeline=placed,
                 cursor=index + 1,
@@ -976,6 +1009,7 @@ class LocalSearchScheduler(PriorityScheduler):
                 categories=categories,
                 groups=groups,
                 last_visit=last_visit,
+                last_visit_window=last_visit_window,
                 volumes=self._ledger.add_all(state.volumes, additions),
                 energy=self._charged_energy(placed),
                 allocated_left=allocated_left,
@@ -1017,6 +1051,7 @@ class LocalSearchScheduler(PriorityScheduler):
             or a.remaining != b.remaining
             or a.volumes != b.volumes
             or a.last_visit != b.last_visit
+            or a.last_visit_window != b.last_visit_window
             or a.allocated_left != b.allocated_left
             or len(a.timeline) - a.cursor != len(b.timeline) - b.cursor
         ):
@@ -1082,6 +1117,7 @@ class LocalSearchScheduler(PriorityScheduler):
                     categories=later.categories,
                     groups=later.groups,
                     last_visit=later.last_visit,
+                    last_visit_window=later.last_visit_window,
                     volumes=later.volumes,
                     energy=self._charged_energy(
                         [*prefix, *later.timeline[there.cursor :]]
