@@ -1042,16 +1042,14 @@ class PlanEntry(BaseModel):
             self._visibility_key = key
             self._visibility_spans = []
             self._bounded_windows = []
-        if first <= last and not any(
-            a <= first and last <= b for a, b in self._visibility_spans
-        ):
-            left = max(0, bisect_left(grid, first) - 1)
-            right = min(len(grid), bisect_right(grid, last) + 1)
+        for missing_begin, missing_end in self._uncovered_visibility(first, last):
+            left = max(0, bisect_left(grid, missing_begin) - 1)
+            right = min(len(grid), bisect_right(grid, missing_end) + 1)
             self._evaluate_visibility(timestamps[left:right])
             clipped = [
-                [max(a, first), min(b, last)]
+                [max(a, missing_begin), min(b, missing_end)]
                 for a, b in self.windows
-                if a <= last and b >= first
+                if a <= missing_end and b >= missing_begin
             ]
             self._bounded_windows = self._merge_visibility(
                 [*self._bounded_windows, *clipped]
@@ -1059,11 +1057,43 @@ class PlanEntry(BaseModel):
             self._visibility_spans = [
                 (w[0], w[1])
                 for w in self._merge_visibility(
-                    [*self._visibility_spans, (first, last)]
+                    [*self._visibility_spans, (missing_begin, missing_end)]
                 )
             ]
         self.windows = [list(w) for w in self._bounded_windows]
         return 0
+
+    def _uncovered_visibility(
+        self, begin: float, end: float
+    ) -> list[tuple[float, float]]:
+        """Intervals whose visibility is unknown, including shared endpoints.
+
+        Each missing interval is evaluated with its original-grid halo. Shared
+        endpoints preserve transitions when its windows join the cached ones.
+        """
+        if begin > end:
+            return []
+        if begin == end:
+            return (
+                []
+                if any(a <= begin <= b for a, b in self._visibility_spans)
+                else [(begin, end)]
+            )
+        missing = []
+        cursor = begin
+        for first, last in self._visibility_spans:
+            if last < cursor:
+                continue
+            if first > end:
+                break
+            if cursor < first:
+                missing.append((cursor, first))
+            cursor = max(cursor, last)
+            if cursor >= end:
+                break
+        if cursor < end:
+            missing.append((cursor, end))
+        return missing
 
     @staticmethod
     def _merge_visibility(windows: Sequence[Sequence[float]]) -> list[list[float]]:

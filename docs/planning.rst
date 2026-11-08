@@ -147,10 +147,13 @@ each sample, and the planners' battery ledger counts the attitude along the trac
 on the original ephemeris grid, with adjacent samples to preserve boundary
 semantics. Bounds accept UTC datetimes, ISO strings or Unix seconds. Bounded
 queries accumulate known windows on the request; contained queries reuse those
-results, and wider or disjoint queries extend coverage. Changes to pointing,
+results, and wider or disjoint queries evaluate only the missing intervals,
+with a grid-sample halo around each interval. Changes to pointing,
 track, roll, ephemeris or configuration invalidate bounded results. Unknown
 intervals are not assumed visible. Calling ``visibility()`` without bounds
 restores the whole-ephemeris behavior, which queue intake and planners retain.
+Live body lookup follows the backend's whole-ephemeris ``get_body`` API;
+these bounds limit constraint evaluation. Saved tracks require no live lookup.
 Plan entries record the position at the slew's end and the track itself, which a
 plan replay without the track observes as a fixed pointing.
 
@@ -892,12 +895,15 @@ gave it, so the starting point is that plan. The search then tries:
 * **swapping** two nearby snapshots, or **moving** one a few positions.
 
 A change is kept when it is no worse than the current plan, or than the plan of
-``history_length`` steps ago (late-acceptance hill climbing), which lets the search
-cross plateaus. The objective is merit-weighted science time, with each snapshot's completion deficit taken from the program
-shares in the plan before it. A snapshot of a request with a deadline is worth less
-the later it starts, so ToOs and other time-critical requests are not pushed later
-than they need to be. The best plan found is returned, and it is never worse than the
-priority-first plan. For a windowed visit, the deadline discount uses the
+``history_length`` evaluated changes ago (late-acceptance hill climbing), which
+lets the search cross plateaus. A no-op proposal consumes the original attempt
+budget without advancing or skipping a history slot. The objective is
+merit-weighted science time, with each snapshot's completion deficit taken from
+the program shares in the plan before it. By default, a snapshot retains its
+value within its allowed window and equal-valued plans prefer earlier science.
+An explicit positive ``earliness_weight`` discounts later starts. The best plan
+found is returned, and it is never worse than the priority-first plan.
+For a windowed visit, the optional deadline discount uses the
 ``visit`` index stored on that observation's plan entry, including the group's
 window limits. Rescoring an earlier timeline therefore uses the same window as
 exact decoding, independently of which visit the request is currently trying

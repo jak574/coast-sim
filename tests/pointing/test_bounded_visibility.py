@@ -97,9 +97,62 @@ def test_queries_accumulate_extend_and_reuse_coverage(ephem, monkeypatch):
     whole = target(ephem, "moving")
     original(whole)
     assert t.windows == whole.windows
-    assert len(calls) == 3
+    assert len(calls) == 5  # Only the three gaps around the two known intervals.
     t.visibility()  # The legacy default always restores whole-ephemeris visibility.
     assert t.windows == whole.windows
+
+
+@pytest.mark.parametrize("kind", ["fixed", "moving", "roll", "empty"])
+def test_wider_query_evaluates_only_missing_intervals(ephem, kind, monkeypatch):
+    bounded, whole = target(ephem, kind), target(ephem, kind)
+    whole.visibility()
+    calls = []
+    original = type(bounded)._evaluate_visibility
+
+    def evaluate(self, times=None):
+        calls.append([t.timestamp() for t in times])
+        return original(self, times)
+
+    monkeypatch.setattr(type(bounded), "_evaluate_visibility", evaluate)
+    bounded.visibility(begin=T0 + HOUR, end=T0 + 2 * HOUR)
+    bounded.visibility(begin=T0, end=T0 + 3 * HOUR)
+    assert len(calls) == 3
+    assert max(calls[1]) == T0 + HOUR + 60
+    assert min(calls[2]) == T0 + 2 * HOUR - 60
+    np.testing.assert_allclose(
+        np.asarray(bounded.windows),
+        np.asarray(clipped(whole.windows, T0, T0 + 3 * HOUR)),
+        atol=1e-6,
+    )
+    bounded.visibility(begin=T0 + 30, end=T0 + 3 * HOUR - 30)
+    assert len(calls) == 3
+
+
+def test_query_bridging_known_intervals_evaluates_each_gap(ephem, monkeypatch):
+    bounded, whole = target(ephem, "moving"), target(ephem, "moving")
+    whole.visibility()
+    calls = []
+    original = type(bounded)._evaluate_visibility
+
+    def evaluate(self, times=None):
+        calls.append([t.timestamp() for t in times])
+        return original(self, times)
+
+    monkeypatch.setattr(type(bounded), "_evaluate_visibility", evaluate)
+    bounded.visibility(begin=T0 + HOUR, end=T0 + 2 * HOUR)
+    bounded.visibility(begin=T0 + 4 * HOUR, end=T0 + 5 * HOUR)
+    bounded.visibility(begin=T0, end=T0 + 6 * HOUR)
+    assert len(calls) == 5
+    assert (min(calls[2]), max(calls[2])) == (T0, T0 + HOUR + 60)
+    assert (min(calls[3]), max(calls[3])) == (
+        T0 + 2 * HOUR - 60,
+        T0 + 4 * HOUR + 60,
+    )
+    assert (min(calls[4]), max(calls[4])) == (
+        T0 + 5 * HOUR - 60,
+        T0 + 6 * HOUR,
+    )
+    assert bounded.windows == whole.windows
 
 
 @pytest.mark.parametrize(
