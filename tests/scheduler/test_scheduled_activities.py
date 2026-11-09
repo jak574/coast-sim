@@ -859,6 +859,7 @@ class TestRolling:
         assert float(entries[-1].end) == T0 + 600 + duration + HOUR
         assert sum(e.fixed_data_gb for e in entries) == pytest.approx(1.5)
         assert ditl.recorder.current_volume_gb == pytest.approx(1.5)
+        assert [a.begin for a in activities] == [T0 + 600, T0 + 900]
 
     def test_an_activity_in_progress_is_reserved_across_horizons(self) -> None:
         config = _config(2)
@@ -906,7 +907,9 @@ class TestRolling:
         ditl.step_size = STEP
         assert ditl.calc()
         entries = _activities(ditl.plan)
-        assert len(entries) > 1
+        [entry] = entries
+        assert (float(entry.begin), float(entry.end)) == (activity.begin, activity.end)
+        assert ditl.validate_plan_matches_execution() == []
         assert sum(e.fixed_data_gb for e in entries) == 1.5
         assert ditl.recorder.current_volume_gb == pytest.approx(1.5)
 
