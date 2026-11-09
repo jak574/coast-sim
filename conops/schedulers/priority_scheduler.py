@@ -441,7 +441,9 @@ class PriorityScheduler:
             windowed visits still to collect outside this plan. Merged with
             completed history so the same window cannot be placed again.
             Preferred to inferring a window from ``reserved_visits`` when
-            calibration or inter-step slews extend a sequence.
+            calibration or inter-step slews extend a sequence. None uses
+            that time-based fallback; an empty mapping reserves no whole
+            window, allowing a pending cut attempt to be retried whole.
         held: Obsids of targets this plan does not place, though their
             science, collected and reserved, counts towards their programs'
             shares as every target's does.
@@ -563,7 +565,9 @@ class PriorityScheduler:
         self.start_state = start_state
         self.reserved_seconds = dict(reserved_seconds or {})
         self.reserved_visits = dict(reserved_visits or {})
-        self.reserved_visit_windows = dict(reserved_visit_windows or {})
+        self.reserved_visit_windows = (
+            None if reserved_visit_windows is None else dict(reserved_visit_windows)
+        )
         if successor_retries is not None and successor_retries < 0:
             raise ValueError("successor_retries must not be negative")
         self.successor_retries = successor_retries
@@ -1708,10 +1712,15 @@ class PriorityScheduler:
         """When each cadence target was last observed, collected or planned."""
         for target in self.targets:
             obsid = int(target.obsid)
-            reserved_window = self.reserved_visit_windows.get(obsid)
+            reserved_window = (
+                self.reserved_visit_windows.get(obsid)
+                if self.reserved_visit_windows is not None
+                else None
+            )
             reserved_end = self.reserved_visits.get(obsid)
             if (
                 reserved_window is None
+                and self.reserved_visit_windows is None
                 and reserved_end is not None
                 and target.visit_windows
             ):
@@ -1780,7 +1789,11 @@ class PriorityScheduler:
                 last = self._last_visit.get(int(target.obsid))
                 visited = set(target.visits_done)
                 index = self._last_visit_window.get(int(target.obsid))
-                if index is None and last is not None:
+                if (
+                    index is None
+                    and last is not None
+                    and self.reserved_visit_windows is None
+                ):
                     index = target.visit_index_at(last - target.per_visit_seconds)
                 if index is not None:
                     visited.update(range(index + 1))

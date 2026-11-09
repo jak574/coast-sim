@@ -130,6 +130,11 @@ def test_rolling_replan_keeps_one_whole_visit_per_window(kind):
 
 
 def test_rolling_reservation_uses_only_future_science_and_recorded_indices():
+    config, target = _case()
+    run = RollingHorizonDITL(
+        config, [target], begin=BEGIN, end=BEGIN + timedelta(hours=4)
+    )
+
     def entry(visit, stop, *, calibration=False):
         return PlanEntry(
             obsid=700,
@@ -148,8 +153,8 @@ def test_rolling_reservation_uses_only_future_science_and_recorded_indices():
         entry(2, now + 2 * MIN, calibration=True),
         entry(None, now + 3 * MIN),
     ]
-    assert RollingHorizonDITL._reserved_visit_windows(entries, now) == {700: 1}
-    assert RollingHorizonDITL._reserved_visit_windows(entries, now + MIN) == {}
+    assert run._reserved_visit_windows(entries, now) == {700: 1}
+    assert run._reserved_visit_windows(entries, now + MIN) == {}
 
 
 @pytest.mark.parametrize("kind", ["priority", "local", "cp_sat"])
@@ -164,3 +169,69 @@ def test_older_reservation_does_not_erase_newer_completed_history(kind):
         reserved_visit_windows={700: 0},
     )
     assert [e.visit for e in scheduler.schedule() if e.obsid == 700] == [2]
+
+
+@pytest.mark.parametrize("kind", ["priority", "local", "cp_sat"])
+def test_a_future_cut_attempt_does_not_reserve_its_window_as_complete(kind):
+    config, target = _case()
+    run = RollingHorizonDITL(
+        config, [target], begin=BEGIN, end=BEGIN + timedelta(hours=4)
+    )
+    cut = PlanEntry(
+        obsid=700,
+        visit=1,
+        begin=T0 + 99 * MIN,
+        end=T0 + 106 * MIN,
+        collection_begin=T0 + 100 * MIN,
+        collection_end=T0 + 105 * MIN,
+    )
+    windows = run._reserved_visit_windows([cut], T0 + 80 * MIN)
+    assert windows == {}
+    scheduler = _planner(
+        kind,
+        config,
+        target,
+        reserved_seconds={700: 5 * MIN},
+        reserved_visits={700: T0 + 105 * MIN},
+        reserved_visit_windows=windows,
+    )
+    # Explicitly no whole window is reserved: the pending cut attempt will
+    # collect only five of the ten required minutes. A whole retry is allowed.
+    assert [e.visit for e in scheduler.schedule() if e.obsid == 700] == [1, 2]
+
+
+@pytest.mark.parametrize("last_seconds", [0, 150, 300])
+def test_sequence_reservation_counts_its_science_steps_without_calibration(
+    last_seconds,
+):
+    config, target = _case()
+    target.sequence = ObservationSequence(
+        steps=[
+            SequenceStep(name="science A", duration_seconds=300),
+            SequenceStep(name="calibration", duration_seconds=50 * MIN, science=False),
+            SequenceStep(name="science B", duration_seconds=300),
+        ]
+    )
+    run = RollingHorizonDITL(
+        config, [target], begin=BEGIN, end=BEGIN + timedelta(hours=4)
+    )
+
+    def entry(name, start, duration, *, calibration=False):
+        return PlanEntry(
+            obsid=700,
+            visit=1,
+            step=name,
+            begin=start,
+            end=start + duration,
+            collection_begin=start,
+            collection_end=start + duration,
+            calibration=calibration,
+        )
+
+    entries = [
+        entry("science A", T0 + 90 * MIN, 300),
+        entry("calibration", T0 + 95 * MIN, 50 * MIN, calibration=True),
+        entry("science B", T0 + 145 * MIN, last_seconds),
+    ]
+    expected = {700: 1} if last_seconds == 300 else {}
+    assert run._reserved_visit_windows(entries, T0 + 120 * MIN) == expected

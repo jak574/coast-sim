@@ -557,6 +557,9 @@ indices preserve the identity of a sequence whose calibration or slews run
 past the next window's opening; subtracting science duration from its finish
 cannot identify that window reliably. Standalone callers providing only
 ``reserved_visits`` retain the time-based fallback.
+Only whole committed visits reserve a window: a pending attempt cut short
+can still be followed by a whole retry. Passing an explicit empty window map
+expresses that none of the committed attempts will complete a window.
 
 Without these weights, plans are built exactly as before.
 
