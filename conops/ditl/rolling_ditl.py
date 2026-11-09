@@ -917,6 +917,31 @@ class RollingHorizonDITL(DITL):
         reserved_activities = {
             e.obsid for e in leading if e.obstype == ObsType.ACTIVITY
         }
+        activities = []
+        holds = sorted(
+            (
+                e.activity_hold_begin
+                if e.activity_hold_begin is not None
+                else float(e.begin),
+                float(e.end),
+            )
+            for e in leading
+            if e.obstype == ObsType.ACTIVITY
+        )
+        for activity in self.activities:
+            if activity.obsid in reserved_activities:
+                continue
+            begin = activity.begin
+            # A hold due during another activity follows that activity, even
+            # when its predecessor was committed by an earlier horizon.
+            # Keep its full duration and add its data only when it starts.
+            for hold_begin, hold_end in holds:
+                if hold_begin <= begin < hold_end:
+                    begin = hold_end
+            if begin != activity.begin:
+                activity = activity.model_copy(update={"begin": begin})
+            if activity.latest_start + activity.duration_seconds > start:
+                activities.append(activity)
         scheduler = self.scheduler(
             self.config,
             # Finished and held targets too: the scheduler does not place
@@ -940,12 +965,7 @@ class RollingHorizonDITL(DITL):
             start_drive_state=start_drive_state,
             passes=self._run_passes,
             coverage=self.coverage,
-            activities=[
-                a
-                for a in self.activities
-                if a.obsid not in reserved_activities
-                and a.latest_start + a.duration_seconds > start
-            ],
+            activities=activities,
             **options,  # type: ignore[arg-type]
         )
         entries = scheduler.schedule().entries

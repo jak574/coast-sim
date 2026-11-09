@@ -467,9 +467,13 @@ class TestScienceData:
         assert ditl.calc()
         assert max(ditl.recorder_volume_gb) == pytest.approx(0.6, abs=0.001)
         if named_recorders:
-            views = config.recorder_views()
+            views = ditl.config.recorder_views()
             assert views["camera"].recorder.current_volume_gb == pytest.approx(0.6)
             assert views["spectrograph"].recorder.current_volume_gb == 0.0
+            if dispatch:
+                assert (
+                    config.recorder_views()["camera"].recorder.current_volume_gb == 0.0
+                )
 
     def test_an_observation_generates_only_what_it_uses(self) -> None:
         """Both instruments generate 1 Mbps in SCIENCE; a camera-only
