@@ -561,6 +561,17 @@ Only whole committed visits reserve a window: a pending attempt cut short
 can still be followed by a whole retry. Passing an explicit empty window map
 expresses that none of the committed attempts will complete a window.
 
+When a ToO cuts a windowed visit, planning reopens that window for a whole
+retry while it is still available. The partial science keeps its credit;
+cleanup and handoff still finish before the replacement. A later replan made
+before the cut flies keeps that pending retry. A proposed cut that is rejected
+leaves the request history unchanged.
+
+Accepted cuts appear in the request's and cut entry's ``interruptions`` only
+when executed. Their timestamp is the science cutoff, which can precede the
+end of cleanup. Planning a future interruption uses a separate request history
+so the spacecraft's actual collected science and completion state stay accurate.
+
 Without these weights, plans are built exactly as before.
 
 Planning within the recorder
