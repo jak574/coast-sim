@@ -897,6 +897,7 @@ class RollingHorizonDITL(DITL):
             start_state=start_state,
             reserved_seconds=reserved,
             reserved_visits=self._reserved_visits(leading, utime),
+            reserved_visit_windows=self._reserved_visit_windows(leading, utime),
             held=[int(t.obsid) for t in held],
             start_volume_gb=self._recorder_volume_at(utime, start, leading),
             start_momentum_eci_n_m_s=self._momentum_start(utime, start, committed),
@@ -1417,6 +1418,29 @@ class RollingHorizonDITL(DITL):
             obsid = int(entry.obsid)
             visits[obsid] = max(visits.get(obsid, 0.0), float(entry.collection_end))
         return visits
+
+    @staticmethod
+    def _reserved_visit_windows(
+        committed: Sequence[PlanEntry], utime: float
+    ) -> dict[int, int]:
+        """Recorded windows of visits still committed to collect after now.
+
+        Preserve the window even when sequence overhead extends its science
+        into the next window's opening; elapsed time cannot identify it.
+        """
+        windows: dict[int, int] = {}
+        for entry in committed:
+            if (
+                entry_obstype(entry) not in PLAN_SCIENCE_OBSTYPES
+                or entry.calibration
+                or entry.visit is None
+                or entry.collection_end is None
+                or float(entry.collection_end) <= utime
+            ):
+                continue
+            obsid = int(entry.obsid)
+            windows[obsid] = max(windows.get(obsid, -1), entry.visit)
+        return windows
 
     def _splice(
         self,
