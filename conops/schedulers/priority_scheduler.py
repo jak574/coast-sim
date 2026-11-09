@@ -1712,6 +1712,10 @@ class PriorityScheduler:
         """When each cadence target was last observed, collected or planned."""
         for target in self.targets:
             obsid = int(target.obsid)
+            if target.visit_windows and self.reserved_visit_windows is not None:
+                # An explicit empty history must stay empty in decoders too;
+                # elapsed time alone cannot complete a delayed cut attempt.
+                self._last_visit_window.setdefault(obsid, -1)
             reserved_window = (
                 self.reserved_visit_windows.get(obsid)
                 if self.reserved_visit_windows is not None
