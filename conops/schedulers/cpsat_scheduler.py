@@ -51,7 +51,7 @@ from .local_search_scheduler import (
     _Snapshot,
     _State,
 )
-from .priority_scheduler import _Block, _Request, program_shares
+from .priority_scheduler import _Block, _collection_seconds, _Request, program_shares
 from .recorder import RecorderLedger, combine_amounts
 
 if TYPE_CHECKING:
@@ -1120,6 +1120,16 @@ class CpSatScheduler(LocalSearchScheduler):
     def _solve(self, start: _Decoded) -> _Decoded:
         """Solve and decode each chunk in turn."""
         _require_ortools()
+        # A dispatch seed can beat the priority-first plan, and its releases
+        # can precede the decoded slew starts. Keep each snapshot's actual
+        # block for the resource reservations after a chunk.
+        self._baseline_blocks = {
+            (snapshot.obsid, snapshot.release): after.timeline[after.cursor - 1]
+            for snapshot, before, after in zip(
+                start.sequence, start.states, start.states[1:]
+            )
+            if after.cursor > before.cursor
+        }
         hints = [
             block
             for block in start.final.timeline
@@ -1317,15 +1327,12 @@ class CpSatScheduler(LocalSearchScheduler):
         for snapshot in later:
             assert snapshot.release is not None
             target = self._by_obsid[snapshot.obsid].target
-            block = next(
-                b
-                for b in self._greedy_timeline
-                if int(b.entry.obsid) == snapshot.obsid
-                and float(b.entry.begin) == snapshot.release
-            )
+            block = self._baseline_blocks.get((snapshot.obsid, snapshot.release))
+            if block is None:
+                continue  # This snapshot did not fit in the decoded baseline.
             assert block.entry.collection_begin is not None
             for segment, volume in ledger.science_additions(
-                target, snapshot.seconds, float(block.entry.collection_begin)
+                target, _collection_seconds(block), float(block.entry.collection_begin)
             ):
                 volumes[segment] = combine_amounts(volumes[segment], volume)
         first = ledger.segment(origin_time)
@@ -1417,15 +1424,17 @@ class CpSatScheduler(LocalSearchScheduler):
         # released after the chunk, which the chunk must leave room for.
         fixed = [0] * runs
         step_size = self.ctx.step_size
-        releases = {snapshot.release for snapshot in later}
         blocks = [
             *(b for b in state.timeline[state.cursor :] if b.is_pass),
             *(
-                b
-                for b in self._greedy_timeline
-                if not b.is_pass
-                and not b.is_charge
-                and float(b.entry.begin) in releases
+                block
+                for snapshot in later
+                if (
+                    block := self._baseline_blocks.get(
+                        (snapshot.obsid, snapshot.release)
+                    )
+                )
+                is not None
             ),
         ]
         # With a solar-array drive, as the walk counts them where the plan's
@@ -1937,7 +1946,9 @@ class CpSatScheduler(LocalSearchScheduler):
                 spans.append(_Span((obsid, n), (lo, hi), rate))
         return spans
 
-    def _slews(self, tasks: Sequence[_Task], origin_time: float) -> npt.NDArray[np.int64]:
+    def _slews(
+        self, tasks: Sequence[_Task], origin_time: float
+    ) -> npt.NDArray[np.int64]:
         """Seconds of the scheduled slew from each task to each other task.
 
         With a thermal settling table, each slew settles for the change it

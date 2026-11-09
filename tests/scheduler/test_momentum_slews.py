@@ -254,7 +254,7 @@ class TestPriorityScheduler:
         reserved = [
             e.description
             for e in scheduler.log.events
-            if "whose slew would reach the capacity" in e.description
+            if "thruster dump reserved before observation" in e.description
         ]
         assert len(reserved) == 1
         assert "in the slew to 100" in reserved[0]

@@ -824,10 +824,16 @@ class PriorityScheduler:
         capacity = forecast.capacity_n_m_s
         crossing = forecast.first_crossing(self.timeline, capacity, demand=True)
         if crossing is not None:
+            dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
+            reason = (
+                "with the dumps reserved"
+                if dump is not None
+                else "with no thrusters to dump it"
+            )
             self._log(
                 crossing,
                 f"The plan's forecast reaches the {capacity} N m s capacity at "
-                f"{unixtime2date(crossing)} with the dumps reserved",
+                f"{unixtime2date(crossing)} {reason}",
             )
 
     def _dump_placement(

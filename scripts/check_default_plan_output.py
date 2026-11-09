@@ -217,7 +217,15 @@ def build_default_plan_payload() -> dict[str, Any]:
         "ut1": {"available": False},
         "polar_motion": {"available": False},
     }
-    with patch.object(rust_ephem, "get_eop_provenance", lambda: provenance_override):
+    # The compiled eclipse evaluator accepts native ephemerides only. This
+    # synthetic scenario is always sunlit, including the panel power path.
+    eclipse = SimpleNamespace(in_constraint=lambda **kwargs: False)
+    with (
+        patch.object(rust_ephem, "get_eop_provenance", lambda: provenance_override),
+        patch(
+            "conops.config.solar_panel._get_eclipse_constraint", return_value=eclipse
+        ),
+    ):
         if not ditl.calc():
             raise RuntimeError("Default plan scenario failed to calculate")
 
