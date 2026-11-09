@@ -549,6 +549,15 @@ program's share (``reserved_seconds``) and their collection end as the target's 
 visit (``reserved_visits``), so a new plan does not revisit a target straight after a
 committed visit.
 
+For requests with visit windows, the last still-committed window index also
+travels with the boundary (``reserved_visit_windows``). Planners combine it
+with completed visit history, so a later commanded visit is not placed a
+second time merely because an earlier visit has already completed. Recorded
+indices preserve the identity of a sequence whose calibration or slews run
+past the next window's opening; subtracting science duration from its finish
+cannot identify that window reliably. Standalone callers providing only
+``reserved_visits`` retain the time-based fallback.
+
 Without these weights, plans are built exactly as before.
 
 Planning within the recorder
