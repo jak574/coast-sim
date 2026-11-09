@@ -627,6 +627,10 @@ fixed desaturation activity holding the attitude of whatever precedes it, keeps 
 science placed before the dump as it is, and plans on from there with the dumps so
 far: the first slew start the pass lets go is where the next pass places from, since
 nothing before it has changed. The dump goes between observations.
+A configured fixed-attitude firing may wait until an indivisible visit ends
+when its start has no fixed time or bounded slide window. Fixed firing starts
+and the latest starts of bounded windows constrain whole-visit admission,
+alongside calibration and maintenance deadlines.
 Where the level is reached during an observation, the dump follows it, provided the
 wheels stay within the capacity through the dump's own length; where they would not,
 the dump goes before the observation, which then starts from empty wheels, provided
