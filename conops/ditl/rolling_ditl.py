@@ -1419,27 +1419,48 @@ class RollingHorizonDITL(DITL):
             visits[obsid] = max(visits.get(obsid, 0.0), float(entry.collection_end))
         return visits
 
-    @staticmethod
     def _reserved_visit_windows(
-        committed: Sequence[PlanEntry], utime: float
+        self, committed: Sequence[PlanEntry], utime: float
     ) -> dict[int, int]:
-        """Recorded windows of visits still committed to collect after now.
+        """Recorded windows of whole visits still committed to collect after now.
 
         Preserve the window even when sequence overhead extends its science
-        into the next window's opening; elapsed time cannot identify it.
+        into the next window's opening; elapsed time cannot identify it. A
+        pending cut attempt does not reserve its window against a whole retry.
         """
+        targets = {int(t.obsid): t for t in self.targets if t.visit_windows}
         windows: dict[int, int] = {}
+        sequence_seconds: dict[tuple[int, int], float] = {}
+        pending_sequences: set[tuple[int, int]] = set()
         for entry in committed:
             if (
                 entry_obstype(entry) not in PLAN_SCIENCE_OBSTYPES
                 or entry.calibration
                 or entry.visit is None
                 or entry.collection_end is None
-                or float(entry.collection_end) <= utime
+                or int(entry.obsid) not in targets
             ):
                 continue
             obsid = int(entry.obsid)
-            windows[obsid] = max(windows.get(obsid, -1), entry.visit)
+            seconds = entry.collection_seconds_between(
+                float(entry.begin), float(entry.end)
+            )
+            if seconds <= 0:
+                continue
+            pending = float(entry.collection_end) > utime
+            if entry.step is not None:
+                key = (obsid, entry.visit)
+                sequence_seconds[key] = sequence_seconds.get(key, 0.0) + seconds
+                if pending:
+                    pending_sequences.add(key)
+            elif pending and seconds >= targets[obsid].per_visit_seconds - 1e-6:
+                windows[obsid] = max(windows.get(obsid, -1), entry.visit)
+        for obsid, visit in pending_sequences:
+            if (
+                sequence_seconds[obsid, visit]
+                >= targets[obsid].per_visit_seconds - 1e-6
+            ):
+                windows[obsid] = max(windows.get(obsid, -1), visit)
         return windows
 
     def _splice(
