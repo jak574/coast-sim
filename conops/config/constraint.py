@@ -1,14 +1,16 @@
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from functools import cached_property, lru_cache
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 import rust_ephem
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic_core import PydanticSerializationError
 from rust_ephem.constraints import (
     AndConstraint,
     AtLeastConstraint,
@@ -42,6 +44,33 @@ _RA_DEC_ROUNDER = 10**_RA_DEC_PRECISION
 
 _INTERVAL_ENDS = 2
 """An eclipse interval is a start and an end."""
+
+_SCIENCE_SAMPLE_CACHE_SIZE = 65_536
+_ScienceSampleKey = tuple[int, int, str, str, str, str | None]
+
+
+class _ScienceSample(BaseModel):
+    """Keep backend owners alive while retaining an exact scalar answer."""
+
+    model_config = ConfigDict(frozen=True)
+    constraint: object
+    ephemeris: object | None
+    geometry: str
+    violated: bool
+
+
+class _ScienceSamples(BaseModel):
+    """A runtime memo is discarded when a configuration is copied deeply."""
+
+    entries: OrderedDict[_ScienceSampleKey, _ScienceSample] = Field(
+        default_factory=OrderedDict
+    )
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "_ScienceSamples":
+        result = type(self)()
+        if memo is not None:
+            memo[id(self)] = result
+        return result
 
 
 class AttitudeConstraintScope(str, Enum):
@@ -260,6 +289,8 @@ class Constraint(ConfigModel):
     )
     """Batch samples keyed by exact inputs, apart from the rounded lookup.
     A new pose in the same rounded bucket must still refresh the held span."""
+    _science_samples: _ScienceSamples = PrivateAttr(default_factory=_ScienceSamples)
+    _science_sample_context: tuple[object, ...] | None = PrivateAttr(default=None)
     _cache_hits: int = PrivateAttr(default=0)
     _cache_misses: int = PrivateAttr(default=0)
     _body_frame_source: object | None = PrivateAttr(default=None)
@@ -351,6 +382,56 @@ class Constraint(ConfigModel):
 
         # Cache miss - compute result (caller has already asserted ephem is not None)
         self._cache_misses += 1
+        science_key: _ScienceSampleKey | None = None
+        science_geometry: str | None = None
+        sample_frame = (
+            getattr(self._body_frame_source, "frame", None)
+            if constraint_type == "explicit_science"
+            else None
+        )
+        if (
+            constraint_type == "explicit_science"
+            and self._science_sample_context is not None
+            and isinstance(sample_frame, SpacecraftFrame)
+            and self._science_sample_context[0] == id(self.ephem)
+            and self._science_sample_context[2:]
+            == (sample_frame.boresight, sample_frame.sun_side)
+        ):
+            # A pending hardware rebind does not change the raw science
+            # predicate. Check its physical frame without moving the original
+            # hardware-refresh/rounded-cache-clearing boundary.
+            geometry: str | None
+            try:
+                geometry = check_fn.model_dump_json()
+            except (AttributeError, PydanticSerializationError, TypeError):
+                geometry = None
+            if isinstance(geometry, str):
+                science_geometry = geometry
+                science_key = (
+                    id(self.ephem),
+                    id(check_fn),
+                    # Numeric equality merges +0.0 and -0.0. Preserve their
+                    # distinct native inputs when reusing an exact answer.
+                    float(ra).hex(),
+                    float(dec).hex(),
+                    float(utime).hex(),
+                    None if target_roll is None else float(target_roll).hex(),
+                )
+            sample = (
+                self._science_samples.entries.get(science_key)
+                if science_key is not None
+                else None
+            )
+            if (
+                sample is not None
+                and sample.constraint is check_fn
+                and sample.ephemeris is self.ephem
+                and sample.geometry == science_geometry
+            ):
+                assert science_key is not None
+                self._science_samples.entries.move_to_end(science_key)
+                self._cache[key] = sample.violated
+                return sample.violated
         result = cast(
             bool,
             check_fn.in_constraint(
@@ -361,6 +442,16 @@ class Constraint(ConfigModel):
                 target_roll=target_roll,
             ),
         )
+        if science_key is not None:
+            assert science_geometry is not None
+            self._science_samples.entries[science_key] = _ScienceSample.model_construct(
+                constraint=check_fn,
+                ephemeris=self.ephem,
+                geometry=science_geometry,
+                violated=result,
+            )
+            if len(self._science_samples.entries) > _SCIENCE_SAMPLE_CACHE_SIZE:
+                self._science_samples.entries.popitem(last=False)
         self._cache[key] = result
         return result
 
@@ -402,6 +493,10 @@ class Constraint(ConfigModel):
         """Clear the constraint result cache. Call at step boundaries."""
         self._cache.clear()
         self._held_cache.clear()
+        self._science_samples.entries.clear()
+        self._science_sample_context = None
+
+    _default_clear_cache = clear_cache
 
     def cache_stats(self) -> tuple[int, int]:
         """Return (hits, misses) for cache performance monitoring."""
@@ -471,9 +566,33 @@ class Constraint(ConfigModel):
             return self.safety_constraint
         key = (id(self.safety_constraint), frame.boresight, frame.sun_side)
         if key != self._body_safety_key:
+            try:
+                sample_context: tuple[object, ...] | None = (
+                    id(self.ephem),
+                    self.model_dump_json(),
+                    frame.boresight,
+                    frame.sun_side,
+                )
+            except (PydanticSerializationError, TypeError):
+                # Test doubles and other opaque components retain the original
+                # unconditional refresh rather than an unverifiable memo.
+                sample_context = None
+            keep_samples = (
+                sample_context is not None
+                and sample_context == self._science_sample_context
+                and getattr(self.clear_cache, "__func__", None)
+                is Constraint._default_clear_cache
+            )
             self._body_safety = frame.constraint_in_body(self.safety_constraint)
             self._body_safety_key = key
-            self.clear_cache()
+            if keep_samples:
+                # Match the default lookup refresh while retaining exact
+                # samples. An overridden clear_cache keeps its full contract.
+                self._cache.clear()
+                self._held_cache.clear()
+            else:
+                self.clear_cache()
+            self._science_sample_context = sample_context
             for name in (
                 "hardware_safety_constraint_config",
                 "safety_constraint_config",

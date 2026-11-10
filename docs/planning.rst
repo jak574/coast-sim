@@ -1528,3 +1528,39 @@ identical failures do not pass. Exceptions retain their original diagnostic
 state rather than replacing it with validation of an unfinished plan. This
 checks dispatch and saved-program round trips; it does not establish planned-run
 science quality or solver repeatability.
+
+Sequence-step visibility reuse
+------------------------------
+
+Within a planning pass, repeated placement attempts share a sequence step's
+pointing and visibility windows. Different step indices, visit geometry, roll
+requests and instruments remain separate. Each placed step still gets its own
+plan entry, and its actual slew, roll and hold are checked at the attempted time.
+The templates are discarded before the next request-building pass or schedule;
+they do not carry collected science or completion history between requests.
+
+``Pointing.step_pointing`` still returns a fresh pointing for public callers.
+Custom pointing subclasses keep their factory behavior without this reuse.
+
+Exact scalar science queries
+----------------------------
+
+Repeated planning checks can reuse an explicit science constraint's exact scalar
+answers across physically unchanged hardware bindings. The additional memo
+checks the constraint and ephemeris identities, serialized science geometry,
+exact time/pointing/roll and current body frame. A pending hardware binding does
+not itself prevent reuse or force the hardware refresh to happen earlier.
+Unsupported geometry serialization disables this additional reuse.
+Exact memo keys distinguish positive and negative zero; the existing rounded
+lookup retains its precedence within the current binding.
+
+The existing rounded point lookup still takes precedence, and held batches keep
+their existing evaluation and refresh order. This preserves those lookup
+semantics rather than changing the precision of the original cache. The extra
+store holds at most 65,536 answers, retains their native owners while needed,
+and is discarded when the configuration is copied deeply.
+
+An explicit ``config.constraint.clear_cache()`` forces fresh evaluation by
+clearing both stores, even when the geometry is unchanged. ``cache_stats()``
+retains its original point-lookup accounting; measure native backend calls
+separately when assessing the additional memo. No scheduler setting is needed.

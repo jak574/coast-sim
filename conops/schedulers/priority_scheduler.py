@@ -343,6 +343,19 @@ class _Visit(NamedTuple):
     end: float
 
 
+class _StepPointingKey(BaseModel):
+    """A sequence step's fixed geometry within one planning pass."""
+
+    model_config = ConfigDict(frozen=True)
+
+    obsid: int
+    index: int
+    visit: int | None
+    base: tuple[str, str]
+    roll: tuple[str | None, str | None]
+    instrument_name: str | None
+
+
 class _Move(NamedTuple):
     """A snapshot placed again later, to make room before it."""
 
@@ -538,6 +551,7 @@ class PriorityScheduler:
             tuple[int, tuple[float, float] | None, float | None], list[list[float]]
         ] = {}
         """Candidate entries' visibility windows (see :meth:`_entry_visibility`)."""
+        self._sequence_pointings: dict[_StepPointingKey, Pointing] = {}
         self.start_momentum_eci_n_m_s = (
             tuple(float(v) for v in start_momentum_eci_n_m_s)
             if start_momentum_eci_n_m_s is not None
@@ -656,6 +670,7 @@ class PriorityScheduler:
         # Every planner enters here, including those overriding schedule().
         # Share exact integrations across this plan's momentum passes, then
         # start fresh on the next schedule if configuration or state changed.
+        self._sequence_pointings.clear()
         self._momentum_cache: SpanCache = {}
         self._momentum_seed = None
         plan = build()
@@ -1693,6 +1708,9 @@ class PriorityScheduler:
 
     def _requests(self) -> list[_Request]:
         """Return the requests in planning order: value, then a stable tie-break."""
+        # Each new pass starts from its own request metadata and configuration.
+        # Later placement attempts in this pass only read these pointings.
+        self._sequence_pointings.clear()
         merit_model = MeritModel(self.config)
         # Science committed outside this plan or locked into it will be
         # collected before what this plan places.
@@ -3669,6 +3687,37 @@ class PriorityScheduler:
         block.end, block.attitude_out = self.ctx.science_rest(entry)
         return block
 
+    def _sequence_pointing(self, target: Pointing, index: int) -> Pointing:
+        """Reuse a step and its whole-ephemeris visibility for placement attempts.
+
+        Step indices keep different instruments, timing and modes separate even
+        when their names or pointings agree. Visits with their own geometry or
+        rolls remain distinct. The public factory still returns fresh pointings;
+        subclasses retain their custom factory behavior without this reuse.
+        """
+        if type(target) is not Pointing:
+            return target.step_pointing(index)
+        ra, dec = target.visit_base_pointing
+        roll, offset = target.visit_roll_request
+        key = _StepPointingKey(
+            obsid=int(target.obsid),
+            index=index,
+            visit=target.visit,
+            # Preserve exact coordinate values, including signed zero, in the
+            # fresh factory's serialized fields rather than merging equal floats.
+            base=(float(ra).hex(), float(dec).hex()),
+            roll=(
+                None if roll is None else float(roll).hex(),
+                None if offset is None else float(offset).hex(),
+            ),
+            instrument_name=target.instrument_name,
+        )
+        pointing = self._sequence_pointings.get(key)
+        if pointing is None:
+            pointing = target.step_pointing(index)
+            self._sequence_pointings[key] = pointing
+        return pointing
+
     def _visit(
         self,
         request: _Request,
@@ -3700,11 +3749,11 @@ class PriorityScheduler:
         previous = attitude
         previous_roll = instrument_roll
         limit = self.config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg
-        first_pointing = target.step_pointing(0)
+        first_pointing = self._sequence_pointing(target, 0)
         previous_optimum = self.ctx.optimum_roll(first_pointing, float(slew.slewstart))
         step_slew: Slew | None = slew
         for index, step in enumerate(sequence.steps):
-            pointing = target.step_pointing(index)
+            pointing = self._sequence_pointing(target, index)
             if index > 0:
                 # A step at the pointing of the one before keeps the
                 # power-optimal roll found there, so its own roll offset is
