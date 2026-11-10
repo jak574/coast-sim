@@ -30,6 +30,7 @@ from ..config import MissionConfig
 from ..ditl.ditl_log import DITLLog
 from ..ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
 from ..targets import Plan, Pointing
+from ..targets.merit import MeritBreakdown
 from ..targets.plan_entry import snapshot_min_seconds
 from .battery import Additions
 from .priority_scheduler import (
@@ -168,6 +169,9 @@ class LocalSearchScheduler(PriorityScheduler):
         earliness_weight: Optional fraction of a deadline request's value lost
             by starting at its deadline, in [0, 1]; defaults to zero. Values
             below 1 keep a late snapshot worth more than none.
+        additional_start_plans: Other plans to decode and compare with the
+            priority-first and primary start plans before searching. Each
+            contender uses the current request state and its own reservations.
     """
 
     scheduler_name = "local_search"
@@ -186,6 +190,7 @@ class LocalSearchScheduler(PriorityScheduler):
         history_length: int = 50,
         earliness_weight: float = 0.0,
         start_plan: Plan | None = None,
+        additional_start_plans: Sequence[Plan] = (),
         **options: object,
     ) -> None:
         super().__init__(config, targets, begin, end, **options)  # type: ignore[arg-type]
@@ -195,6 +200,8 @@ class LocalSearchScheduler(PriorityScheduler):
         such as the plan a dispatch run of the same requests executed. The
         search, or the solver, then improves on the better of the two, so the
         plan returned scores at least as well as either."""
+        self.additional_start_plans = tuple(additional_start_plans)
+        """Other feasible starts to compare without replacing the primary seed."""
         self.seed_score: float | None = None
         """Objective of ``start_plan`` decoded, where one was given."""
         if time_limit < 0:
@@ -273,9 +280,8 @@ class LocalSearchScheduler(PriorityScheduler):
             for b in self._greedy_timeline
             if not b.is_fixed and id(b.entry) not in fixed_entries
         ]
-        self.initial_score = self._timeline_score(science)
-
         self._fixed = fixed
+        self.initial_score = self._timeline_score(science)
         # A failed window was ruled out only for the priority order. The
         # optimizers try different orders, where it may fit. Completed and
         # committed visits are already excluded from visit_candidates.
@@ -301,6 +307,7 @@ class LocalSearchScheduler(PriorityScheduler):
         self.seed_score = None
         for candidate, dispatch_seed in (
             (self.start_plan, True),
+            *((plan, False) for plan in self.additional_start_plans),
             (self._momentum_seed, False),
         ):
             if candidate is None:
@@ -636,7 +643,7 @@ class LocalSearchScheduler(PriorityScheduler):
             for b in trial.timeline
             if not b.is_fixed and self._science_key(b) not in fixed
         ]
-        score = self._timeline_score(science)
+        score = trial._timeline_score(science)
         if score <= self.score:
             return plan
         before = self._selected_contract(retained, inherited_poses=inherited_poses)
@@ -660,7 +667,7 @@ class LocalSearchScheduler(PriorityScheduler):
             is not None
         ):
             return plan
-        self.score = self._timeline_score(science, freeze_merits=True)
+        self.score = trial._timeline_score(science, freeze_merits=True)
         remaining = dict(self._initial_remaining)
         for block in science:
             obsid = int(block.entry.obsid)
@@ -760,29 +767,33 @@ class LocalSearchScheduler(PriorityScheduler):
         return total
 
     def _timeline_score(
-        self, science: Sequence[_Block], *, freeze_merits: bool = False
+        self,
+        science: Sequence[_Block],
+        *,
+        freeze_merits: bool = False,
     ) -> float:
         """Score a priority-first timeline's science blocks, in time order."""
         total = 0.0
+        science = sorted(
+            (b for b in science if int(b.entry.obsid) in self._by_obsid),
+            key=lambda b: float(b.entry.begin),
+        )
+        retained = sorted(self._fixed, key=lambda block: block.end)
+        cursor = 0
         programs = dict(self._delivered)
         left = dict(self._initial_allocated)
-        for block in sorted(science, key=lambda b: float(b.entry.begin)):
-            request = self._by_obsid.get(int(block.entry.obsid))
-            if request is None:
-                continue
-            value = self._value(request, program_shares(programs))
+        for block in science:
+            request = self._by_obsid[int(block.entry.obsid)]
+            before = float(block.entry.begin)
+            while cursor < len(retained) and retained[cursor].end <= before:
+                self._add_program_collection(programs, [retained[cursor]], before)
+                cursor += 1
+            value = self._value(request, program_shares(programs), block.entry)
             total += self._scored(
                 left, request, block, value, freeze_merits=freeze_merits
             )
-            self._add_program_seconds(programs, request, block)
+            self._add_program_collection(programs, [block], block.end)
         return total
-
-    @staticmethod
-    def _add_program_seconds(
-        programs: dict[str, float], request: _Request, block: _Block
-    ) -> None:
-        program = request.category.program_name
-        programs[program] = programs.get(program, 0.0) + _collection_seconds(block)
 
     def _scored(
         self,
@@ -799,12 +810,12 @@ class LocalSearchScheduler(PriorityScheduler):
         collection starts in, are worth ``_allocated_factor`` more, and use up
         that time in ``left``.
         """
-        contribution = self._contribution(request, block, value)
         scale = self._allocation_scale(left, request, block)
+        value = MeritBreakdown.allocated_value(value, scale)
         if freeze_merits:
             for entry in [block.entry, *block.steps]:
-                entry.merit = value * scale
-        return contribution * scale
+                entry.merit = value
+        return self._contribution(request, block, value)
 
     def _allocation_scale(
         self, left: dict[tuple[int, int], float], request: _Request, block: _Block
@@ -976,16 +987,21 @@ class LocalSearchScheduler(PriorityScheduler):
             # Freeze the value the snapshot has here onto its entry, with the
             # allocation's share, as the priority-first scheduler does: a
             # Target of Opportunity must beat it to interrupt the observation.
-            value = self._value(request, program_shares(state.programs))
+            programs = dict(state.programs)
+            self._add_program_collection(
+                programs, timeline[state.cursor : index], float(block.entry.begin)
+            )
+            value = self._value(request, program_shares(programs), block.entry)
             allocated_left = dict(state.allocated_left)
             scale = self._allocation_scale(allocated_left, request, block)
-            block.entry.merit = value * scale
-            score = state.score + self._contribution(request, block, value) * scale
+            value = MeritBreakdown.allocated_value(value, scale)
+            for entry in [block.entry, *block.steps]:
+                entry.merit = value
+            score = state.score + self._contribution(request, block, value)
 
             left = dict(state.remaining)
             left[obsid] = remaining - _collection_seconds(block)
-            programs = dict(state.programs)
-            self._add_program_seconds(programs, request, block)
+            self._add_program_collection(programs, [block], block.end)
             categories = dict(state.categories)
             name = request.category.name
             categories[name] = categories.get(name, 0.0) + _collection_seconds(block)

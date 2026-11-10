@@ -892,26 +892,26 @@ class QueueDITL(DITLMixin, DITLStats):
         self._committed_too = None
         target = commitment.target
         prepared = commitment.prepared
-        if isinstance(getattr(target, "sequence", None), ObservationSequence):
+        # Freeze the admitted value on the parent before creating its first
+        # step. Every later step is built from this parent as well.
+        target.merit_breakdown = commitment.value
+        if target.sequence is not None:
             # A sequence target is observed step by step: the admitted
             # observation is its first step, which takes the prepared slew.
             target = self._begin_sequence(target, utime)
-        for name in (
-            "begin",
-            "end",
-            "slewtime",
-            "slewdist",
-            "slewpath",
-            "roll",
-            "spacecraft_attitude",
-            "instrument_name",
-            "slew_rate_fraction",
-            "collection_begin",
-            "collection_end",
-            "merit",
-        ):
-            setattr(target, name, getattr(prepared, name))
-        target.merit_breakdown = prepared.merit_breakdown
+        target.begin = prepared.begin
+        target.end = prepared.end
+        target.slewtime = prepared.slewtime
+        target.slewdist = prepared.slewdist
+        target.slewpath = prepared.slewpath
+        target.roll = prepared.roll
+        target.spacecraft_attitude = prepared.spacecraft_attitude
+        target.instrument_name = prepared.instrument_name
+        target.slew_rate_fraction = prepared.slew_rate_fraction
+        target.collection_begin = prepared.collection_begin
+        target.collection_end = prepared.collection_end
+        target.merit = prepared.merit
+        target.merit_breakdown = commitment.value
         commitment.slew.at = target
         self.log.log_event(
             utime=utime,

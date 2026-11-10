@@ -568,6 +568,7 @@ class PriorityScheduler:
         self.step_size = step_size
         self.include_passes = include_passes
         self.locked = list(locked)
+        self._owned_locked: list[PlanEntry] | None = None
         self.log = log if log is not None else DITLLog()
         self.simulation_start = simulation_start
         self.simulation_end = simulation_end
@@ -670,6 +671,7 @@ class PriorityScheduler:
         # Every planner enters here, including those overriding schedule().
         # Share exact integrations across this plan's momentum passes, then
         # start fresh on the next schedule if configuration or state changed.
+        self._owned_locked = None
         self._sequence_pointings.clear()
         self._momentum_cache: SpanCache = {}
         self._momentum_seed = None
@@ -1121,7 +1123,10 @@ class PriorityScheduler:
             )
 
         kept = {id(block.entry) for block in self._kept}
-        for entry in self.locked:
+        if self._owned_locked is None:
+            # Read caller edits at planning time; reconnect only owned copies.
+            self._owned_locked = [entry.model_copy() for entry in self.locked]
+        for entry in self._owned_locked:
             if id(entry) not in kept:
                 self._place_locked(entry)
         # Mandatory holds reserve their windows before optional contacts;
@@ -1475,7 +1480,11 @@ class PriorityScheduler:
                 # Freeze the value the snapshot was selected at onto its entry,
                 # as dispatch does: a Target of Opportunity must beat it to
                 # interrupt the observation.
-                block.entry.merit = self._value(request, shares)
+                before = self._programs_before(self.timeline, float(block.entry.begin))
+                value = self._value(request, program_shares(before), block.entry)
+                for entry in block.steps or [block.entry]:
+                    entry.merit = value
+                block.entry.merit = value
                 collected = _collection_seconds(block)
                 request.remaining -= collected
                 request.placed_before = True
@@ -1492,6 +1501,18 @@ class PriorityScheduler:
             # for the rest of its target's exposure field for field.
             active[:] = [r for r in active if r is not request]
             self._return_allocated_time(request, active, order)
+
+        # Insertion order need not be chronological: an earlier gap can be
+        # filled after a future visit was selected. Refresh owned snapshots
+        # from their actual predecessors, preserving committed entries.
+        for block in self.timeline:
+            placed_request = self._movable.get(id(block))
+            if placed_request is None:
+                continue
+            before = self._programs_before(self.timeline, float(block.entry.begin))
+            value = self._value(placed_request, program_shares(before), block.entry)
+            for entry in [block.entry, *block.steps]:
+                entry.merit = value
 
         # Checked once all are placed: moving a snapshot later to make room
         # can cut short a request that was already finished.
@@ -1603,11 +1624,57 @@ class PriorityScheduler:
         into.whole = seconds <= float(into.target.ss_max)
         request.remaining = 0.0
 
-    def _value(self, request: _Request, shares: Mapping[str, float]) -> float:
-        """Value of a snapshot of ``request`` when the plan delivers ``shares``."""
+    def _value(
+        self,
+        request: _Request,
+        shares: Mapping[str, float],
+        entry: PlanEntry | None = None,
+    ) -> float:
+        """Snapshot value at its planned decision and preceding delivered shares.
+
+        Without an entry this is the horizon-origin ranking estimate. Once a
+        placement exists, urgency uses its own visit, visibility and slew start.
+        """
+        value = request.steady_value
+        urgency = request.merit.urgency
+        if entry is not None and self._merit_model.urgency_weight > 0:
+            if request.timed and request.visit != entry.visit:
+                request = request.model_copy(update={"visit": entry.visit})
+            windows = entry.windows or request.windows
+            collect = (
+                entry.collection_begin
+                if entry.collection_begin is not None
+                else float(entry.begin)
+            )
+            window = next((w for w in windows if w[0] <= collect < w[1]), None)
+            deadline = (
+                request.target.visit_windows[request.visit].deadline
+                if request.timed and request.visit is not None
+                else request.target.deadline
+            )
+            close = MeritModel.urgency_close(deadline, windows, window)
+            urgency = self._merit_model.urgency_weight * (
+                self._merit_model.urgency_factor(float(entry.begin), close)
+            )
+        if entry is not None:
+            # Replacing the origin urgency by subtraction can create a one-ULP
+            # advantage over dispatch for an identical decision. Rebuild the
+            # terms in the shared model's order, including allocation bonuses.
+            deficit = self._deficit_weight * MeritModel.completion_deficit(
+                request.category, shares
+            )
+            value = MeritBreakdown.sum_value_terms(
+                request.merit.base,
+                urgency,
+                self._merit_model.cadence_weight
+                if request.cadence is not None
+                else 0.0,
+                deficit,
+            )
+            return MeritBreakdown.allocated_value(value, request.value_factor)
         if not self._deficit_weight:
-            return request.steady_value
-        return request.steady_value + request.value_factor * self._deficit_weight * (
+            return value
+        return value + request.value_factor * self._deficit_weight * (
             MeritModel.completion_deficit(request.category, shares)
         )
 
@@ -1712,6 +1779,7 @@ class PriorityScheduler:
         # Later placement attempts in this pass only read these pointings.
         self._sequence_pointings.clear()
         merit_model = MeritModel(self.config)
+        self._merit_model = merit_model
         # Science committed outside this plan or locked into it will be
         # collected before what this plan places.
         reserved = self._reserved_collection()
@@ -1719,7 +1787,11 @@ class PriorityScheduler:
             reserved[obsid] += seconds
         seed = self.config.random_seed if self.config.random_seed is not None else 0
         self._delivered: dict[str, float] = {}
-        """Science already collected, by program."""
+        """Science collected before the horizon, including external commitments.
+
+        Science reserved inside this timeline belongs to exposure and budget
+        accounting immediately, but to delivered shares only after collection.
+        """
         self._category_seconds: dict[str, float] = {}
         """Science collected, committed and planned so far, by category, for
         the categories' time budgets."""
@@ -1759,11 +1831,13 @@ class PriorityScheduler:
                 self._last_visit_window[obsid] = max(
                     self._last_visit_window.get(obsid, -1), *target.visits_done
                 )
+            delivered = target.collected_seconds + self.reserved_seconds.get(obsid, 0.0)
+            if delivered > 0.0:
+                program = merit_model.category(target).program_name
+                self._delivered[program] = self._delivered.get(program, 0.0) + delivered
             seconds = target.collected_seconds + reserved.get(obsid, 0.0)
             if seconds > 0.0:
                 category = merit_model.category(target)
-                program = category.program_name
-                self._delivered[program] = self._delivered.get(program, 0.0) + seconds
                 self._category_seconds[category.name] = (
                     self._category_seconds.get(category.name, 0.0) + seconds
                 )
@@ -2021,6 +2095,41 @@ class PriorityScheduler:
                 continue
             reserved[int(block.entry.obsid)] += _collection_seconds(block)
         return reserved
+
+    def _programs_before(
+        self, timeline: Sequence[_Block], utime: float
+    ) -> dict[str, float]:
+        """Delivered science at a decision, excluding future reservations.
+
+        Whole-plan exposure and budget reservations are kept separately. Only
+        non-calibration collection after this horizon's origin and before the
+        decision is added to its initial delivered history.
+        """
+        programs = dict(self._delivered)
+        self._add_program_collection(programs, timeline, utime)
+        return programs
+
+    def _add_program_collection(
+        self,
+        programs: dict[str, float],
+        timeline: Sequence[_Block],
+        utime: float,
+    ) -> None:
+        """Add only the supplied blocks' science collected before a decision."""
+        for block in timeline:
+            if block.is_fixed:
+                continue
+            seconds = sum(
+                entry.collection_seconds_between(self.ctx.ustart, utime)
+                for entry in block.steps or [block.entry]
+                if not entry.calibration
+            )
+            if seconds <= 0.0:
+                continue
+            program = self.config.observation_categories.get_category(
+                int(block.entry.obsid)
+            ).program_name
+            programs[program] = programs.get(program, 0.0) + seconds
 
     # ── Timeline neighbours and connections ──────────────────────────────
 

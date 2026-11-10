@@ -506,6 +506,15 @@ horizon it plans, as a ``start_plan`` the scheduler improves on; a dispatch run'
 executed plan is the natural one. Each replan record says how many entries seeded it
 (``seed_entries``).
 
+Local-search and CP-SAT replans also consider the previous rolling plan's
+uncommitted suffix. It is decoded again against the actual handoff state,
+remaining exposure, completed and committed windows, budgets and mandatory
+activities. A feasible incumbent can therefore survive a replan whose fresh
+search would lose it. The external dispatch seed remains a separate contender.
+Passing ``additional_start_plans`` explicitly in ``scheduler_options`` overrides
+this automatic incumbent; an empty tuple disables it. Automatic seed injection
+applies to optimizer classes, leaving callable scheduler factories compatible.
+
 Cadence and program shares in plans
 -----------------------------------
 
@@ -518,8 +527,12 @@ executed:
   ``time_share``, each program's share counts the science its targets have collected
   (``collected_seconds``) plus what the plan has given them so far. The scheduler
   re-ranks the requests after every snapshot, so a program falling behind its share
-  moves up; local search values each snapshot by the shares in the plan before it;
-  CP-SAT uses the shares at the start of each chunk.
+  moves up. Recorded values and exact decoding use the collection preceding
+  each snapshot's decision, in chronological order. Science locked later in the
+  horizon does not count as already delivered: its exposure still reserves the
+  target and category/group budgets immediately. Local-search states carry the
+  delivered prefix forward; CP-SAT uses those shares at the start of each chunk
+  and scores its decoded proposals against their actual preceding collection.
 * **Observation groups.** A target in a group (``observation_groups``, see
   :doc:`configuration`) has its earliest start and deadline narrowed by the group's
   window, its snapshots capped by the group's time budget beside its category's, and,
@@ -931,10 +944,11 @@ A change is kept when it is no worse than the current plan, or than the plan of
 ``history_length`` evaluated changes ago (late-acceptance hill climbing), which
 lets the search cross plateaus. A no-op proposal consumes the original attempt
 budget without advancing or skipping a history slot. The objective is
-merit-weighted science time, with each snapshot's completion deficit taken from
-the program shares in the plan before it. By default, a snapshot retains its
-value within its allowed window and equal-valued plans prefer earlier science.
-An explicit positive ``earliness_weight`` discounts later starts. The best plan
+dynamic-merit-weighted science time. Each snapshot's urgency uses its own visit
+deadline and visibility window at its planned slew start; its completion deficit
+uses the program shares delivered before it. The horizon-origin value is an
+initial ordering estimate. Equal-valued plans prefer earlier science, and an
+explicit positive ``earliness_weight`` applies an additional late-start discount. The best plan
 found is returned, and it is never worse than the priority-first plan.
 For a windowed visit, the optional deadline discount uses the
 ``visit`` index stored on that observation's plan entry, including the group's
@@ -963,6 +977,11 @@ priority-first scheduler.
   and one that cannot be placed there is left out; the search then improves on the
   better of the two starts, so the plan returned scores at least as well as either.
   CP-SAT takes it the same way, each chunk's hint coming from it;
+* ``additional_start_plans``: other plans to decode as independent starting
+  contenders before searching. Each is checked against the current state with
+  separate activity, recorder and battery reservations. ``seed_score`` continues
+  to describe the primary ``start_plan``; ``start_score`` describes the selected
+  decoded start;
 * ``time_limit``: seconds of search after the priority-first plan is built
   (default 10);
 * ``max_iterations``: changes to try at most. A run limited only by time depends on
@@ -1027,9 +1046,18 @@ CP-SAT chooses candidates and their order:
   remove carries over; and every segment from the chunk's to the end of the horizon
   is kept within the limit, so a candidate is traded against the room it takes from
   everything after it (see `Planning within the recorder`_);
-* the objective is merit-weighted science, with the completion deficit at the chunk's
-  start and the earliness discount for requests with a deadline and for cadence
-  visits.
+* the objective is dynamic-merit-weighted science. Urgency follows the chosen
+  slew-step variable using the same closing-time function as dispatch; completion
+  deficit is estimated at the chunk's start, then evaluated again during exact
+  decoding. Configured earliness discounts and allocation bonuses also apply to
+  the time-dependent urgency contribution.
+
+The native integer model conservatively quantises urgency fractions at decision
+steps, normally to one part in a million; exceptionally long horizons reduce that
+scale to keep integer products in range. Exact decoding evaluates the shared
+function at full floating-point precision before comparing plans. The exported
+entry's ``merit`` records that unrounded value, including the applicable allocation
+factor. Calibration contributes no science value.
 
 The battery is in the model too, where the battery limits the plan. The horizon
 from the chunk's run to its end is cut into sunlit and eclipse runs. Each candidate
@@ -1065,10 +1093,12 @@ chunk are kept. The next chunk is solved from where the kept snapshots leave the
 spacecraft. Every plan therefore executes as planned and is never worse than the
 priority-first plan; ``solver_chunks_used`` shows which chunks the solver improved.
 
-The priority-first start and a supplied seed are decoded independently with their
+The priority-first start and supplied seeds are decoded independently with their
 own sliding-activity reservations. Seed activity times apply only while evaluating
 the seed and are kept only if that seed wins the starting-plan comparison; a
 losing seed cannot move a mandatory block into the priority-first science.
+Locked entries are copied when planning begins: recomputing an
+ingress preserves the caller's plan and its collection windows.
 
 When a dispatch seed decodes to a better starting plan, that decoded plan is
 the incumbent for chunk hints and comparisons. Recorder and battery reservations
@@ -1444,7 +1474,14 @@ as ``+alloc``.
 Each :class:`~conops.benchmark.BenchmarkResult` reports, measured the same way for every
 contender:
 
-* science time and merit-weighted science, excluding executed sequence calibration;
+* science time and ``dynamic_science``: actual collected seconds weighted by the
+  executed entry's selection-time dynamic ``merit`` (including the urgency,
+  cadence, completion-deficit and allocation terms that apply). Repeated visits
+  use their own recorded values. Calibration earns no science value;
+* ``weighted_science`` separately as a fixed-value diagnostic, using the original
+  input merits. The table labels these columns ``dynamic value`` and ``fixed
+  value``. Dynamic value is the primary planner comparison; fixed value does
+  not replace its configured dynamic objective;
 * calibration collection time separately as ``calibration_hours``;
 * time slewing, idle and in contact, and the number of observations;
 * each ToO's response time, and how many started by their deadline;
