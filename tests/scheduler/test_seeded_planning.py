@@ -15,10 +15,11 @@ from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 TLE = "examples/example.tle"
 
 
-def _weighted(results: list, name: str) -> float:
+def _dynamic(results: list, name: str) -> float:
     result = next(r for r in results if r.contender == name)
     assert result.error is None, result.error
-    return result.weighted_science
+    assert result.dynamic_science is not None
+    return result.dynamic_science
 
 
 class TestStartPlan:
@@ -78,13 +79,7 @@ class TestStartPlan:
 
 
 class TestAcceptance:
-    """The seeded plan's merit-weighted science is at least the dispatch
-    run's, measured the same way from telemetry, within one percent: a
-    snapshot the queue began and a ToO cut short before the request's
-    minimum is science no plan can place, and the planner's slews and
-    rounding shift what it decodes by a minute or two."""
-
-    BOUND = 0.99
+    """Compare executed science at the dynamic values selected by each mode."""
 
     @pytest.mark.parametrize("make", [baseline, program])
     def test_the_seeded_local_search_plan_scores_at_least_dispatch(self, make) -> None:  # type: ignore[no-untyped-def]
@@ -98,11 +93,11 @@ class TestAcceptance:
         )
         table = format_results(results)
         assert "planned:local_search seeded by dispatch" in table
-        assert _weighted(
-            results, "planned:local_search seeded by dispatch"
-        ) >= self.BOUND * _weighted(results, "dispatch")
+        assert _dynamic(results, "planned:local_search seeded by dispatch") >= _dynamic(
+            results, "dispatch"
+        )
 
-    def test_the_seeded_cp_sat_plan_scores_at_least_dispatch(self) -> None:
+    def test_the_seeded_cp_sat_plan_beats_dispatch_deterministically(self) -> None:
         pytest.importorskip("ortools")
         from conops.schedulers import CpSatScheduler
 
@@ -111,12 +106,19 @@ class TestAcceptance:
             scenario,
             [
                 dispatch(),
-                planned(CpSatScheduler, seeded_by_dispatch=True, solver_time_limit=2.0),
+                planned(
+                    CpSatScheduler,
+                    seeded_by_dispatch=True,
+                    solver_time_limit=60.0,
+                    solver_deterministic_time=20.0,
+                    workers=1,
+                    seed=2029,
+                ),
             ],
         )
-        assert _weighted(
-            results, "planned:cp_sat seeded by dispatch"
-        ) >= self.BOUND * _weighted(results, "dispatch")
+        assert _dynamic(results, "planned:cp_sat seeded by dispatch") > _dynamic(
+            results, "dispatch"
+        )
 
 
 class TestProgramScenario:

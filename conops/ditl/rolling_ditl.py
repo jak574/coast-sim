@@ -819,14 +819,14 @@ class RollingHorizonDITL(DITL):
             None,
         )
 
-    def _seed_plan(self, start: float, end: float) -> Plan:
-        """The start plan's entries that overlap ``[start, end]``, the horizon
-        a replan plans, as its scheduler's start plan."""
-        assert self.start_plan is not None
+    def _seed_plan(self, start: float, end: float, source: Plan | None = None) -> Plan:
+        """Clip a source plan to the new horizon; default to the external seed."""
+        source = self.start_plan if source is None else source
+        assert source is not None
         return Plan(
             entries=[
                 entry
-                for entry in self.start_plan
+                for entry in source
                 if float(entry.end) > start and float(entry.begin) < end
             ]
         )
@@ -908,12 +908,21 @@ class RollingHorizonDITL(DITL):
         if (
             self.start_plan is not None
             and "start_plan" not in options
+            and isinstance(self.scheduler, type)
             and issubclass(self.scheduler, LocalSearchScheduler)
         ):
             seed = self._seed_plan(start, horizon_end)
             self._last_seed_entries = len(seed)
             if seed.entries:
                 options["start_plan"] = seed
+        if (
+            isinstance(self.scheduler, type)
+            and issubclass(self.scheduler, LocalSearchScheduler)
+            and "additional_start_plans" not in options
+        ):
+            incumbent = self._seed_plan(start, horizon_end, self.plan)
+            if incumbent.entries:
+                options["additional_start_plans"] = (incumbent,)
         reserved_activities = {
             e.obsid for e in leading if e.obstype == ObsType.ACTIVITY
         }
