@@ -65,6 +65,17 @@ class _Snapshot(BaseModel):
     it until a move releases it."""
 
 
+class _PendingWindow(BaseModel):
+    """One admissible request window which an exact insertion may recover."""
+
+    model_config = ConfigDict(frozen=True)
+
+    obsid: int
+    visit: int | None
+    opens: float
+    deadline: float
+
+
 class _State(BaseModel):
     """The timeline after decoding a prefix of the sequence."""
 
@@ -1272,6 +1283,42 @@ class LocalSearchScheduler(PriorityScheduler):
                 request, current.final.remaining[obsid], self._initial_remaining[obsid]
             )
         ]
+
+    def _pending_windows(self, decoded: _Decoded) -> list[_PendingWindow]:
+        """Missing windows with exposure left, in deterministic deadline order."""
+        windows = []
+        for obsid in self._open_requests(decoded):
+            request = self._by_obsid[obsid]
+            target = request.target
+            if request.timed:
+                for visit in request.visit_candidates:
+                    window = target.visit_windows[visit]
+                    if (
+                        window.start < self.ctx.uend
+                        and window.deadline >= self.ctx.ustart
+                    ):
+                        windows.append(
+                            _PendingWindow(
+                                obsid=obsid,
+                                visit=visit,
+                                opens=window.start,
+                                deadline=window.deadline,
+                            )
+                        )
+            elif target.deadline is not None and target.deadline >= self.ctx.ustart:
+                opens = target.earliest_start
+                windows.append(
+                    _PendingWindow(
+                        obsid=obsid,
+                        visit=None,
+                        opens=self.ctx.ustart if opens is None else opens,
+                        deadline=target.deadline,
+                    )
+                )
+        return sorted(
+            windows,
+            key=lambda w: (w.deadline, w.obsid, -1 if w.visit is None else w.visit),
+        )
 
     def _idle_before(self, current: _Decoded) -> list[float]:
         """Return, for each snapshot in the sequence, the idle seconds before it.

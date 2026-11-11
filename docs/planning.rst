@@ -1227,7 +1227,9 @@ rebuilds it as the simulation runs:
    the same time, they are tried highest-ranked first, and the first that outranks
    the observation, needs the cut and can be placed interrupts it. A ToO that may not interrupt does not take the cut
    observation's place either, however it ranks: it is planned in after the
-   interrupting ToO, or, if its deadline falls before that, in the next plan.
+   interrupting ToO's whole visit, including all science and calibration steps
+   and final cleanup. If its deadline falls before that visit ends, it waits
+   for the next plan.
 
 .. code-block:: python
 
@@ -1601,3 +1603,17 @@ An explicit ``config.constraint.clear_cache()`` forces fresh evaluation by
 clearing both stores, even when the geometry is unchanged. ``cache_stats()``
 retains its original point-lookup accounting; measure native backend calls
 separately when assessing the additional memo. No scheduler setting is needed.
+
+Timed visits at optimization boundaries
+--------------------------------------
+
+The CP-SAT departure grid applies to new snapshots. A settled activity or
+retained task keeps its ingress time in seconds, so an off-grid finish does
+not prevent the next fixed task from starting on time. Ingress still waits
+for its predecessor and reserves the full modelled slew duration.
+
+After its native chunk solves, CP-SAT may recover one missing timed visit
+with an exact insertion that strictly improves the decoded horizon objective.
+Resource limits, commitments, visit windows and the subsequent momentum
+forecast still apply. The native solver score and search-ending inventory
+continue to describe the solver itself; the repair adds no solver work budget.
