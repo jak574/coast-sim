@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from enum import Enum, auto
+from math import inf, nextafter
 from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -735,12 +736,9 @@ class PriorityScheduler:
                 self._log_forecast_past_capacity()
                 return plan
             assert dump is not None
-            # One pass reserves a dump for every crossing the forecast
-            # reaches, each found with the wheels unloaded at the dump before
-            # it, and the plan is built again once, from the first. The
-            # science after a dump moves a little when the plan is built
-            # with it, so the next pass checks the dumps against the plan
-            # as built and replaces any that no longer answer its forecast.
+            # Batch firings that fit existing idle holds without changing
+            # attitude. If a firing displaces selected work or changes the
+            # hold attitude, rebuild before forecasting later reservations.
             resume: float | None = None
             self._forecast_resets = []
             while len(self.dumps) < _MAX_DUMPS:
@@ -771,6 +769,10 @@ class PriorityScheduler:
                 reserved = self._dump_activity(begin, DESATURATION_OBSID + len(kept))
                 if reserved.end > self.ctx.uend:
                     break
+                changes_timeline = dump.attitude.fixed_pointing is not None or any(
+                    float(block.entry.begin) < reserved.end and begin < block.end
+                    for block in self.timeline
+                )
                 self.dumps = [*kept, reserved]
                 self._log(
                     begin,
@@ -782,6 +784,10 @@ class PriorityScheduler:
                 if resume is None:
                     resume = begin
                 self._forecast_resets.append(reserved.end)
+                if changes_timeline:
+                    # Later dump times must follow the displaced work, rather
+                    # than preventing it from fitting at its new time.
+                    break
             self._forecast_resets = []
             if resume is None:
                 self._log_forecast_past_capacity()
@@ -3458,6 +3464,14 @@ class PriorityScheduler:
             target.step_pointing(0) if target.sequence is not None else target
         )
         while start <= search_end:
+            if (
+                target.sequence is not None
+                and self._minimum_sequence_end(target, timing, start)
+                > min(gap_end, horizon_end) + TIME_TOLERANCE_S
+            ):
+                # Even zero ingress and inter-step motion cannot fit. Later
+                # departures cannot recover the missing collection time.
+                return None
             instrument_roll, roll_allowed = self.ctx.select_instrument_roll(
                 arrival_pointing, start
             )
@@ -3720,6 +3734,23 @@ class PriorityScheduler:
                     return None
             start += self.ctx.step_size
         return None
+
+    @staticmethod
+    def _minimum_sequence_end(
+        target: Pointing, timing: ObservationTiming, start: float
+    ) -> float:
+        """An optimistic end with no slew, settle, rounding wait or acquisition.
+
+        Round each addition down so the bound also holds when the executor's
+        repeated floating-point clock additions round below the exact sum.
+        """
+        assert target.sequence is not None
+        cursor = nextafter(start + timing.setup_seconds, -inf)
+        for index, step in enumerate(target.sequence.steps):
+            if index > 0 and step.setup:
+                cursor = nextafter(cursor + timing.setup_seconds, -inf)
+            cursor = nextafter(cursor + step.duration_seconds, -inf)
+        return nextafter(cursor + timing.post_collection_seconds, -inf)
 
     def _collection_begin_at(
         self, target: Pointing, pred: _Block | None, start: float

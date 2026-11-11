@@ -763,9 +763,9 @@ class RollingHorizonDITL(DITL):
         progress, so they may not take its place either: a higher-ranked one
         would push the interrupting ToO past its deadline and undo the cut.
         They are held back while the interrupting ToO is placed, then the
-        plan up to and including its entry is pinned and the rest of the
-        horizon planned again with them; one whose deadline falls before the
-        entry ends waits for the next plan.
+        plan up to and including its whole visit is pinned and the rest of
+        the horizon planned again with them; one whose deadline falls before
+        that visit ends waits for the next plan.
         """
         waiting = [
             self._too_targets[id(request)]
@@ -784,9 +784,21 @@ class RollingHorizonDITL(DITL):
         if not waiting:
             log.add_events(first.events)
             return planned
-        follow = float(placed.end)
+        stop = planned[2].index(placed) + 1
+        pinned = planned[2][:stop]
+        visit = self._visit_step(placed, None) if placed.step is not None else None
+        for following in planned[2][stop:]:
+            if visit is None or following.step is None:
+                break
+            continued = self._visit_step(following, visit, continuing=True)
+            if continued is None:
+                break
+            pinned.append(following)
+            visit = continued
+        # A waiting request follows the whole interrupting visit, including
+        # calibration and its final cleanup, rather than only its first step.
+        follow = float(pinned[-1].end)
         held = [t for t in waiting if t.deadline is not None and t.deadline < follow]
-        pinned = planned[2][: planned[2].index(placed) + 1]
         again = DITLLog()
         replanned = self._plan_after(
             utime, cutoff, again, held=held, pinned=pinned, cut_entry=cut_entry
