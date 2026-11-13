@@ -1024,8 +1024,7 @@ optimizes the same objective as local search, but chooses which snapshots to obs
 and in what order by solving a constraint model rather than by trying changes one at
 a time.
 
-The horizon is solved in consecutive ``chunk`` lengths (three hours by default). A
-chunk holds the snapshots whose slews start in it; a snapshot may finish in the next.
+The horizon advances in consecutive ``chunk`` lengths (three hours by default). A model may also use up to one further chunk of empty time before the unchanged incumbent continuation. This lets a flexible observation move after a closing visibility window, fitting both visits instead of keeping the flexible one first. It adds no solver budget, and the exact whole-horizon comparison must still improve before the proposal replaces the incumbent. A snapshot may finish after the model's latest permitted start.
 For each chunk, a candidate is one snapshot of a request in one of its visibility
 windows (as many per window as the exposure needs and the window holds), with an
 optional arrival time and a collection length between its ``ss_min`` and ``ss_max``.
