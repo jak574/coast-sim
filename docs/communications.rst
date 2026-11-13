@@ -111,6 +111,9 @@ Station access is still distinct from visibility: ``schedule_probability``
 is drawn once per station visibility window and ``random_seed`` reproduces
 those draws. Zero rejects the window; one accepts it. Availability is decided
 once over the full ephemeris, shared by dispatch and every replan.
+Repeated daily queries on the same pass scheduler retain a visibility window's
+first availability decision across midnight, including a rejected window. A new
+scheduler makes its own decisions; replaying saved bookings makes no new draws.
 
 Set ``contact_policy="scheduled"`` to use whole-pass booking instead.
 :class:`~conops.simulation.PassTimes` then applies its eight-minute minimum
