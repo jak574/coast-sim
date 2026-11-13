@@ -250,7 +250,7 @@ class LocalSearchScheduler(PriorityScheduler):
         self.score = 0.0
         """Objective of the returned plan."""
         self.incumbent_score: float | None = None
-        """Whole-horizon value of the best feasible seed or priority baseline."""
+        """Whole-horizon value of the best seed or independent optimized plan."""
         self.incumbent_retained = False
         """Whether the complete incumbent beat the finalized search result."""
         self._initial_volumes: tuple[RecorderAmount, ...] = ()
@@ -285,16 +285,14 @@ class LocalSearchScheduler(PriorityScheduler):
             ):
                 incumbent = trial
 
-        if incumbent is not None and incumbent.dumps:
-            # Seed firings are advisory. Their old layout can split a newly
-            # available whole visit even when that visit needs no such firing.
-            # Compare an independent priority layout before constraining search
-            # to the selected incumbent's support reservations.
-            priority = self._priority_incumbent()
-            if priority is not None and priority._improves(
-                priority.score, priority.timeline, incumbent.score, incumbent.timeline
-            ):
-                incumbent = priority
+        # A weaker priority plan can become the better optimized plan when it
+        # is free to place its own dumps. Search that layout independently;
+        # its initial priority score is not an upper bound on its result.
+        independent = (
+            self._independent_incumbent()
+            if incumbent is not None and incumbent.dumps
+            else None
+        )
 
         if incumbent is not None:
             # Give the optimizer the feasible incumbent's support layout too;
@@ -315,6 +313,11 @@ class LocalSearchScheduler(PriorityScheduler):
         if incumbent is None:
             assert plan is not None
             return plan
+
+        if independent is not None and independent._improves(
+            independent.score, independent.timeline, incumbent.score, incumbent.timeline
+        ):
+            incumbent = independent
 
         self.incumbent_score = incumbent.score
         committed = incumbent._selected_contract(
@@ -385,17 +388,26 @@ class LocalSearchScheduler(PriorityScheduler):
         trial._resume_from = None
         return trial
 
-    def _priority_incumbent(self) -> "LocalSearchScheduler | None":
-        """Build priority support independently, retaining mandatory activities."""
+    def _independent_incumbent(self) -> "LocalSearchScheduler | None":
+        """Optimize without advisory support, retaining mandatory commitments.
+
+        Search inventories remain shared with the calling schedule, so even a
+        rejected contender's iterations and solver endings are reported.
+        """
         trial = self._independent_trial()
         trial.dumps = []
+        trial.start_plan = None
+        trial.additional_start_plans = ()
         try:
-            plan = PriorityScheduler._plan_within_momentum(
-                trial, lambda: PriorityScheduler._plan_once(trial)
-            )
+            plan = trial._plan_within_momentum(trial._plan_once)
+            plan = trial._refine_settled_plan(plan)
+            plan = trial._augment_selected_plan(plan)
         except ActivitySchedulingError:
             return None
-        return self._complete_seed(plan)
+        completed = self._complete_seed(plan)
+        if completed is not None:
+            completed.log.add_events(trial.log.events)
+        return completed
 
     def _complete_seed(self, seed: Plan) -> "LocalSearchScheduler | None":
         """Recheck a seed under the current state without running an optimizer."""
