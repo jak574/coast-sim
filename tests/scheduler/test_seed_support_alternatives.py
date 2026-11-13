@@ -8,13 +8,13 @@ import pytest
 from conops import DITL
 from conops.config import StoredMomentumConfig, ThrusterDumpConfig
 from conops.schedulers import CpSatScheduler, LocalSearchScheduler, PriorityScheduler
+from conops.schedulers.priority_scheduler import ActivitySchedulingError
 from conops.targets import ScheduledActivity
 
 from .planning_scenario import BEGIN, MIN, T0, make_config, make_target
 
 
-@pytest.mark.parametrize("planner", [LocalSearchScheduler, CpSatScheduler])
-def test_seed_dump_cannot_hide_a_feasible_higher_value_visit(planner):
+def support_scenario():
     config = make_config(1)
     config.constraint.sun_constraint = None
     config.constraint.earth_constraint = None
@@ -43,7 +43,6 @@ def test_seed_dump_cannot_hide_a_feasible_higher_value_visit(planner):
         activities=[old_dump],
         include_passes=False,
     ).schedule()
-    original_seed = seed.model_dump_json()
     urgent = make_target(
         config,
         101,
@@ -55,6 +54,13 @@ def test_seed_dump_cannot_hide_a_feasible_higher_value_visit(planner):
         ss_min=40,
         deadline=T0 + 15 * MIN,
     )
+    return config, ordinary, urgent, seed
+
+
+@pytest.mark.parametrize("planner", [LocalSearchScheduler, CpSatScheduler])
+def test_seed_dump_cannot_hide_a_feasible_higher_value_visit(planner):
+    config, ordinary, urgent, seed = support_scenario()
+    original_seed = seed.model_dump_json()
     scheduler = planner(
         config,
         [ordinary, urgent],
@@ -74,6 +80,58 @@ def test_seed_dump_cannot_hide_a_feasible_higher_value_visit(planner):
     assert scheduler._complete_feasible()
     assert seed.model_dump_json() == original_seed
     run = DITL(config, plan=plan, begin=BEGIN, end=BEGIN + timedelta(hours=1))
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
+
+
+@pytest.mark.parametrize("planner", [LocalSearchScheduler, CpSatScheduler])
+def test_failed_native_search_retains_a_stronger_feasible_priority_plan(
+    planner, monkeypatch
+):
+    config, ordinary, urgent, seed = support_scenario()
+    original_seed = seed.model_dump_json()
+    end = BEGIN + timedelta(hours=1)
+    priority = PriorityScheduler(
+        config, [ordinary, urgent], BEGIN, end, include_passes=False
+    ).schedule()
+    scheduler = planner(
+        config,
+        [ordinary, urgent],
+        BEGIN,
+        end,
+        start_plan=seed,
+        include_passes=False,
+        time_limit=0,
+    )
+    checked_priority = scheduler._complete_seed(priority)
+    checked_seed = scheduler._complete_seed(seed)
+    assert checked_priority is not None and checked_seed is not None
+    assert checked_priority.score > checked_seed.score
+
+    def failed_native(self, build):
+        raise ActivitySchedulingError(
+            ScheduledActivity(
+                name="Unreachable proposed firing", begin=T0, duration_seconds=120
+            ),
+            "optimized proposal has no safe ingress",
+        )
+
+    # A failed optimized proposal must not invalidate the independently built
+    # and checked priority baseline. The base priority planner stays real.
+    monkeypatch.setattr(LocalSearchScheduler, "_plan_within_momentum", failed_native)
+    plan = scheduler.schedule()
+    assert (
+        sum(
+            entry.collection_seconds_between(float(entry.begin), float(entry.end))
+            for entry in plan
+            if entry.obsid == urgent.obsid
+        )
+        == 40 * MIN
+    )
+    assert scheduler.score >= checked_priority.score
+    assert scheduler._complete_feasible()
+    assert seed.model_dump_json() == original_seed
+    run = DITL(config, plan=plan, begin=BEGIN, end=end)
     assert run.calc()
     assert run.validate_plan_matches_execution() == []
 

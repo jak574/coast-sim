@@ -250,7 +250,7 @@ class LocalSearchScheduler(PriorityScheduler):
         self.score = 0.0
         """Objective of the returned plan."""
         self.incumbent_score: float | None = None
-        """Whole-horizon value of the best seed or independent optimized plan."""
+        """Whole-horizon value of the best complete seed or independent plan."""
         self.incumbent_retained = False
         """Whether the complete incumbent beat the finalized search result."""
         self._initial_volumes: tuple[RecorderAmount, ...] = ()
@@ -285,14 +285,19 @@ class LocalSearchScheduler(PriorityScheduler):
             ):
                 incumbent = trial
 
-        # A weaker priority plan can become the better optimized plan when it
-        # is free to place its own dumps. Search that layout independently;
-        # its initial priority score is not an upper bound on its result.
-        independent = (
-            self._independent_incumbent()
-            if incumbent is not None and incumbent.dumps
-            else None
-        )
+        independent = None
+        if incumbent is not None and incumbent.dumps:
+            # Retain the separately feasible priority baseline even if a native
+            # search fails or loses value while repairing its momentum. Keep
+            # its support available to the ordinary seeded search too.
+            priority = self._priority_incumbent()
+            if priority is not None and priority._improves(
+                priority.score, priority.timeline, incumbent.score, incumbent.timeline
+            ):
+                incumbent = priority
+            # A weaker priority baseline can still lead to a better optimized
+            # plan, so also search without advisory seed science or support.
+            independent = self._independent_incumbent()
 
         if incumbent is not None:
             # Give the optimizer the feasible incumbent's support layout too;
@@ -387,6 +392,18 @@ class LocalSearchScheduler(PriorityScheduler):
         trial._kept_visit_windows = {}
         trial._resume_from = None
         return trial
+
+    def _priority_incumbent(self) -> "LocalSearchScheduler | None":
+        """Retain a complete priority plan with its own feasible support."""
+        trial = self._independent_trial()
+        trial.dumps = []
+        try:
+            plan = PriorityScheduler._plan_within_momentum(
+                trial, lambda: PriorityScheduler._plan_once(trial)
+            )
+        except ActivitySchedulingError:
+            return None
+        return self._complete_seed(plan)
 
     def _independent_incumbent(self) -> "LocalSearchScheduler | None":
         """Optimize without advisory support, retaining mandatory commitments.
