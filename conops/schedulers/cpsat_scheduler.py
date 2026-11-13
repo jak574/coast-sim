@@ -1447,9 +1447,7 @@ class CpSatScheduler(LocalSearchScheduler):
         self._window_repaired = False
         self._solve_cache = _ChunkSolveCache()
         self._intermediate_solve_cache = _ChunkSolveCache()
-        plan = self._plan_within_momentum(self._plan_once)
-        plan = self._refine_settled_plan(plan)
-        return self._augment_selected_plan(plan)
+        return self._schedule_with_incumbents()
 
     def _plan_once(self) -> Plan:
         start = self._start_from_priority_plan()
@@ -1474,6 +1472,7 @@ class CpSatScheduler(LocalSearchScheduler):
                     obsid=int(block.entry.obsid),
                     seconds=_collection_seconds(block),
                     release=float(block.entry.begin),
+                    visit=block.entry.visit,
                 )
             )
         return self._decode(snapshots)
@@ -1508,13 +1507,10 @@ class CpSatScheduler(LocalSearchScheduler):
                     crossing = index
                     break
             for position in sorted({crossing, max(0, crossing - 1)}):
+                # The window bounds collection, not the ingress slew. Pin the
+                # intended visit while the exact decoder times its slew/setup.
                 added = self._released(window.obsid).model_copy(
-                    update={
-                        "release": max(
-                            self.ctx.ustart,
-                            window.opens - self.ctx.setup_for(window.obsid),
-                        )
-                    }
+                    update={"visit": window.visit}
                 )
                 sequence = [
                     *decoded.sequence[:position],

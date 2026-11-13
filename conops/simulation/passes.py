@@ -584,6 +584,11 @@ class PassTimes(ContactScheduler):
         self._geometry: dict[str, StationGeometry] = {}
         self._rates: dict[str, npt.NDArray[np.float64]] = {}
         self._routed_rates: dict[tuple[str, str | None], npt.NDArray[np.float64]] = {}
+        self._visibility_windows: dict[
+            str, tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]
+        ] = {}
+        self._window_availability: dict[tuple[str, int, int], bool] = {}
+        self._window_availability_ready = False
 
         # Ground stations registry from config
         if config.ground_stations is None:
@@ -1207,6 +1212,57 @@ class PassTimes(ContactScheduler):
         self._rates[station.code] = rates
         return rates[startindex:endindex]
 
+    def _prepare_window_availability(self) -> None:
+        """Freeze network access in station/time order, independent of query order."""
+        if self._window_availability_ready:
+            return
+        communications = self.config.spacecraft_bus.communications
+        for station in self.ground_stations.stations:
+            if (effective_downlink_rate_mbps(station, communications) or 0.0) <= 0.0:
+                continue
+            geometry = self.station_geometry(station, 0, len(self.times))
+            starts, ends = find_boundaries(
+                geometry.elevation_deg > station.min_elevation_deg
+            )
+            self._visibility_windows[station.code] = (starts, ends)
+            for start, stop in zip(starts, ends):
+                end = (
+                    self.times[stop]
+                    if stop < len(self.times)
+                    else self.times[-1] + self.ephem.step_size
+                )
+                key = (station.code, int(start), int(stop))
+                self._window_availability[key] = self.accepts(
+                    station, float(end - self.times[start])
+                )
+        self._window_availability_ready = True
+
+    def _accepts_window(
+        self,
+        station: GroundStation,
+        first: int,
+        length: float,
+        *,
+        apply_scheduling: bool,
+    ) -> bool:
+        """Draw network availability once for the complete physical window.
+
+        A daily query can clip the same window twice. Its boundary does not
+        create a new station opportunity or change an earlier access decision.
+        """
+        if not self.continuous_contacts or not apply_scheduling:
+            return self.accepts(station, length, apply_scheduling=apply_scheduling)
+        self._prepare_window_availability()
+        boundaries = self._visibility_windows.get(station.code)
+        if boundaries is None:
+            return False
+        starts, ends = boundaries
+        window = int(np.searchsorted(starts, first, side="right")) - 1
+        assert window >= 0 and first < ends[window]
+        start, stop = int(starts[window]), int(ends[window])
+        key = (station.code, start, stop)
+        return self._window_availability[key]
+
     def _build_pass(
         self,
         station: GroundStation,
@@ -1243,8 +1299,8 @@ class PassTimes(ContactScheduler):
             passstart, passend = booked_window
         passlen = passend - passstart
 
-        if booked_window is None and not self.accepts(
-            station, passlen, apply_scheduling=apply_scheduling
+        if booked_window is None and not self._accepts_window(
+            station, global_start_idx, passlen, apply_scheduling=apply_scheduling
         ):
             return None
 

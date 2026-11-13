@@ -155,6 +155,91 @@ def test_day_by_day_scheduling_keeps_the_link_across_midnight(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("accepted", [True, False])
+def test_daily_queries_do_not_redraw_a_physical_visibility_window(
+    monkeypatch, accepted
+):
+    config, _ = network(monkeypatch, windows=[(0, 2881)], rates=[10], hours=48)
+    config.ground_stations.stations[0].schedule_probability = 0.5
+    draws = []
+
+    def draw(self):
+        draws.append(1)
+        return (
+            (0.25 if accepted else 0.75)
+            if len(draws) == 1
+            else (0.75 if accepted else 0.25)
+        )
+
+    monkeypatch.setattr(PassTimes, "_random", draw)
+    scheduler = PassTimes(config)
+    scheduler.get(2025, 305)
+    scheduler.get(2025, 306)
+    assert len(draws) == 1
+    if accepted:
+        assert [(p.begin, p.end, p.station) for p in scheduler.passes] == [
+            (T0, T0 + 48 * 3600, "S0")
+        ]
+    else:
+        assert scheduler.passes == []
+
+
+def test_new_schedulers_make_their_own_window_availability_draw(monkeypatch):
+    config, _ = network(monkeypatch, windows=[(0, 2881)], rates=[10], hours=48)
+    config.ground_stations.stations[0].schedule_probability = 0.5
+    draws = []
+
+    def draw(self):
+        draws.append(1)
+        return 0.25 if len(draws) == 1 else 0.75
+
+    monkeypatch.setattr(PassTimes, "_random", draw)
+    first = PassTimes(config)
+    first.predict()
+    first.get(2025, 306)
+    second = PassTimes(config)
+    second.predict()
+    assert len(draws) == 2
+    assert first.passes
+    assert not second.passes
+
+
+def test_daily_and_whole_prediction_use_the_same_seeded_window_decisions(monkeypatch):
+    config, _ = network(
+        monkeypatch, windows=[(0, 2881), (0, 2881)], rates=[10, 5], hours=48
+    )
+    for station in config.ground_stations.stations:
+        station.schedule_probability = 0.5
+    original = PassTimes.station_geometry
+
+    def geometry(self, station, startindex, endindex, *, out=None):
+        result = original(self, station, startindex, endindex, out=out)
+        if station.code == "S0":
+            indices = np.arange(startindex, endindex)
+            result.elevation_deg[(indices >= 700) & (indices < 1700)] = -90
+        return result
+
+    draws = {}
+
+    def draw(self):
+        index = draws.setdefault(self, 0)
+        draws[self] += 1
+        return (0.25, 0.25, 0.75)[index]
+
+    monkeypatch.setattr(PassTimes, "station_geometry", geometry)
+    monkeypatch.setattr(PassTimes, "_random", draw)
+    whole = PassTimes(config)
+    whole.predict()
+    daily = PassTimes(config)
+    daily.get(2025, 305)
+    daily.get(2025, 306)
+    end = T0 + 48 * 3600
+    assert [(p.begin, min(p.end, end), p.station) for p in daily.passes] == [
+        (p.begin, min(p.end, end), p.station) for p in whole.passes
+    ]
+    assert draws[whole] == draws[daily] == 3
+
+
 def test_handover_selects_best_current_rate_and_ties_are_stable(monkeypatch):
     config, steps = network(
         monkeypatch, windows=[(0, 20), (10, 121), (10, 121)], rates=[5, 10, 20]
