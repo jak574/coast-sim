@@ -1348,7 +1348,9 @@ class CpSatScheduler(LocalSearchScheduler):
     2. The horizon is split into ``chunk`` lengths. For each, CP-SAT chooses
        snapshots and their order within its share of ``solver_time_limit``,
        leaving room and exposure for the rest of the priority-first plan to
-       follow. The order is decoded with the scheduler's exact checks and kept
+       follow. Empty time before that continuation permits up to one chunk of
+       lookahead, so a flexible visit can move after a closing window. The
+       order is decoded with the scheduler's exact checks and kept
        if it scores at least as well as the priority-first plan's snapshots
        for the chunk; otherwise, or if the solver finds no solution in time,
        those are kept instead.
@@ -1370,7 +1372,8 @@ class CpSatScheduler(LocalSearchScheduler):
             same point every run whatever the machine's speed; the wall-clock
             limit still applies. Set it, with ``workers`` 1 and ``seed``, for
             runs that repeat exactly.
-        chunk: Length of each chunk the horizon is solved in.
+        chunk: Spacing of the horizon's solve boundaries. Each model may use
+            up to one further chunk of empty time before the incumbent tail.
         workers: CP-SAT search workers.
         max_candidates: Candidate snapshots in a chunk's model at most, those
             of the priority-first plan first, then in priority order.
@@ -1675,7 +1678,7 @@ class CpSatScheduler(LocalSearchScheduler):
         finish: float,
         continuation: _Decoded | None = None,
     ) -> list[_Snapshot] | None:
-        """Choose and order the snapshots that start in one chunk.
+        """Choose snapshots in a chunk and its bounded empty-time lookahead.
 
         ``budget`` is the most exposure the chunk may collect for each request,
         every snapshot ends by ``finish``. ``continuation`` is the incumbent
@@ -1685,11 +1688,16 @@ class CpSatScheduler(LocalSearchScheduler):
         origin_time, origin_attitude = self._chunk_origin(state)
         if origin_time >= chunk_end:
             return []
+        # A flexible visit can move into otherwise empty time after this
+        # chunk, making room for a visit whose visibility closes first. Look
+        # ahead by at most one chunk, stopping before the unchanged tail.
+        # Exact whole-horizon decoding still decides whether to keep it.
+        search_end = min(finish, chunk_end + self.chunk.total_seconds())
         planned = self._planned_in_chunk(hints, origin_time, chunk_end)
         tasks = [
             _Task(None, (origin_attitude, origin_attitude), (0, 0)),
-            *self._pass_tasks(state, origin_time, chunk_end),
-            *self._candidates(state, budget, origin_time, chunk_end, finish, planned),
+            *self._pass_tasks(state, origin_time, search_end),
+            *self._candidates(state, budget, origin_time, search_end, finish, planned),
         ]
         if not any(task.optional for task in tasks):
             return []
@@ -1701,7 +1709,7 @@ class CpSatScheduler(LocalSearchScheduler):
                 # the solver try, and the decoder, which is exact, decides.
                 others = [int(x) for i, x in enumerate(slews[:, k]) if i != k]
                 task.slew_in = min(others) if others else 0
-        chunk_seconds = int(round(chunk_end - origin_time))
+        chunk_seconds = int(round(search_end - origin_time))
         recorder = [
             self._chunk_recorder(
                 state, continuation, origin_time, ledger, offset, tasks
