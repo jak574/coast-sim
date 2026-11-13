@@ -250,9 +250,9 @@ class LocalSearchScheduler(PriorityScheduler):
         self.score = 0.0
         """Objective of the returned plan."""
         self.incumbent_score: float | None = None
-        """Whole-horizon value of the best independently feasible supplied seed."""
+        """Whole-horizon value of the best feasible seed or priority baseline."""
         self.incumbent_retained = False
-        """Whether the supplied incumbent beat the finalized search result."""
+        """Whether the complete incumbent beat the finalized search result."""
         self._initial_volumes: tuple[RecorderAmount, ...] = ()
         self._initial_energy: tuple[Additions, ...] = ()
 
@@ -284,6 +284,17 @@ class LocalSearchScheduler(PriorityScheduler):
                 trial.score, trial.timeline, incumbent.score, incumbent.timeline
             ):
                 incumbent = trial
+
+        if incumbent is not None and incumbent.dumps:
+            # Seed firings are advisory. Their old layout can split a newly
+            # available whole visit even when that visit needs no such firing.
+            # Compare an independent priority layout before constraining search
+            # to the selected incumbent's support reservations.
+            priority = self._priority_incumbent()
+            if priority is not None and priority._improves(
+                priority.score, priority.timeline, incumbent.score, incumbent.timeline
+            ):
+                incumbent = priority
 
         if incumbent is not None:
             # Give the optimizer the feasible incumbent's support layout too;
@@ -355,11 +366,11 @@ class LocalSearchScheduler(PriorityScheduler):
         self._initial_energy = initial.energy
         self._delivered = initial.programs
         self.log.add_events(incumbent.log.events)
-        self._log(self.ctx.ustart, "Retained the complete feasible supplied incumbent")
+        self._log(self.ctx.ustart, "Retained the complete feasible incumbent")
         return self.plan
 
-    def _complete_seed(self, seed: Plan) -> "LocalSearchScheduler | None":
-        """Recheck a seed under the current state without running an optimizer."""
+    def _independent_trial(self) -> "LocalSearchScheduler":
+        """Isolate a contender's reservations and momentum-repair state."""
         trial = copy(self)
         trial.log = DITLLog()
         trial._momentum_cache = {}
@@ -372,6 +383,23 @@ class LocalSearchScheduler(PriorityScheduler):
         trial._kept_visits = {}
         trial._kept_visit_windows = {}
         trial._resume_from = None
+        return trial
+
+    def _priority_incumbent(self) -> "LocalSearchScheduler | None":
+        """Build priority support independently, retaining mandatory activities."""
+        trial = self._independent_trial()
+        trial.dumps = []
+        try:
+            plan = PriorityScheduler._plan_within_momentum(
+                trial, lambda: PriorityScheduler._plan_once(trial)
+            )
+        except ActivitySchedulingError:
+            return None
+        return self._complete_seed(plan)
+
+    def _complete_seed(self, seed: Plan) -> "LocalSearchScheduler | None":
+        """Recheck a seed under the current state without running an optimizer."""
+        trial = self._independent_trial()
         trial.dumps = trial._seed_dumps(seed)
         try:
             trial._reserve_fixed()
