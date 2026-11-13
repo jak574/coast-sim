@@ -91,6 +91,9 @@ def test_complete_incumbent_comparison_ignores_a_rebuilt_tail_score(
         return result
 
     monkeypatch.setattr(scheduler, "_plan_within_momentum", finalized_proposal)
+    # Isolate the supplied-seed/final-proposal comparison from the separately
+    # tested independent priority contender.
+    monkeypatch.setattr(scheduler, "_priority_incumbent", lambda: None)
     monkeypatch.setattr(scheduler, "_refine_settled_plan", lambda plan: plan)
     monkeypatch.setattr(scheduler, "_augment_selected_plan", lambda plan: plan)
     plan = scheduler.schedule()
@@ -167,6 +170,8 @@ def test_a_failed_proposals_reservation_keeps_a_separately_feasible_seed(
         )
 
     monkeypatch.setattr(scheduler, "_plan_within_momentum", unreachable_proposal)
+    # This case specifically proves recovery to the supplied seed's support.
+    monkeypatch.setattr(scheduler, "_priority_incumbent", lambda: None)
     plan = scheduler.schedule()
     assert scheduler.incumbent_retained
     assert any(entry.obsid == target.obsid for entry in plan)
