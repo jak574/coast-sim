@@ -16,11 +16,13 @@ Development Setup
       git clone https://github.com/YOUR-USERNAME/coast-sim.git
       cd coast-sim
 
-3. Install in development mode with dev dependencies:
+3. Install in development mode with the ``dev`` and ``test`` extras. The
+   ``dev`` extra installs ruff, mypy and pre-commit, and the ``test`` extra
+   installs pytest:
 
    .. code-block:: bash
 
-      pip install -e ".[dev]"
+      pip install -e ".[dev,test]"
 
 4. Set up pre-commit hooks:
 
@@ -67,7 +69,7 @@ Pytest runs the tests:
    pytest --cov=conops tests/
 
    # Run specific test file
-   pytest tests/test_battery.py
+   pytest tests/battery/test_battery.py
 
 Pre-commit
 ~~~~~~~~~~
@@ -75,11 +77,21 @@ Pre-commit
 The pre-commit hooks run automatically before each commit. They do the
 following:
 
+* Linting and import sorting with ruff
 * Code formatting with ruff
-* Linting checks
-* Type checking with mypy
-* Trailing whitespace removal
-* YAML/JSON validation
+* Syntax upgrades for Python 3.10 and later with pyupgrade
+* Strict type checking of ``conops/`` with mypy
+* Trailing whitespace removal and end-of-file fixing
+* YAML syntax validation
+* Validation of ``pyproject.toml`` and of the GitHub workflow files
+* A check that blocks commits made directly to the main branch
+* A check that blocks added files larger than 500 kB
+* Clearing the output of Jupyter notebooks
+* Building the documentation with Sphinx, when a file under ``docs/`` changes
+
+The mypy, notebook and Sphinx hooks run the tools installed in your
+environment. The notebook hook needs the ``jupyter`` extra, and the Sphinx
+hook needs the ``docs`` extra.
 
 Making Changes
 --------------
@@ -133,13 +145,16 @@ Example test structure:
 
 .. code-block:: python
 
+   from conops import Battery
+
+
    def test_battery_discharge():
        """Test that battery discharges correctly over time."""
-       battery = Battery(capacity=100.0, initial_charge=100.0)
-       battery.discharge(10.0, duration=3600)  # 10W for 1 hour
+       battery = Battery(watthour=100.0)  # starts fully charged
+       battery.drain(10.0, 3600)  # 10 W for 1 hour
 
        expected_charge = 100.0 - (10.0 * 3600 / 3600)
-       assert abs(battery.current_charge - expected_charge) < 1e-6
+       assert abs(battery.charge_level - expected_charge) < 1e-6
 
 Documentation
 -------------

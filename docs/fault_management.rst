@@ -37,8 +37,8 @@ Create and configure fault management using the ``FaultManagement`` class. A par
 
    # Add parameter thresholds
    fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
-    fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
-    fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
+   fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
+   fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
 
    # Add mode-specific threshold (power usage only checked in SCIENCE mode)
    fm.add_threshold(
@@ -129,7 +129,7 @@ The following example configures thresholds with ACS modes:
        yellow=0.8,
        red=0.95,
        direction="above",
-       acs_modes=[ACSMode.SCIENCE, ACSMode.SLEW, ACSMode.SETTLE]
+       acs_modes=[ACSMode.SCIENCE, ACSMode.SLEWING, ACSMode.PASS]
    )
 
 Valid threshold names are the predefined ``Housekeeping`` fields. Commonly used fields include:
@@ -216,8 +216,8 @@ Creating Fault Management
 
    # Add thresholds programmatically
    fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
-    fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
-    fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
+   fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
+   fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
 
    # Add mode-specific threshold
    fm.add_threshold(
@@ -296,7 +296,7 @@ Get accumulated time in each fault state and constraint violation statistics:
    #         "red_seconds": 0.0,
    #         "current": "yellow"
    #     },
-    #     "power_usage": {
+   #     "power_usage": {
    #         "yellow_seconds": 45.0,
    #         "red_seconds": 30.0,
    #         "current": "red"
@@ -307,7 +307,7 @@ Get accumulated time in each fault state and constraint violation statistics:
    # {
    #     "spacecraft_sun_limit": {
    #         "in_violation": False,
-   #         "total_violation_seconds": 180.0,
+   #         "red_seconds": 180.0,
    #         "continuous_violation_seconds": 0.0
    #     }
    # }
@@ -343,12 +343,13 @@ When fault management is configured, the ``QueueDITL`` simulation loop runs it a
    from conops.ditl import QueueDITL
 
    # Load config with fault_management section
-   config = MissionConfig.from_json("config_with_fault_management.json")
+   config = MissionConfig.from_json_file("config_with_fault_management.json")
 
    # Initialize defaults (adds battery_level, recorder_fill_fraction,
    # star_tracker_functional_count, star_tracker_hard_violations,
-   # radiator_hard_violations, and telescope_hard_violations
-   # thresholds if not already present)
+   # ppt_unavailable, radiator_hard_violations, and
+   # telescope_hard_violations thresholds if not already present).
+   # MissionConfig also runs this itself when it is created or loaded.
    config.init_fault_management_defaults()
 
    # Run simulation
@@ -398,7 +399,14 @@ The ACS exposes two separate star-tracker telemetry fields:
 ``init_fault_management_defaults()`` adds both thresholds automatically when star trackers are configured.
 You can override the hard-violation policy, for example to trigger a safehold instead of just alerting.
 To do so, add your threshold before calling ``init_fault_management_defaults()``. The default is skipped
-when a threshold of that name already exists:
+when a threshold of that name already exists.
+
+The ``star_tracker_functional_count`` threshold is treated differently. You can supply your own threshold
+of that name to set its limits and ACS modes, but ``init_fault_management_defaults()`` always sets its
+``triggers_safe_mode`` to ``False``. A value of ``True`` that you supply is overridden, so this threshold
+alerts and never triggers safe mode.
+
+The following example overrides the hard-violation policy:
 
 .. code-block:: python
 
@@ -469,22 +477,20 @@ enable a safehold, add your own threshold before calling ``init_fault_management
 Example Configuration File
 ---------------------------
 
-Complete example configurations are available in:
+A complete example configuration is available in ``examples/example_config.json``, and the same
+configuration with comments in ``examples/example_config.yaml``. Its ``fault_management`` section has both
+thresholds and a red limit constraint.
 
-* ``examples/example_config_with_fault_management.json`` - Threshold-based monitoring
-* ``examples/example_config_with_red_limits.json`` - Red limit constraints
-* ``examples/example_spacecraft_red_limits.py`` - Programmatic red limit configuration
+The thresholds include:
 
-The threshold-based example demonstrates monitoring of:
+* ``battery_level``: Warning at 60%, critical at 50%
+* ``recorder_fill_fraction``: Warning at 70%, critical at 90%
+* ``star_tracker_functional_count``, ``star_tracker_hard_violations`` and ``radiator_hard_violations``:
+  monitoring only, with ``triggers_safe_mode`` set to ``false``
 
-* ``battery_level``: Warning at 50%, critical at 40%
-* ``power_usage``: Warning at 450W, critical at 500W
-* ``recorder_fill_fraction``: Warning at 80%, critical at 95%
+The red limit constraint is:
 
-The red limit example demonstrates spacecraft health and safety constraints:
-
-* ``spacecraft_sun_limit``: 30° exclusion zone, 5 minute threshold (thermal protection)
-* ``spacecraft_earth_limit``: 10° exclusion zone, 10 minute threshold (stray light protection)
+* ``Sun Avoidance``: 20° exclusion zone around the Sun outside umbral eclipse, 2 minute threshold
 
 Event Log
 ---------
@@ -492,10 +498,12 @@ Event Log
 All significant fault management transitions are recorded in an in-memory ``events`` list on ``FaultManagementRun``. Each entry is a ``FaultEvent`` with these fields:
 
 * ``utime``: Unix timestamp (float)
-* ``event_type``: One of ``threshold_transition``, ``constraint_violation``, ``safe_mode_trigger``
+* ``event_type``: One of ``threshold_transition``, ``constraint_violation``, ``operational_fault``, ``safe_mode_trigger``, ``momentum_capacity``
 * ``name``: Threshold / constraint name
 * ``cause``: Human-readable description
 * ``metadata``: Optional contextual dict. The keys vary by event and may include the current value, thresholds, RA/Dec and violation durations.
+
+An ``operational_fault`` event records a discrete failure that the simulation reports, such as a failure of attitude execution. It has no threshold, and it requests safe mode under the same ``safe_mode_on_red`` policy as a RED threshold. A ``momentum_capacity`` event records the reaction wheels reaching their momentum capacity, and a second one records the wheels being unloaded. It does not request safe mode (see :doc:`momentum`).
 
 Example:
 
@@ -571,7 +579,7 @@ To monitor a new metric, first add it to the ``Housekeeping`` model in code, and
 API Reference
 -------------
 
-See :mod:`conops.fault_management` for detailed API documentation.
+See :mod:`conops.config.fault_management` for detailed API documentation.
 
 Best Practices
 --------------

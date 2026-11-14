@@ -1,9 +1,7 @@
-conops.schedulers.priority\_scheduler
-=====================================
+conops.schedulers.priority_scheduler
+====================================
 
 .. automodule:: conops.schedulers.priority_scheduler
-   :members: PriorityScheduler
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

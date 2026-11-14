@@ -22,6 +22,7 @@ constraints before launch.
    communications
    data_management
    fault_management
+   predictive_idle_safety
    attitude_execution
    attitude_exports
    momentum

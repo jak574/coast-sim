@@ -1,8 +1,7 @@
-conops.ditl.ditl\_log
-=====================
+conops.ditl.ditl_log
+====================
 
 .. automodule:: conops.ditl.ditl_log
-   :members: DITLLog
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

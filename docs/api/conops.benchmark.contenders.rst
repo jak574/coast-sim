@@ -2,6 +2,6 @@ conops.benchmark.contenders
 ===========================
 
 .. automodule:: conops.benchmark.contenders
-   :members: dispatch, planned, rolling, configured
+   :members:
    :undoc-members:
-   :no-index:
+   :show-inheritance:

@@ -32,7 +32,7 @@ The ``TOORequest`` class is a Pydantic model that represents a pending TOO. It h
        obsid=1000001,        # Unique observation ID
        ra=180.0,             # Right ascension (degrees)
        dec=45.0,             # Declination (degrees)
-       merit=10000.0,        # Priority (higher = more urgent)
+       merit=10000.0,        # Base merit, ranked like that of any other target
        exptime=3600,         # Exposure time (seconds)
        name="GRB 250101A",   # Human-readable name
        submit_time=0.0,      # When TOO becomes active (Unix timestamp)
@@ -87,14 +87,16 @@ Use the ``submit_too()`` method on ``QueueDITL`` to register a TOO:
    # Run the simulation
    ditl.calc()
 
+``submit_too()`` also accepts ``deadline`` and ``interrupt``, which have the meanings given for the ``TOORequest`` attributes above, and two further optional arguments. ``science_data`` gives the science data that observing the TOO generates, keyed by instrument name. ``instrument_modes`` names the instruments the TOO uses and the mode each one is in. When it is omitted, every instrument that defines modes is in ``SCIENCE``. A ``TOORequest`` that has already been built can be passed as the only argument in place of these fields.
+
 Scheduled TOOs
 ^^^^^^^^^^^^^^
 
-A TOO can be scheduled to become active at a future time by passing ``submit_time``, either as a Unix timestamp or as a ``datetime``. This is useful for simulating a TOO alert that arrives in the middle of an observation:
+A TOO can be scheduled to become active at a future time by passing ``submit_time``, either as a ``datetime`` or as a Unix timestamp. A ``datetime`` without a time zone is taken as UTC. This is useful for simulating a TOO alert that arrives in the middle of an observation:
 
 .. code-block:: python
 
-   # TOO becomes active 2 hours into the simulation (using Unix timestamp)
+   # TOO becomes active 2 hours into the simulation (using a datetime)
    ditl.submit_too(
        obsid=1000002,
        ra=90.0,
@@ -102,11 +104,10 @@ A TOO can be scheduled to become active at a future time by passing ``submit_tim
        merit=10000.0,
        exptime=1800,
        name="GRB 250101B",
-       submit_time=ditl.ustart + 7200,  # 2 hours after start
+       submit_time=begin + timedelta(hours=2),  # 2 hours after start
    )
 
-   # Or use a datetime object
-   from datetime import datetime
+   # Or use a Unix timestamp
    ditl.submit_too(
        obsid=1000003,
        ra=270.0,
@@ -114,8 +115,10 @@ A TOO can be scheduled to become active at a future time by passing ``submit_tim
        merit=10000.0,
        exptime=2400,
        name="GW Event",
-       submit_time=datetime(2025, 1, 1, 6, 0, 0),
+       submit_time=1735711200.0,  # 2025-01-01 06:00:00 UTC
    )
+
+Work out these times from the ``begin`` time passed to ``QueueDITL``. The ``ditl.ustart`` attribute is zero until ``calc()`` runs, so it cannot be used to place a TOO before the run.
 
 How TOO Interrupts Work
 -----------------------
@@ -140,15 +143,19 @@ The last condition needs one qualification when a long-range allocation is in us
 
 If no observation is in progress, nothing is interrupted. The TOO is already in the queue and is considered at the next selection.
 
+Nothing is interrupted while the observation in progress is a step of a sequence visit either. The TOOs stay in the queue and are considered at the next selection.
+
 Carrying out the interrupt
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 When a TOO is a candidate, the simulation proceeds as follows:
 
-1. The queue selects again, without commanding anything yet. The interrupted target is held out of this one selection so that it cannot simply resume. The queue chooses the highest-ranked target, which is normally the TOO. The value of that target as admitted, taken over the collection that was admitted, must beat the frozen value of the current observation. If it does not, the observation runs on and the TOO waits for the next selection.
+1. The queue selects again, without commanding anything yet. Only the candidate TOOs are offered to this one selection. Every other target, including the interrupted one, is held out of it. The queue chooses the highest-ranked candidate and applies its normal admission checks. The value of that TOO as admitted, taken over the collection that was admitted, must beat the frozen value of the current observation. If it does not, that TOO is set aside for the next selection and the queue selects again from the remaining candidates. If no candidate is admitted with a value that beats the frozen value, the observation runs on and the TOOs wait for the next selection.
 2. The current observation is terminated. It is recorded as preempted and does not count as completed. The slew to the replacement is commanded.
-3. The TOO is marked as executed if it was the target selected.
+3. The TOO that was selected is marked as executed.
 4. The events and the merit breakdown of the TOO are logged.
+
+The interrupt is not always carried out in the step that decides it. If the current observation has cleanup or handoff time after its collection, stopping the collection now can leave cleanup that runs past the current step. The simulation then admits the replacement for the first step after that cleanup ends, with the same comparison of values and over the same candidates. If a replacement is admitted, the simulation commits to it and stops the collection of the current observation in time for its cleanup to finish by that step. At that step the current observation is terminated and the slew to the replacement is commanded. A change in merit between the two steps does not cancel the handover. The handover is dropped only if something else, such as a protective operation, ends the observation first.
 
 Preventing Interrupts
 ^^^^^^^^^^^^^^^^^^^^^
@@ -205,8 +212,8 @@ The example below uses the second approach:
        merit=1000.0,
        exptime=3600,
        name="GRB 250101A",
-       submit_time=ditl.ustart + 3600,
-       deadline=ditl.ustart + 3600 + 4 * 3600,  # photons on target within 4 hours
+       submit_time=begin + timedelta(hours=1),
+       deadline=begin + timedelta(hours=5),  # photons on target within 4 hours
    )
 
 Accessing TOO Status
@@ -241,12 +248,12 @@ TOO events are logged to ``ditl.log`` with the event type ``"TOO"``. You can fil
    too_events = [e for e in ditl.log.events if e.event_type == "TOO"]
 
    for event in too_events:
-       print(f"{event.time_formatted}: {event.description}")
+       print(f"{event.timestamp}: {event.description}")
 
 Example output::
 
-   2025-01-01T02:30:00Z: Queued TOO GRB 250101A (obsid=1000001, merit=10000.0)
-   2025-01-01T02:34:56Z: TOO interrupt: GRB 250101A (obsid=1000001, base=10000 value=10000.000 score=10000.000) preempting current observation (value=500)
+   2025-01-01T02:30:00+00:00: Queued TOO GRB 250101A (obsid=1000001, merit=10000.0)
+   2025-01-01T02:35:00+00:00: TOO interrupt: GRB 250101A (obsid=1000001, base=10000 value=10000.000 score=10000.000) preempting current observation (value=500)
 
 Complete Example
 ----------------
@@ -265,6 +272,7 @@ The example below creates a queue of three normal targets, submits a TOO that ar
    begin = datetime(2025, 6, 1, 0, 0, 0)
    end = begin + timedelta(days=1)
    ephem = TLEEphemeris(tle="examples/example.tle", begin=begin, end=end)
+   cfg.constraint.ephem = ephem  # the ephemeris is not stored in the file
 
    # Create queue with normal targets
    queue = Queue(config=cfg, ephem=ephem)
@@ -283,7 +291,7 @@ The example below creates a queue of three normal targets, submits a TOO that ar
        merit=10000.0,
        exptime=7200,
        name="GRB 250601A",
-       submit_time=ditl.ustart + 10800,  # 3 hours
+       submit_time=begin + timedelta(hours=3),
    )
 
    # Run simulation
@@ -295,7 +303,7 @@ The example below creates a queue of three normal targets, submits a TOO that ar
    # Find the TOO observation in the plan
    too_obs = [p for p in ditl.plan if p.obsid == 9999]
    if too_obs:
-       print(f"TOO observed for {too_obs[0].exposure_time} seconds")
+       print(f"TOO observed for {too_obs[0].exposure} seconds")
 
    # Check which observation was preempted
    too_events = [e for e in ditl.log.events if e.event_type == "TOO"]

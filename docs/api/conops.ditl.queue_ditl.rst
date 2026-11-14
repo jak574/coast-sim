@@ -1,9 +1,7 @@
-conops.ditl.queue\_ditl
-========================
+conops.ditl.queue_ditl
+======================
 
 .. automodule:: conops.ditl.queue_ditl
-   :members: QueueDITL, TOORequest
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

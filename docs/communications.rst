@@ -322,12 +322,11 @@ Python Mission Configuration
 
 .. code-block:: python
 
+   from conops.common import AntennaType, Polarization
    from conops.config import (
        CommunicationsSystem,
        BandCapability,
        AntennaPointing,
-       AntennaType,
-       Polarization,
    )
 
    # LEO satellite with body-fixed -X S-band (using defaults)
@@ -363,7 +362,7 @@ Python Mission Configuration
    )
 
    # Check communication capability
-   if xband_comms.can_communicate(pointing_error=2.5):
+   if xband_comms.can_communicate(pointing_error_deg=2.5):
        rate = xband_comms.get_downlink_rate("X")
        print(f"Can downlink at {rate} Mbps")
 
@@ -427,7 +426,7 @@ The communications system is set as the ``communications`` field of the spacecra
 
 .. code-block:: python
 
-   from conops.config import SpacecraftBus, CommunicationsSystem
+   from conops.config import BandCapability, CommunicationsSystem, SpacecraftBus
 
    bus = SpacecraftBus(
        name="My Spacecraft",
@@ -442,14 +441,9 @@ The communications system is set as the ``communications`` field of the spacecra
 Common Configurations
 ---------------------
 
-See ``examples/example_communications_configs.json`` for complete examples:
-
-* LEO S-band (body-fixed -X)
-* High-rate X-band (gimbaled)
-* Dual S/X-band
-* Deep space Ka-band
-* CubeSat omnidirectional
-* Zenith-pointing inter-satellite link
+The notebook ``examples/Antenna_Types_Example.ipynb`` is a complete example. It
+runs the same day in low Earth orbit with a body-fixed, an omnidirectional and a
+gimbaled antenna, and compares the passes and the downlink of the three.
 
 Use Cases
 ---------
@@ -530,11 +524,25 @@ Example workflow:
 
 .. code-block:: python
 
-   from conops import QueueDITL, MissionConfig
-   from conops.ephemeris import TLEEphemeris
+   from datetime import datetime, timedelta
 
-   # Run DITL with ground station passes
-   ditl = QueueDITL(config=config, ephem=ephem, queue=queue)
+   from rust_ephem import TLEEphemeris
+
+   from conops import MissionConfig, QueueDITL
+   from conops.common import ObsType
+
+   # A configuration with ground stations and a body-fixed antenna
+   config = MissionConfig.from_json_file("my_config.json")
+
+   begin = datetime(2025, 11, 1)
+   end = begin + timedelta(days=1)
+   ephem = TLEEphemeris(
+       begin=begin, end=end, step_size=60, tle="examples/example.tle"
+   )
+
+   # Run DITL with ground station passes. Targets are added to ditl.queue
+   # as in the quickstart.
+   ditl = QueueDITL(config=config, ephem=ephem)
    ditl.calc()
 
    # Export plan with GSP entries
@@ -583,6 +591,6 @@ For detailed API documentation, see:
 * :py:class:`conops.config.BandCapability`
 * :py:class:`conops.config.CommunicationsSystem`
 * :py:class:`conops.config.AntennaPointing`
-* :py:class:`conops.config.AntennaType`
-* :py:class:`conops.config.Polarization`
+* :py:class:`conops.common.AntennaType`
+* :py:class:`conops.common.Polarization`
 * :py:class:`conops.config.GroundStation`

@@ -1,8 +1,7 @@
-conops.config.fault\_management
-===============================
+conops.config.fault_management
+==============================
 
 .. automodule:: conops.config.fault_management
-   :members: FaultConstraint, FaultEvent, FaultManagement, FaultManagementRun, FaultState, FaultThreshold
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

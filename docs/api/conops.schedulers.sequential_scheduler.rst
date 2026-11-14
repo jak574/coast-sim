@@ -1,9 +1,7 @@
-conops.schedulers.sequential\_scheduler
-=======================================
+conops.schedulers.sequential_scheduler
+======================================
 
 .. automodule:: conops.schedulers.sequential_scheduler
-   :members: SequentialScheduler
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

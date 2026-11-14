@@ -1,9 +1,7 @@
-conops.schedulers.local\_search\_scheduler
-==========================================
+conops.schedulers.local_search_scheduler
+========================================
 
 .. automodule:: conops.schedulers.local_search_scheduler
-   :members: LocalSearchScheduler
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

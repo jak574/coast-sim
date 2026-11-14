@@ -10,7 +10,7 @@ A Python module for simulating Concept of Operations (ConOps) for space telescop
 
 COASTSim is a simulation framework that models and analyzes the operational behavior of space-based astronomical observatories. Mission planners and engineers can use it to simulate Day-In-The-Life (DITL) scenarios, evaluate spacecraft performance, optimize observation schedules, and validate operational constraints before launch.
 
-The package is organized into submodules: `common` (utilities), `config` (configuration), `ditl` (simulation), `schedulers` (planning), `targets` (observations), and `simulation` (core components).
+The package is organized into submodules: `common` (utilities), `config` (configuration), `ditl` (simulation), `schedulers` (planning), `targets` (observations), `simulation` (core components), `benchmark` (scheduler comparison), and `visualization` (plotting).
 
 ## Key Features
 
@@ -55,11 +55,11 @@ The example below loads a configuration, computes an orbit ephemeris from a TLE 
 
 ```python
 from datetime import datetime, timedelta
-from conops import Config, QueueDITL
+from conops import MissionConfig, QueueDITL
 from rust_ephem import TLEEphemeris
 
 # Load configuration
-config = Config.from_json_file("example_config.json")
+config = MissionConfig.from_json_file("example_config.json")
 
 # Set simulation period
 begin = datetime(2025, 11, 1)
@@ -69,13 +69,10 @@ end = begin + timedelta(days=1)
 ephemeris = TLEEphemeris(tle="example.tle", begin=begin, end=end)
 
 # Run DITL simulation
-ditl = QueueDITL(config=config)
+ditl = QueueDITL(config=config, ephem=ephemeris, begin=begin, end=end)
 # Field-of-regard telemetry is optional and disabled by default.
 # Enable it only when needed:
-# ditl = QueueDITL(config=config, calculate_field_of_regard=True)
-ditl.ephem = ephemeris
-ditl.begin = begin
-ditl.end = end
+# ditl = QueueDITL(config=config, ephem=ephemeris, calculate_field_of_regard=True)
 ditl.calc()
 
 # Export the executed plan. When available, attitude and orbit-state sidecars
@@ -107,7 +104,7 @@ Create a JSON configuration file defining your spacecraft parameters:
     "solar_panel": {
         "panels": [...]
     },
-    "instruments": {
+    "payload": {
         "instruments": [...]
     }
 }
@@ -151,12 +148,12 @@ Visualization settings are held in the `VisualizationConfig` Pydantic model (`co
 ### Example — customizing fonts and colors
 
 ```python
-from conops import Config, QueueDITL
+from conops import MissionConfig, QueueDITL
 from conops.visualization import plot_ditl_telemetry, plot_acs_mode_distribution
 from datetime import datetime, timedelta
 from rust_ephem import TLEEphemeris
 
-cfg = Config.from_json_file("examples/example_config.json")
+cfg = MissionConfig.from_json_file("examples/example_config.json")
 cfg.visualization.font_family = "Helvetica"
 cfg.visualization.title_font_size = 14
 cfg.visualization.mode_colors["SAA"] = "#800080"  # purple
@@ -164,8 +161,7 @@ cfg.visualization.mode_colors["SAA"] = "#800080"  # purple
 begin = datetime.utcnow()
 end = begin + timedelta(days=1)
 ephem = TLEEphemeris(tle="examples/example.tle", begin=begin, end=end)
-ditl = QueueDITL(config=cfg)
-ditl.ephem = ephem
+ditl = QueueDITL(config=cfg, ephem=ephem)
 ditl.calc()
 
 # Render using the resolved visualization config
@@ -228,59 +224,142 @@ This module holds shared utilities, enums (ACSMode, ChargeState, ACSCommandType)
 
 ## Module Structure
 
+The tree below lists the modules of the package. The `__init__.py` files of the subpackages and the private helper modules are left out.
+
 ```text
 conops/
-├── __init__.py              # Package initialization and exports
-├── _version.py              # Version information
-├── common/                  # Shared utilities and common functions
-│   ├── __init__.py
-│   ├── common.py
-│   ├── enums.py
-│   └── vector.py
-├── config/                  # Configuration management
-│   ├── __init__.py
-│   ├── config.py
-│   ├── constants.py
-│   ├── constraint.py
-│   ├── battery.py
-│   ├── solar_panel.py
-│   ├── instrument.py
-│   └── spacecraft_bus.py
-├── ditl/                    # Day-In-The-Life simulation
-│   ├── __init__.py
-│   ├── ditl.py
-│   ├── ditl_mixin.py
-│   └── queue_ditl.py
-├── benchmark/               # Comparing scheduling modes on a scenario
-│   ├── __init__.py
-│   ├── contenders.py
-│   ├── harness.py
-│   ├── metrics.py
-│   └── scenarios.py
-├── schedulers/              # Scheduling algorithms
-│   ├── __init__.py
-│   ├── context.py
-│   ├── priority_scheduler.py
-│   ├── sequential_scheduler.py
-│   ├── queue_scheduler.py
-│   ├── scheduler.py         # DumbScheduler alias
-│   └── queue_scheduler.py   # DumbQueueScheduler alias
-├── targets/                 # Target management and planning
-│   ├── __init__.py
-│   ├── pointing.py
-│   ├── plan.py
-│   ├── plan_entry.py
-│   └── target_queue.py
-└── simulation/              # Core simulation components
-    ├── __init__.py
-    ├── acs.py
-    ├── acs_command.py
-    ├── emergency_charging.py
-    ├── passes.py
-    ├── roll.py
-    ├── saa.py
-    ├── slew.py
-    └── ephemeris.py
+├── __init__.py                  # Package exports
+├── common/                      # Shared utilities
+│   ├── common.py                # Time conversion and naming helpers
+│   ├── enums.py                 # ACSMode, ChargeState, ACSCommandType and other enums
+│   ├── ephemeris.py             # Cached snapshots of ephemeris position arrays
+│   ├── geodesy.py               # Earth rotation, WGS84 ellipsoid and geodetic coordinates
+│   ├── motion.py                # Rest-to-rest slew kinematics
+│   ├── numerics.py              # Shared numerical tolerances
+│   ├── quaternion_curve.py      # Rate-continuous quaternion Hermite curves
+│   └── vector.py                # Vector, attitude and quaternion mathematics
+├── config/                      # Pydantic configuration models
+│   ├── config.py                # MissionConfig, the top-level configuration
+│   ├── acs.py                   # Attitude control system
+│   ├── activity_attitude.py     # Attitude requests for scheduled holds and thruster dumps
+│   ├── battery.py               # Battery
+│   ├── communications.py        # Antennas and communication links
+│   ├── constants.py             # Physical and default constants
+│   ├── constraint.py            # Pointing constraints
+│   ├── data_generator.py        # Science and housekeeping data generation
+│   ├── data_storage.py          # Named data stores and data/link routing
+│   ├── fault_management.py      # Fault thresholds and responses
+│   ├── frame.py                 # Spacecraft body frame
+│   ├── geometry.py              # Panel geometry and shadowing between components
+│   ├── groundstation.py         # Ground stations
+│   ├── instrument.py            # Instruments, telescopes and the payload
+│   ├── momentum.py              # Stored momentum and thruster dumps
+│   ├── observation_categories.py  # Observation categories by obsid range
+│   ├── observation_groups.py    # Named groups of targets
+│   ├── observation_timing.py    # Setup, cleanup and handoff time in an observation
+│   ├── power.py                 # Power draw
+│   ├── radiator.py              # Radiators and their thermal exposure
+│   ├── recorder.py              # Onboard recorder
+│   ├── scheduler.py             # Scheduling mode and scheduler settings
+│   ├── solar_panel.py           # Solar panels
+│   ├── spacecraft_bus.py        # Spacecraft bus
+│   ├── star_tracker.py          # Star trackers and their constraints
+│   ├── surfaces.py              # Spacecraft surfaces for the environmental torques
+│   ├── targets.py               # Target selection settings
+│   ├── thermal.py               # Heaters
+│   └── visualization.py         # Plot fonts, colors and sizes
+├── data/
+│   └── saa_polygon.csv          # South Atlantic Anomaly boundary
+├── ditl/                        # Day-In-The-Life simulation
+│   ├── ditl.py                  # DITL, which executes a plan built in advance
+│   ├── queue_ditl.py            # QueueDITL, which dispatches targets from a queue
+│   ├── rolling_ditl.py          # RollingHorizonDITL, which rebuilds its plan during the run
+│   ├── ditl_mixin.py            # Behavior shared by the DITL classes
+│   ├── factory.py               # create_ditl, which builds the DITL the configuration selects
+│   ├── ditl_event.py            # A single logged event
+│   ├── ditl_log.py              # Event log
+│   ├── ditl_log_store.py        # SQLite store for event logs
+│   ├── ditl_stats.py            # Run statistics and summary tables
+│   ├── plan_validator.py        # Comparison of a plan with the telemetry of its execution
+│   └── telemetry.py             # Telemetry recorded during a run
+├── schedulers/                  # Scheduling algorithms
+│   ├── protocols.py             # Scheduler and DispatchPolicy interfaces
+│   ├── registry.py              # Scheduler classes by configured kind
+│   ├── context.py               # SchedulingContext, the spacecraft model a scheduler plans against
+│   ├── priority_scheduler.py    # PriorityScheduler
+│   ├── sequential_scheduler.py  # SequentialScheduler
+│   ├── queue_scheduler.py       # QueueScheduler and the old name DumbQueueScheduler
+│   ├── scheduler.py             # The old name DumbScheduler
+│   ├── local_search_scheduler.py  # LocalSearchScheduler
+│   ├── cpsat_scheduler.py       # CpSatScheduler (needs OR-Tools)
+│   ├── allocator.py             # LongRangeAllocator, which assigns requests to days
+│   ├── consumable.py            # Base ledger for quantities that build up over a plan
+│   ├── battery.py               # Battery ledger
+│   ├── recorder.py              # Recorder ledger
+│   └── momentum.py              # Stored-momentum forecast for a plan
+├── simulation/                  # Core simulation components
+│   ├── acs.py                   # Attitude control system state machine
+│   ├── acs_command.py           # ACS commands
+│   ├── attitude.py              # Attitude executor and trajectories
+│   ├── slew.py                  # Slew model
+│   ├── slew_requirements.py     # Slew requirement classes
+│   ├── roll.py                  # Roll angle selection
+│   ├── passes.py                # Ground station passes and contact tracking
+│   ├── contact_schedule.py      # Ground station booking rules
+│   ├── coverage.py              # Usable network links
+│   ├── saa.py                   # South Atlantic Anomaly
+│   ├── emergency_charging.py    # Emergency battery charging
+│   ├── activity_charging.py     # Battery forecast for scheduled holds
+│   ├── safe_hold.py             # Power and attitude selection for holds and SAFE mode
+│   ├── idle_safety.py           # Predictive safety check for inertial holds
+│   ├── momentum.py              # Stored momentum from environmental torques
+│   ├── momentum_budget.py       # Momentum prediction and execution guard
+│   ├── momentum_planning.py     # Momentum check when admitting observations
+│   ├── atmosphere.py            # Atmospheric density for drag
+│   └── geomagnetic.py           # Geomagnetic field
+├── targets/                     # Targets and plans
+│   ├── pointing.py              # Pointing, a single target
+│   ├── target_queue.py          # TargetQueue (also exported as Queue)
+│   ├── merit.py                 # Figure of merit for ranking targets
+│   ├── program.py               # Program, the full set of requests for a run
+│   ├── too.py                   # Targets of Opportunity
+│   ├── activity.py              # Scheduled activities with no science
+│   ├── sequence.py              # Observation sequences
+│   ├── visits.py                # Visit windows
+│   ├── track.py                 # Tracks of moving targets
+│   ├── plan.py                  # Plan, with JSON save and load
+│   ├── plan_entry.py            # PlanEntry
+│   ├── entries.py               # Typed plan entries for serialization
+│   ├── plan_metadata.py         # Plan metadata, including ephemeris provenance
+│   ├── plan_schema.py           # Compatibility names for the old plan schema module
+│   └── attitude_export.py       # Executed attitude sampling and export files
+├── benchmark/                   # Comparing scheduling modes on a scenario
+│   ├── scenarios.py             # Standard scenarios
+│   ├── contenders.py            # Scheduling modes to compare
+│   ├── harness.py               # Benchmark runner and results
+│   ├── metrics.py               # Science measures computed from a run
+│   └── reproducibility.py       # Run-to-run comparison across processes
+└── visualization/               # Plotting
+    ├── contacts.py              # Link spans for timeline plots
+    ├── mpl/                     # Matplotlib plots
+    │   ├── acs_mode_analysis.py
+    │   ├── data_management.py
+    │   ├── ditl_telemetry.py
+    │   ├── ditl_timeline.py
+    │   ├── fault_management.py
+    │   ├── globe_pointing.py
+    │   ├── radiator_telemetry.py
+    │   └── sky_pointing.py
+    └── plotly/                  # Plotly plots
+        ├── acs_mode_analysis.py
+        ├── data_management.py
+        ├── ditl_telemetry.py
+        ├── ditl_timeline.py
+        ├── fault_management.py
+        ├── globe_pointing.py
+        ├── radiator_telemetry.py
+        ├── sky_pointing.py
+        └── spacecraft_3d.py
 ```
 
 ## Testing
@@ -351,9 +430,11 @@ For more information, see `docs/README.md`.
 ### Setup Development Environment
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,test]"
 pre-commit install
 ```
+
+The `dev` extra installs ruff, mypy and pre-commit. The `test` extra installs pytest, `pytest-cov` and `pytest-xdist`.
 
 ### Code Quality
 

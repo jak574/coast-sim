@@ -10,7 +10,7 @@ Features
 
 The plot is a full-sky Mollweide projection with the following drawn on it:
 
-* All planned targets, marked on the sky and color-coded by priority.
+* All planned targets, marked on the sky and color-coded by observation category.
 * The constraint regions, as shaded areas for the Sun, Moon, Earth, Anti-Sun, and
   Solar Panel constraints.
 * A highlighted marker at the direction in which the spacecraft is currently pointing.
@@ -26,13 +26,22 @@ Quick Start
 
 .. code-block:: python
 
-   from conops import DITL, MissionConfig
+   from datetime import datetime, timedelta
+
+   from conops import MissionConfig, QueueDITL
    from conops.visualization import plot_sky_pointing
    import matplotlib.pyplot as plt
+   from rust_ephem import TLEEphemeris
 
-   # Load configuration and create DITL
-   config = MissionConfig.from_json('config.json')
-   ditl = DITL(config)
+   # Load configuration and compute the orbit ephemeris
+   config = MissionConfig.from_json_file('config.json')
+   begin = datetime(2025, 11, 1)
+   end = begin + timedelta(days=1)
+   ephemeris = TLEEphemeris(tle='spacecraft.tle', begin=begin, end=end)
+
+   # Create DITL and add a target to its queue
+   ditl = QueueDITL(config=config, ephem=ephemeris)
+   ditl.queue.add(ra=266, dec=-29, exptime=1000, obsid=10000)
 
    # Run simulation
    ditl.calc()
@@ -72,7 +81,8 @@ backend first.
 .. code-block:: python
 
    # Full interactive plot with controls
-   %matplotlib widget  # For Jupyter notebooks
+   # For Jupyter notebooks:
+   %matplotlib widget
 
    fig, ax, controller = plot_sky_pointing(
        ditl,
@@ -129,32 +139,39 @@ Observation Markers
 ^^^^^^^^^^^^^^^^^^^
 
 Scheduled observations are shown as colored circles. The color and size of a
-circle depend on the target's observation ID (obsid):
+circle both depend on the target's observation ID (obsid), in different ways.
+
+The color is the color of the target's observation category. The categories
+come from the ``observation_categories`` argument, or from
+``ditl.config.observation_categories`` when that argument is omitted. A target
+whose obsid falls in no category takes the default color of the categories.
+The target being observed at the displayed time is drawn in the full category
+color, and all other targets are drawn in a lightened shade of it. The legend
+lists the categories that appear in the plot. The frames and movies written by
+``save_sky_pointing_frames()`` and ``save_sky_pointing_movie()`` do not use the
+categories, and draw every target in blue.
+
+The size is set by obsid thresholds:
 
 .. list-table::
    :header-rows: 1
 
-   * - Color
-     - Size
+   * - Marker area (points squared)
      - Targets
-   * - Red
-     - Large
-     - TOO/GRB targets (obsid >= 1,000,000)
-   * - Orange
-     - Medium
-     - High priority targets (obsid >= 20,000)
-   * - Yellow
-     - Medium
-     - Survey targets (obsid >= 10,000)
-   * - Light Blue
-     - Small
-     - Standard targets
+   * - 100
+     - obsid >= 1,000,000
+   * - 60
+     - obsid >= 20,000
+   * - 40
+     - All other targets
 
 Current Pointing
 ^^^^^^^^^^^^^^^^
 
-A red star marks the current spacecraft pointing direction. A red circle around
-it emphasizes the current pointing region.
+A star marks the current spacecraft pointing direction, with a circle of
+5 degrees radius around it. Both take the color of the current ACS mode, from
+``mode_colors`` in the visualization configuration. They are red for a mode
+that has no entry there.
 
 Constraint Regions
 ^^^^^^^^^^^^^^^^^^
@@ -236,12 +253,24 @@ Publication Figures
 
 .. code-block:: python
 
+   from conops.visualization.mpl.sky_pointing import SkyPointingController
+
    # High-quality static image at specific time
-   fig, ax, ctrl = plot_sky_pointing(
+   fig, ax, _ = plot_sky_pointing(
        ditl,
        show_controls=False,
        n_grid_points=150,
        figsize=(12, 8),
+   )
+
+   # plot_sky_pointing() returns no controller when show_controls=False,
+   # so create one for the same figure
+   ctrl = SkyPointingController(
+       ditl=ditl,
+       fig=fig,
+       ax=ax,
+       n_grid_points=150,
+       observation_categories=ditl.config.observation_categories,
    )
 
    # Update to specific time
@@ -282,18 +311,28 @@ the DITL simulation. The function supports multiple output formats:
 
 The function takes these parameters:
 
-* ``fps`` is the number of frames per second in the output movie. It controls the
-  playback speed.
-* ``frame_interval`` uses every Nth time step. A value of 1 uses all frames.
-* ``n_grid_points`` is the grid resolution for the constraint regions. A lower
-  value renders faster.
-* ``dpi`` is the output resolution. A higher value gives better quality and a
-  larger file.
-* ``codec`` is the video codec for MP4/AVI (e.g., 'h264', 'mpeg4').
-* ``bitrate`` is the video bitrate in kbps. A higher value gives better quality
-  and a larger file.
+* ``ditl`` is the DITL or QueueDITL object, which must have run ``calc()`` first.
+* ``output_file`` is the name of the movie file. Its extension (``.mp4``,
+  ``.avi`` or ``.gif``) selects the format.
+* ``fps`` is the number of frames per second in the output movie (default: 10).
+  It controls the playback speed.
+* ``figsize`` is the figure size (width, height) in inches (default: (14, 8)).
+* ``n_grid_points`` is the grid resolution for the constraint regions
+  (default: 50). A lower value renders faster.
+* ``frame_interval`` uses every Nth time step (default: 1). A value of 1 uses
+  all frames.
+* ``dpi`` is the output resolution (default: 100). A higher value gives better
+  quality and a larger file.
+* ``codec`` is the video codec for MP4/AVI (default: 'h264'; 'mpeg4' is another
+  example).
+* ``bitrate`` is the video bitrate in kbps (default: 1800). A higher value gives
+  better quality and a larger file.
+* ``config`` is an optional ``VisualizationConfig``. When it is omitted, the
+  function uses ``ditl.config.visualization``.
 * ``show_progress`` chooses whether to display a progress bar using tqdm
   (default: True).
+
+The function returns the path of the saved movie file.
 
 The output formats have these requirements:
 
@@ -311,17 +350,21 @@ plot_sky_pointing()
 This is the main visualization function. It takes these parameters:
 
 * ``ditl``: DITL or QueueDITL object (must have run ``calc()`` first)
-* ``figsize``: tuple, figure size (width, height) in inches
+* ``figsize``: tuple, figure size (width, height) in inches (default: (14, 8))
 * ``n_grid_points``: int, resolution for constraint calculations (default: 100)
 * ``show_controls``: bool, add interactive controls (default: True)
 * ``time_step_seconds``: float, time step for controls (default: ditl.step_size)
 * ``constraint_alpha``: float, transparency for constraint regions (default: 0.3)
+* ``config``: VisualizationConfig, fonts and colors (default:
+  ``ditl.config.visualization``)
+* ``observation_categories``: ObservationCategories, marker colors (default:
+  ``ditl.config.observation_categories``)
 
 It returns three values:
 
 * ``fig``: matplotlib Figure
 * ``ax``: matplotlib Axes (mollweide projection)
-* ``controller``: SkyPointingController or None
+* ``controller``: SkyPointingController, or None when ``show_controls=False``
 
 save_sky_pointing_frames()
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -330,9 +373,11 @@ This function saves individual frames to disk. It takes these parameters:
 
 * ``ditl``: DITL or QueueDITL object
 * ``output_dir``: str, directory to save frames
-* ``figsize``: tuple, figure size
-* ``n_grid_points``: int, constraint resolution
+* ``figsize``: tuple, figure size (default: (14, 8))
+* ``n_grid_points``: int, constraint resolution (default: 50)
 * ``frame_interval``: int, save every Nth frame (default: 1)
+* ``config``: VisualizationConfig, fonts and colors (default: None, which
+  draws the frames with the built-in default fonts and mode colors)
 
 It returns the list of saved file paths.
 
@@ -378,7 +423,7 @@ See Also
 
 * ``plot_ditl_timeline()`` gives a timeline view of spacecraft operations.
 * ``plot_ditl_telemetry()`` gives telemetry plots (power, battery, etc.).
-* The example notebook is ``examples/Example_Sky_Pointing.ipynb``.
+* The example notebook ``examples/Quick_DITL_Example.ipynb`` includes a sky pointing plot.
 
 API Documentation
 -----------------
@@ -388,4 +433,4 @@ For detailed API documentation, see:
 * :py:func:`conops.visualization.plot_sky_pointing`
 * :py:func:`conops.visualization.save_sky_pointing_frames`
 * :py:func:`conops.visualization.save_sky_pointing_movie`
-* :py:class:`conops.visualization.SkyPointingController`
+* :py:class:`conops.visualization.mpl.sky_pointing.SkyPointingController`

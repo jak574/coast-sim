@@ -29,24 +29,30 @@ The notebook follows this outline:
 .. code-block:: python
 
    # Configure spacecraft components
-   battery = Battery(capacity=100.0, initial_charge=80.0)
+   battery = Battery(watthour=1000, max_depth_of_discharge=0.4)
    solar_panels = SolarPanelSet(panels=[...])
-   acs = AttitudeControlSystem(slew_acceleration=0.01)
+   acs = AttitudeControlSystem(
+       settle_time=10, max_slew_rate=0.3, slew_acceleration=0.01
+   )
 
    # Set up instruments
-   instruments = InstrumentSet(instruments=[...])
+   payload = Payload(instruments=[...])
 
    # Create spacecraft bus
-   bus = SpacecraftBus(
+   spacecraft_bus = SpacecraftBus(power_draw=power_draw, attitude_control=acs)
+
+   # Collect the components in a mission configuration
+   config = MissionConfig(
+       spacecraft_bus=spacecraft_bus,
+       solar_panel=solar_panels,
+       payload=payload,
        battery=battery,
-       solar_panels=solar_panels,
-       acs=acs,
-       instruments=instruments
+       constraint=constraint,
    )
 
    # Run simulation
-   ditl = QueueDITL(config, ephemeris, begin, end)
-   ditl.run()
+   ditl = QueueDITL(config=config, ephem=ephemeris, begin=begin, end=end, queue=queue)
+   ditl.calc()
 
 Example DITL from JSON
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -66,19 +72,36 @@ testing different configurations:
 .. code-block:: python
 
    from conops import MissionConfig, QueueDITL
+   from conops.visualization import plot_ditl_telemetry
 
-   # Load everything from configuration
-   config = MissionConfig.from_json("example_config.json")
+   # Load the spacecraft from the configuration file
+   config = MissionConfig.from_json_file("example_config.json")
+   # The ephemeris is not stored in the file, so set it here
+   config.constraint.ephem = ephemeris
 
    # Run simulation
-   ditl = QueueDITL(config, ephemeris, begin, end)
-   ditl.run()
+   ditl = QueueDITL(config=config, ephem=ephemeris, begin=begin, end=end, queue=queue)
+   ditl.calc()
 
    # Analyze
-   ditl.plot()
+   plot_ditl_telemetry(ditl)
+
+Quick DITL Example
+~~~~~~~~~~~~~~~~~~
+
+**Location**: ``examples/Quick_DITL_Example.ipynb``
+
+This notebook runs a basic DITL simulation that starts from the default
+``MissionConfig``:
+
+* Adding a telescope, star trackers and a radiator to the default configuration
+* Filling the queue of a ``QueueDITL`` with random targets and running it
+* Sky pointing, timeline, ACS mode and data management plots
+* The event log and the fault management timeline
+* Saving the plan to disk
 
 Ground-Station Passes with Three Antenna Types
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Location**: ``examples/Antenna_Types_Example.ipynb``
 
@@ -248,6 +271,10 @@ This is a complete JSON configuration file that shows all available parameters:
 * Ground station network
 * Constraint definitions
 
+Load it with ``MissionConfig.from_json_file``. The same directory holds
+``examples/example_config.yaml``, an annotated configuration file in YAML, which is
+loaded with ``MissionConfig.from_yaml_file``.
+
 Example TLE File
 ~~~~~~~~~~~~~~~~
 
@@ -321,21 +348,28 @@ Configure and simulate onboard data storage, generation, and downlink:
 
 .. code-block:: python
 
+   from datetime import datetime
+
+   from rust_ephem import TLEEphemeris
+
+   from conops import MissionConfig, QueueDITL
    from conops.config import (
+       BandCapability,
        DataGeneration,
-       ScienceData,
+       GroundStation,
+       GroundStationRegistry,
        Instrument,
-       Payload,
        OnboardRecorder,
-       Antenna,
-       GroundStation
+       Payload,
+       PowerDraw,
+       ScienceData,
    )
 
    # Configure instruments with data generation
    camera = Instrument(
        name="High-Res Camera",
        power_draw=PowerDraw(nominal_power=100),
-       data_generation=DataGeneration(science=ScienceData(rate_gbps=0.5))  # 0.5 Gbps while collecting
+       data_generation=DataGeneration(science=ScienceData(rate_gbps=0.0005))  # 0.5 Mbps while collecting
    )
 
    spectrometer = Instrument(
@@ -360,15 +394,13 @@ Configure and simulate onboard data storage, generation, and downlink:
        name="Ground Station",
        latitude_deg=35.0,
        longitude_deg=-106.0,
-       antenna=Antenna(
-           bands=["X"],
-           max_data_rate_mbps=100.0  # 100 Mbps downlink
-       )
+       bands=[
+           BandCapability(band="X", downlink_rate_mbps=100.0)  # 100 Mbps downlink
+       ],
    )
 
    # Add to configuration
    config = MissionConfig(
-       spacecraft_bus=spacecraft_bus,
        payload=payload,
        recorder=recorder,
        ground_stations=GroundStationRegistry(stations=[station]),
@@ -376,7 +408,15 @@ Configure and simulate onboard data storage, generation, and downlink:
    )
 
    # Run simulation - data automatically generated and downlinked
-   ditl = DITL(config=config)
+   ephem = TLEEphemeris(
+       tle="examples/example.tle",
+       begin=datetime(2025, 12, 1),
+       end=datetime(2025, 12, 2),
+       step_size=60,
+   )
+   ditl = QueueDITL(config=config, ephem=ephem)
+   for i in range(50):
+       ditl.queue.add(ra=7.2 * i, dec=-60.0 + 2.4 * i, obsid=10000 + i, exptime=1000)
    ditl.calc()
 
    # Analyze data management

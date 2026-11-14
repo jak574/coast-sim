@@ -16,8 +16,10 @@ The reserve is the time the scheduler sets aside for the spacecraft to turn
 away from an attitude. It is the duration of a conservative 180-degree,
 rest-to-rest maneuver. The maneuver is evaluated with the smallest configured
 acceleration and rate semiaxes, or with the scalar limits when no per-axis
-limits are configured. The reserve also includes the fixed settling time and
-two scheduler timesteps.
+limits are configured. The reserve also includes the settling time and two
+ephemeris timesteps. The settling time is `settle_time`, or the longest settle
+in the thermal settling table when one is configured. `QueueDITL` steps at the
+ephemeris cadence, so an ephemeris timestep is also a scheduler timestep.
 
 The reserve bounds the duration of a direct quaternion slew. It does not
 guarantee that a route exists that avoids every obstacle on the way.
