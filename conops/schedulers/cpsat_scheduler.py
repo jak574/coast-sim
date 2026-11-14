@@ -25,12 +25,15 @@ executes as planned.
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, NamedTuple
+from itertools import pairwise
+from typing import TYPE_CHECKING, Generic, NamedTuple, TypeVar
 
 import numpy as np
 import numpy.typing as npt
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..common import ACSMode
 from ..common.ephemeris import sun_direction
@@ -39,10 +42,18 @@ from ..config import MissionConfig
 from ..config.acs import scheduled_slew_time
 from ..simulation.slew import Slew
 from ..targets import Plan, Pointing
+from ..targets.merit import MeritModel
 from ..targets.plan_entry import (
     extra_data_gb,
     instrument_modes_of,
     snapshot_min_seconds,
+)
+from ._delivered_shares import (
+    DeliveredShares,
+    NodeScience,
+    ProgramCounters,
+    add_delivered_shares,
+    hint_delivered_shares,
 )
 from .context import Attitude
 from .local_search_scheduler import (
@@ -80,6 +91,95 @@ _EMPTY_CHAIN = 2
 """A chain of the start and end sentinels alone holds no task."""
 
 
+_SOLVED_CHUNK_CACHE_SIZE = 16
+"""Compiled model snapshots retained per solve-cache store at most."""
+
+_URGENCY_SCALE = 1_000_000
+"""Native urgency-factor resolution; exact decoding retains full float values."""
+
+
+_ModelT = TypeVar("_ModelT")
+_SolverT = TypeVar("_SolverT")
+
+
+class _SolvedChunk(BaseModel, Generic[_ModelT, _SolverT]):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    shape: tuple[int, int, str]
+    model: _ModelT
+    solver: _SolverT
+    status: str
+    statistics: str | None = None
+    text: str | None = None
+
+
+class _SolveProbe(NamedTuple):
+    shape: tuple[int, int, str]
+    statistics: str | None
+    text: str | None
+
+
+class _ChunkSolveCache:
+    """Reuse completed deterministic searches of exactly equal compiled models.
+
+    Cheap shape/statistics filters avoid serializing every model. A hit still
+    requires complete model-text equality, including hints and all resource
+    coefficients. Owned snapshots prevent a later model edit changing what a
+    cached response solved. Responses are read through the current chunk's
+    variables and target mapping, then decoded against the current exact state.
+    """
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[
+            int, _SolvedChunk[cp_model.CpModel, cp_model.CpSolver]
+        ] = OrderedDict()
+        self._serial = 0
+        self.hits = 0
+
+    def find(
+        self, model: cp_model.CpModel, parameters: str
+    ) -> tuple[_SolvedChunk[cp_model.CpModel, cp_model.CpSolver] | None, _SolveProbe]:
+        shape = (len(model.proto.variables), len(model.proto.constraints), parameters)
+        statistics = text = None
+        for number, cached in reversed(self._entries.items()):
+            if cached.shape != shape:
+                continue
+            if statistics is None:
+                statistics = model.model_stats()
+            if cached.statistics is None:
+                cached.statistics = cached.model.model_stats()
+            if cached.statistics != statistics:
+                continue
+            if text is None:
+                text = str(model.proto)
+            if cached.text is None:
+                cached.text = str(cached.model.proto)
+            if cached.text == text:
+                self._entries.move_to_end(number)
+                self.hits += 1
+                return cached, _SolveProbe(shape, statistics, text)
+        return None, _SolveProbe(shape, statistics, text)
+
+    def remember(
+        self,
+        probe: _SolveProbe,
+        model: cp_model.CpModel,
+        solver: cp_model.CpSolver,
+        status: str,
+    ) -> None:
+        self._serial += 1
+        self._entries[self._serial] = _SolvedChunk(
+            shape=probe.shape,
+            model=model.clone(),
+            solver=solver,
+            status=status,
+            statistics=probe.statistics,
+            text=probe.text,
+        )
+        if len(self._entries) > _SOLVED_CHUNK_CACHE_SIZE:
+            self._entries.popitem(last=False)
+
+
 def _kb_up(gb: float) -> int:
     return int(np.ceil(gb * _KB_PER_GB - _KB_ROUNDING))
 
@@ -104,7 +204,7 @@ class _ChunkRecorder(NamedTuple):
     """Housekeeping generated in each segment, outside its contact."""
     fixed: list[int]
     """Science already planned in each segment: before the chunk, locked, or
-    the priority-first plan's snapshots after it."""
+    the selected incumbent's snapshots after it."""
     removal: list[int]
     """What the contact at the start of each segment downlinks."""
     removal_accrual: list[int]
@@ -142,7 +242,7 @@ class _ChunkBattery(NamedTuple):
     """Watts drawn by a slew in each run."""
     fixed: list[int]
     """Energy already planned in each run, relative to its idle power: the
-    passes in the chunk and the priority-first plan's snapshots after it."""
+    passes in the chunk and the selected incumbent's snapshots after it."""
     limit: int
     """The planning limit as a deficit."""
     floor: int
@@ -183,6 +283,20 @@ class _TaskHint(NamedTuple):
     """Its collection length, in seconds."""
 
 
+class _Urgency(BaseModel):
+    """Shared-model urgency at each possible decision step of a candidate."""
+
+    model_config = ConfigDict(frozen=True)
+
+    values: tuple[int, ...] = Field(min_length=1)
+    scale: int = Field(ge=1)
+    weight: float = Field(ge=0, allow_inf_nan=False)
+    earliness: float = 0.0
+    offset: float = 0.0
+    late: float = 0.0
+    allocation_bonus: float = 0.0
+
+
 class _Task:
     """One node of a chunk's circuit: the start, a pass, or a candidate snapshot.
 
@@ -213,7 +327,11 @@ class _Task:
         power: tuple[int, int] = (0, 0),
         spans: Sequence[_Span] = (),
         visit: int | None = None,
+        urgency: _Urgency | None = None,
+        inherits_attitude: bool = False,
+        science: NodeScience | None = None,
     ) -> None:
+        self.science = science or NodeScience()
         self.key = key
         """Request and window of a candidate snapshot; None for the start and passes."""
         self.visit = visit
@@ -240,6 +358,9 @@ class _Task:
         """The candidate's visibility window, in which its slew starts."""
         self.rate = rate
         """Objective value per second of collection."""
+        self.urgency = urgency
+        self.inherits_attitude = inherits_attitude
+        """A mandatory hold keeps its predecessor's departure attitude."""
         self.earliness = earliness
         """For a request with a deadline, value per second of collection lost
         per second the arrival is delayed."""
@@ -301,6 +422,7 @@ class _ChunkModel:
         battery: _ChunkBattery | None = None,
         allocated_left: Mapping[SpanKey, float] | None = None,
         category_caps: Sequence[tuple[int, Sequence[int]]] = (),
+        delivered_history: Mapping[str, float] | None = None,
     ) -> None:
         from ortools.sat.python import cp_model
 
@@ -321,6 +443,7 @@ class _ChunkModel:
         self.allocated_left = dict(allocated_left or {})
         """Allocated seconds left in each span the candidates can use."""
         model = self.model = cp_model.CpModel()
+        self.solve_cache: _ChunkSolveCache | None = None
         self.arrival = [
             model.new_int_var(*task.arrival, f"arrival{k}")
             for k, task in enumerate(tasks)
@@ -335,13 +458,23 @@ class _ChunkModel:
             model.new_int_var(*task.collection, f"collection{k}")
             for k, task in enumerate(tasks)
         ]
-        # The step each task's slew starts on; chunks start on a step.
+        # New snapshots depart on a simulation step. Fixed tasks already have
+        # settled times and can need an ingress between those steps.
         last_step = max(task.arrival[1] for task in tasks) // step
         self.slew_step = [
             model.new_int_var(0, last_step, f"slew{k}") for k in range(len(tasks))
         ]
+        self.fixed_slew_start = {
+            k: model.new_int_var(0, task.arrival[1], f"fixed_slew_start{k}")
+            for k, task in enumerate(tasks)
+            if not task.optional
+        }
+        for k, start in self.fixed_slew_start.items():
+            # Keep the step index as a projection for hints and diagnostics;
+            # it does not round the fixed task's actual departure time.
+            model.add_division_equality(self.slew_step[k], start, step)
         self.last_slew = step * last_step
-        """The latest any slew can start."""
+        """The latest a new snapshot's step-aligned slew can start."""
         self._add_snapshot_constraints()
         self._add_cadence_spacing()
         self._add_visit_windows()
@@ -351,6 +484,23 @@ class _ChunkModel:
             self._add_recorder(recorder) for recorder in self.recorders
         ]
         self._add_battery()
+        self.delivered_variables: ProgramCounters[cp_model.IntVar] | None = None
+        if delivered_history is not None and any(
+            task.science.allocated_share is not None and task.science.weight > 0
+            for task in tasks
+        ):
+            self.delivered_variables = add_delivered_shares(
+                self,
+                DeliveredShares(
+                    history=dict(delivered_history),
+                    nodes=tuple(task.science for task in tasks),
+                ),
+            )
+
+    def _slew_start(self, k: int) -> cp_model.LinearExpr:
+        """Departure seconds, quantized only for a new snapshot."""
+        start = self.fixed_slew_start.get(k)
+        return start if start is not None else self.step * self.slew_step[k]
 
     def _add_snapshot_constraints(self) -> None:
         """Keep each present candidate in its window and the chunk."""
@@ -423,7 +573,13 @@ class _ChunkModel:
         self.lateness: dict[int, cp_model.IntVar] = {}
         """Its overdue seconds, up to a cadence; its discount follows this."""
         for visits in visits_of.values():
-            if self.tasks[visits[0]].late == 0.0:
+            changing_value = any(
+                self.tasks[k].science.weight > 0
+                and self.tasks[k].science.allocated_share is not None
+                and self.tasks[k].science.late > 0
+                for k in visits
+            )
+            if self.tasks[visits[0]].late == 0.0 and not changing_value:
                 continue
             for n, j in enumerate(visits):
                 task = self.tasks[j]
@@ -456,9 +612,28 @@ class _ChunkModel:
                 overdue = self.overdue[j] = model.new_int_var(
                     0, self.last_slew, f"overdue{j}"
                 )
-                model.add(overdue >= step * self.slew_step[j] - due).only_enforce_if(
-                    self.present[j]
-                )
+                if changing_value:
+                    # Delivered shares can make a zero origin rate positive,
+                    # or reverse its sign. A lower bound on lateness alone
+                    # would then let the solver invent delay to improve value.
+                    due_bound = max(
+                        [
+                            task.due,
+                            *(_next_due_bound(self.tasks[i]) for i in visits[:n]),
+                        ]
+                    )
+                    delay = model.new_int_var(
+                        -due_bound, self.last_slew, f"cadence_delay{j}"
+                    )
+                    model.add(delay == step * self.slew_step[j] - due).only_enforce_if(
+                        self.present[j]
+                    )
+                    model.add(delay == 0).only_enforce_if(~self.present[j])
+                    model.add_max_equality(overdue, [0, delay])
+                else:
+                    model.add(
+                        overdue >= step * self.slew_step[j] - due
+                    ).only_enforce_if(self.present[j])
                 lateness = self.lateness[j] = model.new_int_var(
                     0, task.cadence, f"lateness{j}"
                 )
@@ -471,12 +646,18 @@ class _ChunkModel:
         straight after the first.
         """
         model, step, tasks = self.model, self.step, self.tasks
-        arrival, collection, slew_step = self.arrival, self.collection, self.slew_step
-        # The earliest step a slew can leave each task, and reach a candidate.
-        leaves = [_ceil(task.arrival[0] + task.shortest, step) for task in tasks]
+        arrival, collection = self.arrival, self.collection
+        # A fixed successor can depart as soon as its predecessor finishes.
+        leaves = [task.arrival[0] + task.shortest for task in tasks]
         opens = [_ceil(task.window[0], step) if task.optional else 0 for task in tasks]
         arcs: list[tuple[int, int, cp_model.LiteralT]] = []
         self.arc_literals: dict[tuple[int, int], cp_model.IntVar] = {}
+        self.inherited_pose = {
+            k: model.new_int_var(0, len(tasks) - 1, f"inherited_pose{k}")
+            for k, task in enumerate(tasks)
+            if task.inherits_attitude
+        }
+        self.inherited_slew: dict[tuple[int, int], cp_model.IntVar] = {}
         # A candidate left out loops to itself.
         for k, task in enumerate(self.tasks):
             if task.optional:
@@ -488,20 +669,50 @@ class _ChunkModel:
             for j in range(1, len(tasks)):
                 if i == j:
                     continue
-                earliest = max(leaves[i], opens[j])
-                if earliest + int(self.slews[i, j]) > tasks[j].arrival[1]:
+                after = tasks[j]
+                earliest = max(
+                    _ceil(leaves[i], step) if after.optional else leaves[i],
+                    opens[j],
+                )
+                if after.inherits_attitude:
+                    minimum_slew = 0
+                elif before.inherits_attitude:
+                    minimum_slew = int(self.slews[:, j].min())
+                else:
+                    minimum_slew = int(self.slews[i, j])
+                if earliest + minimum_slew > after.arrival[1]:
                     continue
                 literal = model.new_bool_var(f"arc{i}_{j}")
                 arcs.append((i, j, literal))
                 self.arc_literals[(i, j)] = literal
-                # The slew starts on the first step after the task before ends.
+                # An ingress waits for its predecessor to finish, without
+                # imposing a new-snapshot grid on an already settled task.
+                slew_start = self._slew_start(j)
                 model.add(
-                    step * slew_step[j]
+                    slew_start
                     >= arrival[i] + before.duration + before.overhead + collection[i]
                 ).only_enforce_if(literal)
-                model.add(
-                    arrival[j] >= step * slew_step[j] + int(self.slews[i, j])
-                ).only_enforce_if(literal)
+                if after.inherits_attitude:
+                    # A hold does not slew to a pose copied from an earlier
+                    # priority plan. Carry the last commanded pose through
+                    # consecutive inherited holds, then slew from that pose.
+                    pose = self.inherited_pose[i] if before.inherits_attitude else i
+                    model.add(self.inherited_pose[j] == pose).only_enforce_if(literal)
+                    model.add(arrival[j] >= slew_start).only_enforce_if(literal)
+                elif before.inherits_attitude:
+                    column = [int(seconds) for seconds in self.slews[:, j]]
+                    duration = model.new_int_var(
+                        min(column), max(column), f"inherited_slew{i}_{j}"
+                    )
+                    self.inherited_slew[(i, j)] = duration
+                    model.add_element(self.inherited_pose[i], column, duration)
+                    model.add(arrival[j] >= slew_start + duration).only_enforce_if(
+                        literal
+                    )
+                else:
+                    model.add(arrival[j] >= slew_start + minimum_slew).only_enforce_if(
+                        literal
+                    )
             if i != 0:
                 closing = model.new_bool_var(f"arc{i}_0")
                 arcs.append((i, 0, closing))
@@ -522,6 +733,8 @@ class _ChunkModel:
         """A cadence candidate's collection times its lateness, which its
         discount follows; 0 if it is absent."""
         totals: dict[int, list[cp_model.IntVar]] = {}
+        self.urgency_factor: dict[int, cp_model.IntVar] = {}
+        self.urgency_counted: dict[int, cp_model.IntVar] = {}
         objective = []
         for k, task in enumerate(self.tasks):
             obsid = task.obsid
@@ -534,7 +747,7 @@ class _ChunkModel:
             model.add(counted == 0).only_enforce_if(~present[k])
             totals.setdefault(obsid, []).append(counted)
             objective.append((task.rate + task.offset) * counted)
-            if task.earliness > 0.0:
+            if task.earliness != 0.0:
                 # A late snapshot loses a fraction of its value, so a shorter
                 # one loses less: the discount is per second of collection.
                 # counted is 0 when the candidate is absent, and so is this.
@@ -550,6 +763,7 @@ class _ChunkModel:
                 )
                 model.add_multiplication_equality(product, [counted, self.lateness[k]])
                 objective.append(-task.late * product)
+            objective.extend(self._urgency_objective(k, task, counted))
         for obsid, counted_list in totals.items():
             model.add(sum(counted_list) <= int(budget[obsid]))
         for cap, members in self.category_caps:
@@ -576,11 +790,64 @@ class _ChunkModel:
                 model.add(seconds == 0).only_enforce_if(~within)
                 used.setdefault(span.key, []).append(seconds)
                 objective.append(span.rate * seconds)
+                urgency = task.urgency
+                if urgency is not None and urgency.allocation_bonus != 0:
+                    valued = model.new_int_var(
+                        0, urgency.scale * task.collection[1], f"urgency_span{k}_{n}"
+                    )
+                    model.add_multiplication_equality(
+                        valued, [self.urgency_factor[k], seconds]
+                    )
+                    objective.append(
+                        urgency.weight
+                        * urgency.allocation_bonus
+                        / urgency.scale
+                        * valued
+                    )
         for key, seconds_list in used.items():
             left = self.allocated_left.get(key, 0.0)
             if np.isfinite(left):
                 model.add(sum(seconds_list) <= int(left))
         model.maximize(sum(objective))
+
+    def _urgency_objective(
+        self, k: int, task: _Task, counted: cp_model.IntVar
+    ) -> list[cp_model.LinearExpr]:
+        """Value collection at the chosen slew step, including absent candidates."""
+        urgency = task.urgency
+        if urgency is None:
+            return []
+        model = self.model
+        index = model.new_int_var(0, len(urgency.values) - 1, f"urgency_step{k}")
+        model.add(index == self.slew_step[k]).only_enforce_if(self.present[k])
+        model.add(index == 0).only_enforce_if(~self.present[k])
+        factor = self.urgency_factor[k] = model.new_int_var(
+            min(urgency.values), max(urgency.values), f"urgency_factor{k}"
+        )
+        model.add_element(index, urgency.values, factor)
+        valued = self.urgency_counted[k] = model.new_int_var(
+            0, urgency.scale * task.collection[1], f"urgency_collection{k}"
+        )
+        model.add_multiplication_equality(valued, [factor, counted])
+        rate = urgency.weight / urgency.scale
+        terms: list[cp_model.LinearExpr] = [rate * (1 + urgency.offset) * valued]
+        if urgency.earliness > 0:
+            delayed = model.new_int_var(
+                0,
+                urgency.scale * task.collection[1] * task.arrival[1],
+                f"urgency_delayed{k}",
+            )
+            model.add_multiplication_equality(delayed, [valued, self.arrival[k]])
+            terms.append(-rate * urgency.earliness * delayed)
+        if k in self.lateness and urgency.late > 0:
+            overdue = model.new_int_var(
+                0,
+                urgency.scale * task.collection[1] * task.cadence,
+                f"urgency_overdue{k}",
+            )
+            model.add_multiplication_equality(overdue, [valued, self.lateness[k]])
+            terms.append(-rate * urgency.late * overdue)
+        return terms
 
     def _add_recorder(
         self, recorder: _ChunkRecorder
@@ -820,13 +1087,37 @@ class _ChunkModel:
         chain = [0, *hint, 0]
         on_chain = set(zip(chain, chain[1:]))
         model.add_hint(self.empty, len(chain) == _EMPTY_CHAIN)
+        pose = 0
+        poses = {}
+        for k in hint:
+            if self.tasks[k].inherits_attitude:
+                poses[k] = pose
+            else:
+                pose = k
+        for k, variable in self.inherited_pose.items():
+            model.add_hint(variable, poses.get(k, 0))
+        for (i, j), variable in self.inherited_slew.items():
+            model.add_hint(variable, int(self.slews[poses.get(i, 0), j]))
         for (i, j), literal in self.arc_literals.items():
             model.add_hint(literal, (i, j) in on_chain)
+        fixed_starts = {0: 0}
+        free = 0
+        for k, task_hint in hint.items():
+            task = self.tasks[k]
+            if not task.optional:
+                fixed_starts[k] = free
+            free = (
+                task_hint.arrival + task.duration + task.overhead + task_hint.collection
+            )
         for k, task in enumerate(self.tasks):
             first_step = _ceil(task.window[0], self.step) // self.step
             slew_step, arrival, collection = hint.get(
                 k, (first_step, task.arrival[0], task.collection[0])
             )
+            if not task.optional:
+                start = fixed_starts.get(k, task.arrival[0])
+                model.add_hint(self.fixed_slew_start[k], start)
+                slew_step = start // self.step
             model.add_hint(self.slew_step[k], slew_step)
             model.add_hint(self.arrival[k], arrival)
             model.add_hint(self.collection[k], collection)
@@ -881,6 +1172,7 @@ class _ChunkModel:
         ):
             self._hint_recorder(hint, recorder, in_segment, carry)
         self._hint_battery(hint)
+        hint_delivered_shares(self, hint)
 
     def _hint_recorder(
         self,
@@ -953,20 +1245,46 @@ class _ChunkModel:
         # Presolve can take longer than a short time limit leaves a chunk, and
         # the search does better with the time.
         solver.parameters.cp_model_presolve = False
-        status = solver.solve(self.model)
-        status_name = solver.status_name(status)
-        if status == cp_model.MODEL_INVALID:
-            raise ValueError(
-                f"CP-SAT found the chunk's model invalid: {solver.solution_info()}"
-            )
-        ended = search_ending(
-            status_name,
-            float(solver.wall_time),
-            time_limit,
-            float(solver.deterministic_time),
-            deterministic_time,
+        # Resolve route-dependent share fractions by propagation, preserving
+        # the short chunk budget for the feasible hint and subsequent search.
+        solver.parameters.linearization_level = (
+            0 if self.delivered_variables is not None else 2
         )
-        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        cache = (
+            self.solve_cache
+            if workers == 1 and deterministic_time is not None
+            else None
+        )
+        cached = None
+        probe = None
+        if cache is not None:
+            cached, probe = cache.find(self.model, str(solver.parameters))
+        if cached is not None:
+            solver, status_name, ended = cached.solver, cached.status, "reused"
+        else:
+            status = solver.solve(self.model)
+            status_name = solver.status_name(status)
+            if status == cp_model.MODEL_INVALID:
+                raise ValueError(
+                    f"CP-SAT found the chunk's model invalid: {solver.solution_info()}"
+                )
+            ended = search_ending(
+                status_name,
+                float(solver.wall_time),
+                time_limit,
+                float(solver.deterministic_time),
+                deterministic_time,
+            )
+            if (
+                cache is not None
+                and probe is not None
+                and (
+                    ended == "deterministic budget"
+                    or status_name in ("OPTIMAL", "INFEASIBLE")
+                )
+            ):
+                cache.remember(probe, self.model, solver, status_name)
+        if status_name not in ("OPTIMAL", "FEASIBLE"):
             return status_name, ended, None
 
         chosen = sorted(
@@ -1002,16 +1320,23 @@ def search_ending(
     """What ended a chunk's search: ``"optimal"`` where the solver proved its
     answer, ``"deterministic budget"`` where that budget was reached,
     ``"wall clock"`` where the wall-clock limit was, else ``"solver"`` for a
-    search the solver ended itself, as for an infeasible model."""
+    search the solver ended itself, as for an infeasible model.
+
+    Limit endings are inferred from the counters. An unfinished search near
+    both limits is conservatively wall-limited, so a possible load-dependent
+    stop is not reported as deterministic. Completed proofs take precedence.
+    """
     if status == "OPTIMAL":
         return "optimal"
+    if status == "INFEASIBLE":
+        return "solver"
+    if wall_seconds >= LIMIT_REACHED_FRACTION * time_limit:
+        return "wall clock"
     if (
         deterministic_time is not None
         and deterministic_seconds >= LIMIT_REACHED_FRACTION * deterministic_time
     ):
         return "deterministic budget"
-    if wall_seconds >= LIMIT_REACHED_FRACTION * time_limit:
-        return "wall clock"
     return "solver"
 
 
@@ -1023,7 +1348,9 @@ class CpSatScheduler(LocalSearchScheduler):
     2. The horizon is split into ``chunk`` lengths. For each, CP-SAT chooses
        snapshots and their order within its share of ``solver_time_limit``,
        leaving room and exposure for the rest of the priority-first plan to
-       follow. The order is decoded with the scheduler's exact checks and kept
+       follow. Empty time before that continuation permits up to one chunk of
+       lookahead, so a flexible visit can move after a closing window. The
+       order is decoded with the scheduler's exact checks and kept
        if it scores at least as well as the priority-first plan's snapshots
        for the chunk; otherwise, or if the solver finds no solution in time,
        those are kept instead.
@@ -1045,7 +1372,8 @@ class CpSatScheduler(LocalSearchScheduler):
             same point every run whatever the machine's speed; the wall-clock
             limit still applies. Set it, with ``workers`` 1 and ``seed``, for
             runs that repeat exactly.
-        chunk: Length of each chunk the horizon is solved in.
+        chunk: Spacing of the horizon's solve boundaries. Each model may use
+            up to one further chunk of empty time before the incumbent tail.
         workers: CP-SAT search workers.
         max_candidates: Candidate snapshots in a chunk's model at most, those
             of the priority-first plan first, then in priority order.
@@ -1085,13 +1413,18 @@ class CpSatScheduler(LocalSearchScheduler):
         self.solver_time_limit = solver_time_limit
         self.solver_deterministic_time = solver_deterministic_time
         self._deterministic_per_chunk: float | None = None
+        self._window_repaired = False
         self.chunk = chunk
         self.workers = workers
         self.max_candidates = max_candidates
         self.solver_statuses: list[str] = []
         """CP-SAT's final status for each chunk, such as OPTIMAL or FEASIBLE."""
         self.solver_limits: list[str] = []
-        """What ended each chunk's search (see :func:`search_ending`)."""
+        """What ended each chunk's search, or ``reused`` for a cached response."""
+        self.solver_search_statuses: list[str] = []
+        """Every actual chunk search's status across this schedule's passes."""
+        self.solver_search_limits: list[str] = []
+        """What ended each corresponding search, including earlier passes."""
         self.solver_chunks_used: list[bool] = []
         """For each chunk, whether the solver's snapshots were kept; if not,
         the priority-first plan's were, as they scored better."""
@@ -1099,11 +1432,25 @@ class CpSatScheduler(LocalSearchScheduler):
         """Objective of the solver's plan after exact decoding."""
         self.solver_seconds = 0.0
         """Wall-clock time spent building, solving and decoding chunks."""
+        self._solve_cache = _ChunkSolveCache()
+        self._intermediate_solve_cache = _ChunkSolveCache()
+
+    @property
+    def solver_reused_chunks(self) -> int:
+        """Responses reused across this schedule's momentum passes, not searches."""
+        return self._solve_cache.hits + self._intermediate_solve_cache.hits
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, solve chunk by chunk, and optionally
         polish, within the wheels' momentum where the configuration tracks it."""
-        return self._plan_within_momentum(self._plan_once)
+        self.search_iterations.clear()
+        self.search_limits.clear()
+        self.solver_search_statuses.clear()
+        self.solver_search_limits.clear()
+        self._window_repaired = False
+        self._solve_cache = _ChunkSolveCache()
+        self._intermediate_solve_cache = _ChunkSolveCache()
+        return self._schedule_with_incumbents()
 
     def _plan_once(self) -> Plan:
         start = self._start_from_priority_plan()
@@ -1112,24 +1459,98 @@ class CpSatScheduler(LocalSearchScheduler):
         self.solver_seconds = time.perf_counter() - began
         self.solver_score = self._objective(solved.final)
         candidate = solved if self.solver_score >= self.start_score else start
+        candidate = self._repair_window(candidate)
         best = self._best = self._search(candidate)
         return self._finish_best(best)
+
+    def _normalized_placements(self, decoded: _Decoded) -> _Decoded:
+        """Retain only actual placements, released where exact decoding put them."""
+        snapshots = []
+        for before, after in zip(decoded.states[:-1], decoded.states[1:], strict=True):
+            if after.cursor <= before.cursor:
+                continue
+            block = after.timeline[after.cursor - 1]
+            snapshots.append(
+                _Snapshot(
+                    obsid=int(block.entry.obsid),
+                    seconds=_collection_seconds(block),
+                    release=float(block.entry.begin),
+                    visit=block.entry.visit,
+                )
+            )
+        return self._decode(snapshots)
+
+    def _repair_window(self, decoded: _Decoded) -> _Decoded:
+        """Recover at most one timed visit across native chunk boundaries.
+
+        A long snapshot may fill a chunk while a short visit must precede it
+        to meet its window. Try that insertion, or one position earlier, using
+        the full exact decoder and its resource/commitment checks. Keep only
+        a strict objective gain. The solver budget and original native score
+        remain separate; subsequent momentum passes forecast the changed plan.
+        """
+        if self._window_repaired:
+            return decoded
+        old_score = self._objective(decoded.final)
+        for window in self._pending_windows(decoded):
+            if window.visit is not None and any(
+                int(block.entry.obsid) == window.obsid
+                and block.entry.visit == window.visit
+                for block in decoded.final.timeline
+            ):
+                continue
+            crossing = len(decoded.sequence)
+            for index, (before, after) in enumerate(
+                zip(decoded.states[:-1], decoded.states[1:], strict=True)
+            ):
+                if (
+                    after.cursor > before.cursor
+                    and after.timeline[after.cursor - 1].end > window.deadline
+                ):
+                    crossing = index
+                    break
+            for position in sorted({crossing, max(0, crossing - 1)}):
+                # The window bounds collection, not the ingress slew. Pin the
+                # intended visit while the exact decoder times its slew/setup.
+                added = self._released(window.obsid).model_copy(
+                    update={"visit": window.visit}
+                )
+                sequence = [
+                    *decoded.sequence[:position],
+                    added,
+                    *decoded.sequence[position:],
+                ]
+                candidate = self._redecode(decoded, sequence, position, position, 1)
+                before, after = candidate.states[position : position + 2]
+                if after.cursor <= before.cursor:
+                    continue
+                placed = after.timeline[after.cursor - 1]
+                if placed.entry.visit != window.visit:
+                    continue
+                candidate = self._normalized_placements(candidate)
+                if window.visit is not None and not any(
+                    int(block.entry.obsid) == window.obsid
+                    and block.entry.visit == window.visit
+                    for block in candidate.final.timeline
+                ):
+                    continue
+                score = self._objective(candidate.final)
+                if score > old_score:
+                    self._window_repaired = True
+                    self._log(
+                        float(placed.entry.begin),
+                        f"Recovered request {window.obsid} before its deadline; "
+                        f"exact planned value increases by {score - old_score:.6f}",
+                        window.obsid,
+                    )
+                    return candidate
+        return decoded
 
     # ── Chunks ───────────────────────────────────────────────────────────
 
     def _solve(self, start: _Decoded) -> _Decoded:
         """Solve and decode each chunk in turn."""
         _require_ortools()
-        # A dispatch seed can beat the priority-first plan, and its releases
-        # can precede the decoded slew starts. Keep each snapshot's actual
-        # block for the resource reservations after a chunk.
-        self._baseline_blocks = {
-            (snapshot.obsid, snapshot.release): after.timeline[after.cursor - 1]
-            for snapshot, before, after in zip(
-                start.sequence, start.states, start.states[1:]
-            )
-            if after.cursor > before.cursor
-        }
         hints = [
             block
             for block in start.final.timeline
@@ -1149,9 +1570,10 @@ class CpSatScheduler(LocalSearchScheduler):
 
         states = [self._initial_state()]
         sequence: list[_Snapshot] = []
-        # The rest of the priority-first plan decoded on from the current
-        # state, state by state. Decoding is what a chunk costs besides its
-        # solve, and while chunks keep that plan the decoding is the same, so
+        # The rest of the selected start plan (priority-first or a better
+        # dispatch seed), decoded state by state from the current prefix.
+        # Besides solving, decoding is the chunk's cost. While chunks keep
+        # that plan the decoding is the same, so
         # it is carried from chunk to chunk rather than done again.
         rest: list[_State] | None = None
         chunk_end = self.ctx.ustart
@@ -1161,12 +1583,12 @@ class CpSatScheduler(LocalSearchScheduler):
                 # A pass planning on from a dump keeps the science before it.
                 continue
             state = states[-1]
-            # The chunk leaves the rest of the priority-first plan room to
+            # The chunk leaves the rest of the selected start plan room to
             # follow it unchanged: it finishes before that plan's next slew and
             # leaves the exposure collected later to it. Its snapshots are kept
             # only if, followed by the rest of that plan, they score at least
             # as well as that plan does from here, so the result is never worse
-            # than the priority-first plan.
+            # than that incumbent from the same state.
             planned = self._released_between(start, chunk_begin, chunk_end)
             later = self._released_between(start, chunk_end, self.ctx.uend)
             if rest is None or rest[0] is not state:
@@ -1183,11 +1605,17 @@ class CpSatScheduler(LocalSearchScheduler):
                 per_chunk,
                 budget,
                 finish if finish is not None else self.ctx.uend,
-                later,
+                _Decoded.model_construct(sequence=later, states=rest[len(planned) :]),
             )
-            used = (
-                solved is not None
-                and self._final_score(state, solved + later) >= unchanged
+            final = (
+                self._final_state(state, solved + later) if solved is not None else None
+            )
+            used = final is not None and self._improves(
+                self._objective(final),
+                final.timeline,
+                unchanged,
+                rest[-1].timeline,
+                accept_equal_timing=True,
             )
             self.solver_chunks_used.append(used)
             if used:
@@ -1214,7 +1642,7 @@ class CpSatScheduler(LocalSearchScheduler):
 
     @staticmethod
     def _released_between(start: _Decoded, begin: float, end: float) -> list[_Snapshot]:
-        """The priority-first plan's snapshots whose slews start in ``[begin, end)``."""
+        """The selected start plan's snapshots released in ``[begin, end)``."""
         return [
             snapshot
             for snapshot in start.sequence
@@ -1223,9 +1651,13 @@ class CpSatScheduler(LocalSearchScheduler):
 
     def _final_score(self, state: _State, sequence: Sequence[_Snapshot]) -> float:
         """Objective after decoding ``sequence`` from ``state``."""
+        return self._objective(self._final_state(state, sequence))
+
+    def _final_state(self, state: _State, sequence: Sequence[_Snapshot]) -> _State:
+        """Exactly decode a candidate once for both value and timing."""
         for snapshot in sequence:
             state = self._step(state, snapshot)
-        return self._objective(state)
+        return state
 
     def _chunk_origin(self, state: _State) -> tuple[float, Attitude]:
         """Return when and from which attitude the next snapshot can start."""
@@ -1244,23 +1676,28 @@ class CpSatScheduler(LocalSearchScheduler):
         time_limit: float,
         budget: dict[int, float],
         finish: float,
-        later: Sequence[_Snapshot] = (),
+        continuation: _Decoded | None = None,
     ) -> list[_Snapshot] | None:
-        """Choose and order the snapshots that start in one chunk.
+        """Choose snapshots in a chunk and its bounded empty-time lookahead.
 
         ``budget`` is the most exposure the chunk may collect for each request,
-        every snapshot ends by ``finish``, and ``later`` are the priority-first
-        plan's snapshots after the chunk, whose data the recorder must also
-        hold. Returns None if the solver found no solution in time.
+        every snapshot ends by ``finish``. ``continuation`` is the incumbent
+        after the chunk, decoded from the current state, whose data and energy
+        must also fit. Returns None if the solver found no solution in time.
         """
         origin_time, origin_attitude = self._chunk_origin(state)
         if origin_time >= chunk_end:
             return []
+        # A flexible visit can move into otherwise empty time after this
+        # chunk, making room for a visit whose visibility closes first. Look
+        # ahead by at most one chunk, stopping before the unchanged tail.
+        # Exact whole-horizon decoding still decides whether to keep it.
+        search_end = min(finish, chunk_end + self.chunk.total_seconds())
         planned = self._planned_in_chunk(hints, origin_time, chunk_end)
         tasks = [
             _Task(None, (origin_attitude, origin_attitude), (0, 0)),
-            *self._pass_tasks(state, origin_time, chunk_end),
-            *self._candidates(state, budget, origin_time, chunk_end, finish, planned),
+            *self._pass_tasks(state, origin_time, search_end),
+            *self._candidates(state, budget, origin_time, search_end, finish, planned),
         ]
         if not any(task.optional for task in tasks):
             return []
@@ -1272,14 +1709,16 @@ class CpSatScheduler(LocalSearchScheduler):
                 # the solver try, and the decoder, which is exact, decides.
                 others = [int(x) for i, x in enumerate(slews[:, k]) if i != k]
                 task.slew_in = min(others) if others else 0
-        chunk_seconds = int(round(chunk_end - origin_time))
+        chunk_seconds = int(round(search_end - origin_time))
         recorder = [
-            self._chunk_recorder(state, later, origin_time, ledger, offset, tasks)
+            self._chunk_recorder(
+                state, continuation, origin_time, ledger, offset, tasks
+            )
             for _, ledger, offset in self._ledger.members
             if ledger.active
         ]
         battery = (
-            self._chunk_battery(state, later, origin_time, tasks)
+            self._chunk_battery(state, continuation, origin_time, tasks)
             if self._battery.active
             else None
         )
@@ -1293,9 +1732,28 @@ class CpSatScheduler(LocalSearchScheduler):
             battery,
             state.allocated_left,
             self._category_caps(tasks, state),
+            delivered_history=(
+                state.programs
+                if any(
+                    task.science.allocated_share is not None and task.science.weight > 0
+                    for task in tasks
+                )
+                else None
+            ),
         )
         chunk.add_hint(
             self._hint(tasks, planned, origin_time, slews, budget, chunk_seconds)
+        )
+        # Dumps can leave intermediate chunks unchanged too. The cache checks
+        # the complete current model and solver parameters, including hints
+        # and downstream resource reservations; it never reuses a timeline.
+        # Decode the response against the current tasks and physical state.
+        # Keep final responses in their existing store: many intermediate
+        # models must not evict a final model that the prior cache retained.
+        chunk.solve_cache = (
+            self._solve_cache
+            if chunk_end == self.ctx.uend
+            else self._intermediate_solve_cache
         )
         status, ended, snapshots = chunk.solve(
             time_limit,
@@ -1306,12 +1764,15 @@ class CpSatScheduler(LocalSearchScheduler):
         )
         self.solver_statuses.append(status)
         self.solver_limits.append(ended)
+        if ended != "reused":
+            self.solver_search_statuses.append(status)
+            self.solver_search_limits.append(ended)
         return snapshots
 
     def _chunk_recorder(
         self,
         state: _State,
-        later: Sequence[_Snapshot],
+        continuation: _Decoded | None,
         origin_time: float,
         ledger: RecorderLedger,
         offset: int,
@@ -1320,21 +1781,19 @@ class CpSatScheduler(LocalSearchScheduler):
         """The recorder from the chunk's segment to the end of the horizon.
 
         What is already planned counts as fixed: the science placed before the
-        chunk, locked entries, and the priority-first plan's snapshots after
-        the chunk, in the segments their slews start in.
+        chunk, locked entries, and the decoded incumbent after the chunk.
+        The continuation's ledger delta includes actual collection intervals,
+        sequence calibration data and any reconnected contact ingress; its
+        prefix is subtracted so the chunk's old snapshots are not counted.
         """
         volumes = list(state.volumes[offset : offset + ledger.segments])
-        for snapshot in later:
-            assert snapshot.release is not None
-            target = self._by_obsid[snapshot.obsid].target
-            block = self._baseline_blocks.get((snapshot.obsid, snapshot.release))
-            if block is None:
-                continue  # This snapshot did not fit in the decoded baseline.
-            assert block.entry.collection_begin is not None
-            for segment, volume in ledger.science_additions(
-                target, _collection_seconds(block), float(block.entry.collection_begin)
-            ):
-                volumes[segment] = combine_amounts(volumes[segment], volume)
+        if continuation is not None:
+            before = continuation.states[0].volumes
+            after = continuation.final.volumes
+            for segment in range(ledger.segments):
+                index = offset + segment
+                extra = combine_amounts(after[index], before[index], -1.0)
+                volumes[segment] = combine_amounts(volumes[segment], extra)
         first = ledger.segment(origin_time)
         entering = ledger.level_at(volumes, origin_time)
         accrual, fixed, removal = ledger.model_vectors(volumes, origin_time)
@@ -1367,7 +1826,7 @@ class CpSatScheduler(LocalSearchScheduler):
     def _chunk_battery(
         self,
         state: _State,
-        later: Sequence[_Snapshot],
+        continuation: _Decoded | None,
         origin_time: float,
         tasks: Sequence[_Task],
     ) -> _ChunkBattery:
@@ -1375,7 +1834,7 @@ class CpSatScheduler(LocalSearchScheduler):
 
         What is already planned counts as fixed, relative to each run's idle
         power, exactly as the ledger counts it: the passes after the cursor
-        and the priority-first plan's snapshots after the chunk.
+        and the decoded incumbent's science after the chunk.
         """
         ledger = self._battery
         limit = ledger.limit
@@ -1420,34 +1879,38 @@ class CpSatScheduler(LocalSearchScheduler):
 
         # What is already planned, exactly as the ledger counts it, step by
         # step in the run of each step, relative to the run's idle power: the
-        # passes after the cursor, and the priority-first plan's snapshots
-        # released after the chunk, which the chunk must leave room for.
+        # passes after the cursor, and the decoded incumbent after the chunk,
+        # which the chunk must leave room for.
         fixed = [0] * runs
         step_size = self.ctx.step_size
-        blocks = [
-            *(b for b in state.timeline[state.cursor :] if b.is_pass),
-            *(
-                block
-                for snapshot in later
-                if (
-                    block := self._baseline_blocks.get(
-                        (snapshot.obsid, snapshot.release)
-                    )
-                )
-                is not None
-            ),
+        groups = [
+            ([b for b in state.timeline[state.cursor :] if b.is_pass], state.energy)
         ]
-        # With a solar-array drive, as the walk counts them where the plan's
-        # additions leave the drive; a block not in the plan at its own deltas.
-        counted = ledger.walk_deltas(state.energy)
-        for block in blocks:
-            addition = self._block_addition(block)
-            steps = ledger.steps(addition.begin, addition.end)
-            for utime, delta in zip(steps, counted.get(addition, addition.deltas)):
-                if utime < origin_time:
-                    continue
-                r = run_of(float(utime))
-                fixed[r] += int(np.ceil(delta * 3600.0)) - idle[r] * step_size
+        if continuation is not None:
+            groups.append(
+                (
+                    [
+                        after.timeline[after.cursor - 1]
+                        for before, after in pairwise(continuation.states)
+                        if after.cursor > before.cursor
+                    ],
+                    continuation.final.energy,
+                )
+            )
+        # Fixed passes keep the current prefix's drive history. Later science
+        # uses its decoded continuation; skipped snapshots add no block/energy.
+        for blocks, energy in groups:
+            if not blocks:
+                continue
+            counted = ledger.walk_deltas(energy)
+            for block in blocks:
+                addition = self._block_addition(block)
+                steps = ledger.steps(addition.begin, addition.end)
+                for utime, delta in zip(steps, counted.get(addition, addition.deltas)):
+                    if utime < origin_time:
+                        continue
+                    r = run_of(float(utime))
+                    fixed[r] += int(np.ceil(delta * 3600.0)) - idle[r] * step_size
         entering = ledger.level_at(state.energy, origin_time) * 3600.0
         return _ChunkBattery(
             edges=edges,
@@ -1468,7 +1931,9 @@ class CpSatScheduler(LocalSearchScheduler):
         ledger = self._battery
         if not ledger.active:
             return (0, 0)
-        attitude = target.target_body_attitude(self.ctx.instrument_roll(target, when))
+        attitude = target.target_body_attitude(
+            self.ctx.instrument_roll(target, when), at=when
+        )
         lit = next(
             (
                 float(s)
@@ -1515,9 +1980,29 @@ class CpSatScheduler(LocalSearchScheduler):
                     (block.attitude_in, block.attitude_out),
                     (ready, ready),
                     duration=max(0, end - ready),
+                    inherits_attitude=block.follows,
+                    science=self._fixed_science(block, origin_time),
                 )
             )
         return tasks
+
+    def _fixed_science(self, block: _Block, origin_time: float) -> NodeScience:
+        """Science a retained block delivers before the next native decision."""
+        if block.is_fixed:
+            return NodeScience()
+        seconds = sum(
+            entry.collection_seconds_between(
+                max(origin_time, self.ctx.ustart), block.end
+            )
+            for entry in block.steps or [block.entry]
+            if not entry.calibration
+        )
+        if seconds <= 0:
+            return NodeScience()
+        category = self.config.observation_categories.get_category(
+            int(block.entry.obsid)
+        )
+        return NodeScience(program=category.program_name, fixed_seconds=seconds)
 
     def _planned_in_chunk(
         self, hints: Sequence[_Block], origin_time: float, chunk_end: float
@@ -1633,7 +2118,9 @@ class CpSatScheduler(LocalSearchScheduler):
                         k,
                     )
                     for k in request.open_visits(
-                        state.last_visit.get(obsid), origin_time
+                        state.last_visit.get(obsid),
+                        origin_time,
+                        after_visit=state.last_visit_window.get(obsid),
                     )
                 ]
             for w0, w1 in request.windows:
@@ -1658,8 +2145,9 @@ class CpSatScheduler(LocalSearchScheduler):
                         latest = min(latest, int(slot_deadline - origin_time - setup))
                     if latest < earliest or window[0] >= chunk_end - origin_time:
                         continue
+                    when = max(w0, origin_time)
                     attitude = target.target_body_attitude(
-                        ctx.instrument_roll(target, max(w0, origin_time))
+                        ctx.instrument_roll(target, when), at=when
                     )
                     attitudes = (attitude, attitude)
                     task_overhead = overhead
@@ -1668,15 +2156,14 @@ class CpSatScheduler(LocalSearchScheduler):
                         # between its steps and any step setup are part of
                         # its length, and it leaves the spacecraft at its
                         # last step.
-                        when = max(w0, origin_time)
                         first = target.step_pointing(0)
                         last_step = target.step_pointing(len(target.sequence.steps) - 1)
                         attitudes = (
                             first.target_body_attitude(
-                                ctx.instrument_roll(first, when)
+                                ctx.instrument_roll(first, when), at=when
                             ),
                             last_step.target_body_attitude(
-                                ctx.instrument_roll(last_step, when)
+                                ctx.instrument_roll(last_step, when), at=when
                             ),
                         )
                         task_overhead = overhead + int(
@@ -1695,16 +2182,30 @@ class CpSatScheduler(LocalSearchScheduler):
                     rate, earliness, offset, late = self._candidate_value(
                         request, shares, origin_time, bounds
                     )
+                    discount_earliness, discount_offset, discount_late = (
+                        self._candidate_discounts(request, origin_time, bounds)
+                    )
+                    urgency = self._candidate_urgency(
+                        request,
+                        origin_time,
+                        chunk_end,
+                        bounds,
+                        (w0, w1),
+                        visit,
+                        longest,
+                        latest,
+                        cadence or 0,
+                    )
                     # Allocated time is worth allocation_bonus more, beyond the rate.
                     spans = self._spans(
                         state,
                         obsid,
                         origin_time,
                         (earliest, latest),
-                        (self._allocated_factor - 1.0) * self._value(request, shares),
+                        (self._allocated_factor - 1.0) * rate,
                     )
                     data = self._candidate_data(target)
-                    power = self._candidate_power(target, max(w0, origin_time))
+                    power = self._candidate_power(target, when)
                     if visit is not None:
                         # One visit per window.
                         copies = 1
@@ -1743,6 +2244,16 @@ class CpSatScheduler(LocalSearchScheduler):
                             data=data,
                             power=power,
                             visit=visit,
+                            urgency=urgency,
+                            science=NodeScience(
+                                program=request.category.program_name,
+                                allocated_share=request.category.time_share,
+                                weight=self._deficit_weight * request.value_factor,
+                                earliness=discount_earliness,
+                                offset=discount_offset,
+                                late=discount_late,
+                                allocation_bonus=self._allocated_factor - 1.0,
+                            ),
                         )
                         copy += 1
                         candidates.append((priority, rank, task))
@@ -1809,10 +2320,26 @@ class CpSatScheduler(LocalSearchScheduler):
         arrives, and one with a cadence the later after its visit is due, in
         proportion to the collection it gets.
         """
+        rate = self._value(request, shares)
+        if self._merit_model.urgency_weight > 0:
+            # The solver adds urgency at its decision variable, not the horizon.
+            rate -= request.value_factor * request.merit.urgency
+        earliness, offset, late = self._candidate_discounts(
+            request, origin_time, bounds, rate
+        )
+        return rate, earliness, offset, late
+
+    def _candidate_discounts(
+        self,
+        request: _Request,
+        origin_time: float,
+        bounds: tuple[float | None, float | None] | None,
+        rate: float = 1.0,
+    ) -> tuple[float, float, float]:
+        """Per-unit-value discount factors, shared by steady and urgent value."""
         ctx = self.ctx
         target = request.target
         setup = ctx.setup_for(int(target.obsid))
-        rate = self._value(request, shares)
         earliness = offset = late = 0.0
         earliest_start, deadline = (
             bounds if bounds is not None else (target.earliest_start, target.deadline)
@@ -1830,7 +2357,64 @@ class CpSatScheduler(LocalSearchScheduler):
             # visits keep to the cadence: a visit a whole cadence late
             # loses earliness_weight of its value.
             late = rate * self.earliness_weight / request.cadence
-        return rate, earliness, offset, late
+        return earliness, offset, late
+
+    def _candidate_urgency(
+        self,
+        request: _Request,
+        origin_time: float,
+        chunk_end: float,
+        bounds: tuple[float | None, float | None],
+        window: tuple[float, float],
+        visit: int | None,
+        longest: int,
+        latest: int,
+        cadence: int,
+    ) -> _Urgency | None:
+        """Tabulate the shared urgency function at native decision steps.
+
+        Fractions are conservatively quantised only inside the integer model.
+        Exact decoding and executed entries use the unrounded shared function.
+        """
+        merit = self._merit_model
+        if merit.urgency_weight == 0:
+            return None
+        deadline = (
+            request.target.visit_windows[visit].deadline
+            if visit is not None
+            else request.target.deadline
+        )
+        close = MeritModel.urgency_close(deadline, request.windows, window)
+        if close is None:
+            return None
+        # Bound all products (including configured earliness/cadence discounts)
+        # without overflowing CP-SAT's signed integer domains on long horizons.
+        scale = max(
+            1,
+            min(_URGENCY_SCALE, (2**60) // max(1, longest * max(latest, cadence, 1))),
+        )
+        last_step = max(
+            0, (int(round(chunk_end - origin_time)) - 1) // self.ctx.step_size
+        )
+        values = tuple(
+            int(
+                merit.urgency_factor(origin_time + n * self.ctx.step_size, close)
+                * scale
+            )
+            for n in range(last_step + 1)
+        )
+        earliness, offset, late = self._candidate_discounts(
+            request, origin_time, bounds
+        )
+        return _Urgency(
+            values=values,
+            scale=scale,
+            weight=merit.urgency_weight * request.value_factor,
+            earliness=earliness,
+            offset=offset,
+            late=late,
+            allocation_bonus=self._allocated_factor - 1.0,
+        )
 
     def _hint(
         self,
@@ -1880,7 +2464,8 @@ class CpSatScheduler(LocalSearchScheduler):
         due: dict[int, int] = {}
         """Earliest slew of each cadence request's next visit."""
         # The last task hinted, and when the spacecraft is free after it.
-        previous, free = 0, 0
+        free = 0
+        pose = 0
         for position, k in enumerate(order):
             task = tasks[k]
             obsid = task.obsid
@@ -1888,20 +2473,25 @@ class CpSatScheduler(LocalSearchScheduler):
                 # A pass stays where it is.
                 slew_step = _ceil(free, step) // step
                 hint[k] = _TaskHint(slew_step, task.arrival[0], 0)
-                previous, free = k, task.arrival[0] + task.duration
+                free = task.arrival[0] + task.duration
+                if not task.inherits_attitude:
+                    pose = k
                 continue
             slew_start = _ceil(max(free, task.window[0], due.get(obsid, 0)), step)
             arrival = max(
                 int(np.ceil(wanted[k].arrival)),
-                slew_start + int(slews[previous, k]),
+                slew_start + int(slews[pose, k]),
                 task.arrival[0],
             )
             ends_by = task.window[1]
             next_pass = next((n for n in order[position + 1 :] if n in passes), None)
             if next_pass is not None:
-                # The pass's slew starts on a step after this snapshot ends.
-                latest_slew = tasks[next_pass].arrival[0] - int(slews[k, next_pass])
-                ends_by = min(ends_by, latest_slew - latest_slew % step)
+                # The settled pass can depart immediately after the snapshot;
+                # only newly selected snapshots need a step-aligned departure.
+                next_task = tasks[next_pass]
+                ingress = 0 if next_task.inherits_attitude else int(slews[k, next_pass])
+                latest_slew = next_task.arrival[0] - ingress
+                ends_by = min(ends_by, latest_slew)
             seconds = min(
                 max(int(wanted[k].seconds), task.collection[0]),
                 task.collection[1],
@@ -1918,7 +2508,8 @@ class CpSatScheduler(LocalSearchScheduler):
             exposure_left[obsid] -= seconds
             if task.spacing is not None:
                 due[obsid] = arrival + seconds + task.spacing
-            previous, free = k, arrival + task.overhead + seconds
+            free = arrival + task.overhead + seconds
+            pose = k
         return hint
 
     # ── Model inputs ─────────────────────────────────────────────────────

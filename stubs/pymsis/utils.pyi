@@ -1,8 +1,9 @@
+from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 import numpy.typing as npt
 from _typeshed import Incomplete
-from dataclasses import dataclass
-from pathlib import Path
 
 @dataclass
 class _SpaceWeatherState:

@@ -3,6 +3,7 @@
 # For the full list of built-in configuration values, see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
+import importlib
 import os
 import sys
 
@@ -54,7 +55,7 @@ napoleon_include_special_with_doc = True
 napoleon_use_admonition_for_examples = True
 napoleon_use_admonition_for_notes = True
 napoleon_use_admonition_for_references = True
-napoleon_use_ivar = False
+napoleon_use_ivar = True
 napoleon_use_param = True
 napoleon_use_rtype = True
 napoleon_preprocess_types = True
@@ -113,7 +114,6 @@ autodoc_default_options = {
     "special-members": "__init__",
     "undoc-members": True,
     "exclude-members": "__weakref__",
-    "imported-members": False,
     "inherited-members": False,
 }
 
@@ -193,24 +193,52 @@ def autodoc_skip_member(app, what, name, obj, skip, options):
     return skip
 
 
+def resolve_reexported_name(app, env, node, contnode):
+    """Link a re-exported name to the page of the module that defines it.
+
+    The documentation refers to objects by the name users import, such as
+    ``conops.config.MissionConfig``, while autodoc indexes each object under its
+    defining module (``conops.config.config.MissionConfig``). When a reference
+    does not resolve, look the object up and retry with its defining name.
+    """
+    if node.get("refdomain") != "py":
+        return None
+    target = node.get("reftarget", "")
+    if not target.startswith("conops."):
+        return None
+    parts = target.split(".")
+    obj = None
+    rest: list = []
+    for i in range(len(parts), 0, -1):
+        try:
+            obj = importlib.import_module(".".join(parts[:i]))
+        except Exception:
+            continue
+        rest = parts[i:]
+        break
+    if obj is None or not rest:
+        return None
+    canonical = None
+    for index, name in enumerate(rest):
+        try:
+            obj = getattr(obj, name)
+        except AttributeError:
+            break
+        module = getattr(obj, "__module__", None)
+        qualname = getattr(obj, "__qualname__", None)
+        if isinstance(module, str) and isinstance(qualname, str):
+            canonical = ".".join([module, qualname, *rest[index + 1 :]])
+    if canonical is None or canonical == target:
+        return None
+    return env.get_domain("py").resolve_xref(
+        env, node["refdoc"], app.builder, node["reftype"], canonical, node, contnode
+    )
+
+
 def setup(app):
     app.connect("autodoc-skip-member", autodoc_skip_member)
+    app.connect("missing-reference", resolve_reexported_name)
 
-
-# Mock imports for packages that might not be available during doc build
-autodoc_mock_imports: list = [
-    "conops.battery",
-    "conops.constraint",
-    "conops.constants",
-    "conops.emergency_charging",
-    "conops.ephemeris",
-    "conops.groundstation",
-    "conops.passes",
-    "conops.saa",
-    "conops.slew",
-    "conops.solar_panel",
-    "conops.vector",
-]
 
 # -- MyST-Parser configuration -----------------------------------------------
 myst_enable_extensions = [

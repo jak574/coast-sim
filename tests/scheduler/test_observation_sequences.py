@@ -250,9 +250,10 @@ class TestDispatch:
         ditl = create_ditl(config, [target], BEGIN, end)
         ditl.step_size = STEP
         assert ditl.calc()
-        assert any(e.step == "first" for e in ditl.plan)
-        assert not any(e.step == "offset" for e in ditl.plan)
-        assert any("beyond the ACS limit" in e.description for e in ditl.log.events)
+        # Whole-visit admission rejects the sequence before its first step
+        # when a later step's absolute roll cannot be observed.
+        assert not any(e.obsid == target.obsid for e in ditl.plan)
+        assert any("Protected visit rejected" in e.description for e in ditl.log.events)
 
     def _run(self, visits: int = 1, **kwargs) -> QueueDITL:
         config = _config(HOURS)

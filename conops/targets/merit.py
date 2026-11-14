@@ -55,13 +55,29 @@ class MeritBreakdown(BaseModel):
     @property
     def value(self) -> float:
         """Science value: base merit plus the dynamic value terms."""
-        return (
-            self.base
-            + self.urgency
-            + self.cadence
-            + self.completion_deficit
-            + self.allocation
+        return self.sum_value_terms(
+            self.base,
+            self.urgency,
+            self.cadence,
+            self.completion_deficit,
+            self.allocation,
         )
+
+    @staticmethod
+    def sum_value_terms(
+        base: float,
+        urgency: float,
+        cadence: float,
+        completion_deficit: float,
+        allocation: float = 0.0,
+    ) -> float:
+        """Use the same floating-point summation order for every scheduler."""
+        return base + urgency + cadence + completion_deficit + allocation
+
+    @staticmethod
+    def allocated_value(value: float, factor: float) -> float:
+        """Apply an allocation bonus in the same order as the recorded terms."""
+        return value + (factor - 1.0) * value
 
     @property
     def score(self) -> float:
@@ -281,20 +297,36 @@ class MeritModel:
         without a deadline have no urgency.
         """
         deadline = target.deadline
-        windows = getattr(target, "visit_windows", None)
-        # A test double's target has no windows.
-        if isinstance(windows, list) and windows:
+        if target.visit_windows:
             deadline = target.window_bounds(utime)[1]
         if deadline is None:
             return 0.0
+        close = self.urgency_close(deadline, target.windows, visibility_window)
+        return self.urgency_factor(utime, close)
+
+    @staticmethod
+    def urgency_close(
+        deadline: float | None,
+        windows: Sequence[Sequence[float]],
+        visibility_window: Sequence[float] | None = None,
+    ) -> float | None:
+        """The deadline or last usable visibility closing, shared by planners."""
+        if deadline is None:
+            return None
         close = deadline
         if visibility_window is not None:
             window_end = float(visibility_window[1])
             later_window = any(
-                window_end < float(window[0]) < deadline for window in target.windows
+                window_end < float(window[0]) < deadline for window in windows
             )
             if window_end < deadline and not later_window:
                 close = window_end
+        return close
+
+    def urgency_factor(self, utime: float, close: float | None) -> float:
+        """Urgency in [0, 1] at one decision, without changing target history."""
+        if close is None:
+            return 0.0
         remaining = close - utime
         if remaining <= self.urgency_timescale_seconds:
             return 1.0

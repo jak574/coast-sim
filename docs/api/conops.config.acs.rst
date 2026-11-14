@@ -2,7 +2,6 @@ conops.config.acs
 =================
 
 .. automodule:: conops.config.acs
-   :members: AttitudeControlSystem
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

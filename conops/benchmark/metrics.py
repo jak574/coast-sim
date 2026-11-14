@@ -1,11 +1,60 @@
 """Measures of a run's science, computed from per-step collection records."""
 
+import math
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 from ..common.numerics import MIN_SAMPLES
+from ..ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
+
+if TYPE_CHECKING:
+    from ..ditl.telemetry import Housekeeping
+    from ..targets import PlanEntry
 
 Collection = tuple[int, float, float]
 """One step's science: obsid, step start (Unix seconds) and seconds collected."""
+
+
+def dynamic_science_value(
+    records: Iterable["Housekeeping"],
+    entries: Iterable["PlanEntry"],
+    step_size: float,
+) -> float:
+    """Value actual science using each executed entry's frozen dynamic merit.
+
+    Dispatch and the planners record the selection value on ``entry.merit``.
+    Match by observation and collection interval, so revisits can have different
+    values. Only telemetry's collected seconds earn value; calibration earns
+    none. Missing or ambiguous provenance raises instead of substituting base
+    merits or assigning a value from a different visit.
+    """
+    if not math.isfinite(step_size) or step_size <= 0:
+        raise ValueError("step_size must be finite and positive")
+    by_obsid: dict[int, list[PlanEntry]] = {}
+    for entry in entries:
+        if entry_obstype(entry) in PLAN_SCIENCE_OBSTYPES and not entry.calibration:
+            by_obsid.setdefault(int(entry.obsid), []).append(entry)
+    contributions = []
+    for record in records:
+        seconds = float(record.collection_seconds or 0.0)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("Collection seconds must be finite and nonnegative")
+        if seconds == 0 or record.calibration:
+            continue
+        begin = record.timestamp.timestamp()
+        candidates = [] if record.obsid is None else by_obsid.get(int(record.obsid), [])
+        values = {
+            float(entry.merit)
+            for entry in candidates
+            if entry.collection_seconds_between(begin, begin + step_size) > 0
+        }
+        if len(values) != 1 or not all(math.isfinite(value) for value in values):
+            raise ValueError(
+                "Science collection has no unambiguous executed dynamic merit: "
+                f"obsid={record.obsid}, timestamp={record.timestamp.isoformat()}"
+            )
+        contributions.append(seconds * values.pop())
+    return math.fsum(contributions)
 
 
 def visit_starts(

@@ -1,14 +1,16 @@
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from functools import cached_property, lru_cache
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 import rust_ephem
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic_core import PydanticSerializationError
 from rust_ephem.constraints import (
     AndConstraint,
     AtLeastConstraint,
@@ -29,6 +31,7 @@ from .constants import (
     PANEL_CONSTRAINT,
     SUN_OCCULT,
 )
+from .frame import SpacecraftFrame
 
 # Cache precision for constraint results.
 # RA/Dec rounded to 0.01 deg (~36 arcsec) - small vs typical constraint zones (10+ deg)
@@ -41,6 +44,33 @@ _RA_DEC_ROUNDER = 10**_RA_DEC_PRECISION
 
 _INTERVAL_ENDS = 2
 """An eclipse interval is a start and an end."""
+
+_SCIENCE_SAMPLE_CACHE_SIZE = 65_536
+_ScienceSampleKey = tuple[int, int, str, str, str, str | None]
+
+
+class _ScienceSample(BaseModel):
+    """Keep backend owners alive while retaining an exact scalar answer."""
+
+    model_config = ConfigDict(frozen=True)
+    constraint: object
+    ephemeris: object | None
+    geometry: str
+    violated: bool
+
+
+class _ScienceSamples(BaseModel):
+    """A runtime memo is discarded when a configuration is copied deeply."""
+
+    entries: OrderedDict[_ScienceSampleKey, _ScienceSample] = Field(
+        default_factory=OrderedDict
+    )
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "_ScienceSamples":
+        result = type(self)()
+        if memo is not None:
+            memo[id(self)] = result
+        return result
 
 
 class AttitudeConstraintScope(str, Enum):
@@ -148,6 +178,10 @@ class Constraint(ConfigModel):
         default=None,
         description="Moon constraint configuration",
     )
+    science_in_eclipse: bool = Field(
+        default=True,
+        description="Whether observations may run in eclipse; categories can override this default",
+    )
     eclipse_intervals: list[tuple[float, float]] = Field(
         default_factory=list,
         description=(
@@ -250,13 +284,28 @@ class Constraint(ConfigModel):
     _cache: dict[tuple[str, float, float, float, float | None], bool] = PrivateAttr(
         default_factory=dict
     )
+    _held_cache: dict[tuple[str, float, float, float, float | None], bool] = (
+        PrivateAttr(default_factory=dict)
+    )
+    """Batch samples keyed by exact inputs, apart from the rounded lookup.
+    A new pose in the same rounded bucket must still refresh the held span."""
+    _science_samples: _ScienceSamples = PrivateAttr(default_factory=_ScienceSamples)
+    _science_sample_context: tuple[object, ...] | None = PrivateAttr(default=None)
     _cache_hits: int = PrivateAttr(default=0)
     _cache_misses: int = PrivateAttr(default=0)
+    _body_frame_source: object | None = PrivateAttr(default=None)
+    _body_safety_key: tuple[object, ...] | None = PrivateAttr(default=None)
+    _body_safety: ConstraintConfig | None = PrivateAttr(default=None)
     _held_over: list[float] | None = PrivateAttr(default=None)
     """The times a pointing is being checked over, while it is (see
     :meth:`held_over`): a miss then evaluates them all in one call."""
     _eclipse_constraint: rust_ephem.EclipseConstraint = PrivateAttr(
         default_factory=rust_ephem.EclipseConstraint
+    )
+
+    _sunlit_ephem: object | None = PrivateAttr(default=None)
+    _natural_sunlit_windows: list[tuple[float, float]] = PrivateAttr(
+        default_factory=list
     )
 
     # validate_assignment=False: this class holds external rust_ephem types
@@ -302,25 +351,87 @@ class Constraint(ConfigModel):
 
         held = self._held_over
         if held is not None and len(held) > 1:
-            # The pointing is being checked over these times: evaluate them
-            # all at once and keep each, as a check at each would compute it.
-            self._cache_misses += 1
-            flags = check_fn.in_constraint_batch(
-                ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
-                target_ras=[ra],
-                target_decs=[dec],
-                times=[self._sample_time(t) for t in held],
-                target_rolls=None if target_roll is None else [target_roll],
-            )
-            for t, flag in zip(held, np.asarray(flags).reshape(-1), strict=True):
+            # Reuse only exact batch inputs. Rounded buckets may contain
+            # another pose's answers, which a full batch used to replace.
+            missing = {
+                (constraint_type, ra, dec, t, target_roll): t
+                for t in held
+                if (constraint_type, ra, dec, t, target_roll) not in self._held_cache
+            }
+            if missing:
+                self._cache_misses += 1
+                flags = check_fn.in_constraint_batch(
+                    ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
+                    target_ras=[ra],
+                    target_decs=[dec],
+                    times=[self._sample_time(t) for t in missing.values()],
+                    target_rolls=None if target_roll is None else [target_roll],
+                )
+                for sample_key, flag in zip(
+                    missing, np.asarray(flags).reshape(-1), strict=True
+                ):
+                    self._held_cache[sample_key] = bool(flag)
+            # Preserve full-batch refresh order, including rounded-key
+            # collisions and duplicate times, even when no native call ran.
+            for t in held:
                 self._cache[
                     self._cache_key(constraint_type, ra, dec, t, target_roll)
-                ] = bool(flag)
+                ] = self._held_cache[(constraint_type, ra, dec, t, target_roll)]
             if key in self._cache:
                 return self._cache[key]
 
         # Cache miss - compute result (caller has already asserted ephem is not None)
         self._cache_misses += 1
+        science_key: _ScienceSampleKey | None = None
+        science_geometry: str | None = None
+        sample_frame = (
+            getattr(self._body_frame_source, "frame", None)
+            if constraint_type == "explicit_science"
+            else None
+        )
+        if (
+            constraint_type == "explicit_science"
+            and self._science_sample_context is not None
+            and isinstance(sample_frame, SpacecraftFrame)
+            and self._science_sample_context[0] == id(self.ephem)
+            and self._science_sample_context[2:]
+            == (sample_frame.boresight, sample_frame.sun_side)
+        ):
+            # A pending hardware rebind does not change the raw science
+            # predicate. Check its physical frame without moving the original
+            # hardware-refresh/rounded-cache-clearing boundary.
+            geometry: str | None
+            try:
+                geometry = check_fn.model_dump_json()
+            except (AttributeError, PydanticSerializationError, TypeError):
+                geometry = None
+            if isinstance(geometry, str):
+                science_geometry = geometry
+                science_key = (
+                    id(self.ephem),
+                    id(check_fn),
+                    # Numeric equality merges +0.0 and -0.0. Preserve their
+                    # distinct native inputs when reusing an exact answer.
+                    float(ra).hex(),
+                    float(dec).hex(),
+                    float(utime).hex(),
+                    None if target_roll is None else float(target_roll).hex(),
+                )
+            sample = (
+                self._science_samples.entries.get(science_key)
+                if science_key is not None
+                else None
+            )
+            if (
+                sample is not None
+                and sample.constraint is check_fn
+                and sample.ephemeris is self.ephem
+                and sample.geometry == science_geometry
+            ):
+                assert science_key is not None
+                self._science_samples.entries.move_to_end(science_key)
+                self._cache[key] = sample.violated
+                return sample.violated
         result = cast(
             bool,
             check_fn.in_constraint(
@@ -331,6 +442,16 @@ class Constraint(ConfigModel):
                 target_roll=target_roll,
             ),
         )
+        if science_key is not None:
+            assert science_geometry is not None
+            self._science_samples.entries[science_key] = _ScienceSample.model_construct(
+                constraint=check_fn,
+                ephemeris=self.ephem,
+                geometry=science_geometry,
+                violated=result,
+            )
+            if len(self._science_samples.entries) > _SCIENCE_SAMPLE_CACHE_SIZE:
+                self._science_samples.entries.popitem(last=False)
         self._cache[key] = result
         return result
 
@@ -371,6 +492,11 @@ class Constraint(ConfigModel):
     def clear_cache(self) -> None:
         """Clear the constraint result cache. Call at step boundaries."""
         self._cache.clear()
+        self._held_cache.clear()
+        self._science_samples.entries.clear()
+        self._science_sample_context = None
+
+    _default_clear_cache = clear_cache
 
     def cache_stats(self) -> tuple[int, int]:
         """Return (hits, misses) for cache performance monitoring."""
@@ -389,6 +515,7 @@ class Constraint(ConfigModel):
         self.__dict__.pop("roll_independent_constraint", None)
         self.__dict__.pop("roll_dependent_constraint", None)
         self.__dict__.pop("science_constraint_roll_dependent", None)
+        self._body_safety_key = None
 
     @staticmethod
     def _combine_constraints(
@@ -431,17 +558,59 @@ class Constraint(ConfigModel):
         """Combined ground-contact attitude constraints."""
         return self._combine_constraints([self.ground_contact_constraint])
 
+    @property
+    def body_safety_constraint(self) -> ConstraintConfig | None:
+        """Default-boresight safety follows the bus frame, explicit hardware does not."""
+        frame = getattr(self._body_frame_source, "frame", None)
+        if self.safety_constraint is None or not isinstance(frame, SpacecraftFrame):
+            return self.safety_constraint
+        key = (id(self.safety_constraint), frame.boresight, frame.sun_side)
+        if key != self._body_safety_key:
+            try:
+                sample_context: tuple[object, ...] | None = (
+                    id(self.ephem),
+                    self.model_dump_json(),
+                    frame.boresight,
+                    frame.sun_side,
+                )
+            except (PydanticSerializationError, TypeError):
+                # Test doubles and other opaque components retain the original
+                # unconditional refresh rather than an unverifiable memo.
+                sample_context = None
+            keep_samples = (
+                sample_context is not None
+                and sample_context == self._science_sample_context
+                and getattr(self.clear_cache, "__func__", None)
+                is Constraint._default_clear_cache
+            )
+            self._body_safety = frame.constraint_in_body(self.safety_constraint)
+            self._body_safety_key = key
+            if keep_samples:
+                # Match the default lookup refresh while retaining exact
+                # samples. An overridden clear_cache keeps its full contract.
+                self._cache.clear()
+                self._held_cache.clear()
+            else:
+                self.clear_cache()
+            self._science_sample_context = sample_context
+            for name in (
+                "hardware_safety_constraint_config",
+                "safety_constraint_config",
+                "constraint",
+            ):
+                self.__dict__.pop(name, None)
+        return self._body_safety
+
     @cached_property
     def hardware_safety_constraint_config(self) -> ConstraintConfig | None:
         """Combined hardware-safety constraints."""
-        return self._combine_constraints(
-            [
-                self.safety_constraint,
-                self.star_tracker_hard_constraint,
-                self.radiator_hard_constraint,
-                self.telescope_hard_constraint,
-            ]
-        )
+        components = [
+            self.body_safety_constraint,
+            self.star_tracker_hard_constraint,
+            self.radiator_hard_constraint,
+            self.telescope_hard_constraint,
+        ]
+        return self._combine_constraints(components)
 
     @cached_property
     def constraint(self) -> ConstraintConfig | None:
@@ -693,6 +862,64 @@ class Constraint(ConfigModel):
         assert self.ephem is not None, "Ephemeris must be set to use in_eclipse method"
         return self._cached_check("eclipse", ra, dec, time, self._eclipse_constraint)
 
+    def sunlit_windows(self) -> list[tuple[float, float]]:
+        """Natural sunlit windows less injected eclipses, using half-open bounds.
+
+        Rust computes natural boundaries. Only that immutable ephemeris result
+        is cached: injected intervals are read afresh so updates cannot reuse
+        stale admission windows.
+        """
+        assert self.ephem is not None, "An ephemeris is required for eclipse policy"
+        if self._sunlit_ephem is not self.ephem:
+            result = self._eclipse_constraint.evaluate(
+                ephemeris=self.ephem, target_ra=0.0, target_dec=0.0
+            )
+            self._natural_sunlit_windows = [
+                (w.start_time.timestamp(), w.end_time.timestamp())
+                for w in result.visibility
+            ]
+            self._sunlit_ephem = self.ephem
+        windows = list(self._natural_sunlit_windows)
+        for start, end in self.eclipse_intervals_unix():
+            cut = []
+            for lo, hi in windows:
+                if end <= lo or start >= hi:
+                    cut.append((lo, hi))
+                else:
+                    if lo < start:
+                        cut.append((lo, start))
+                    if end < hi:
+                        cut.append((end, hi))
+            windows = cut
+        return windows
+
+    def without_eclipses(
+        self, windows: Sequence[Sequence[float]]
+    ) -> list[tuple[float, float]]:
+        """Intersect observing windows with the shared sunlit intervals."""
+        sunlit = self.sunlit_windows()
+        return [
+            (max(a, lo), min(b, hi))
+            for a, b in windows
+            for lo, hi in sunlit
+            if max(a, lo) < min(b, hi)
+        ]
+
+    def first_eclipse_overlap(self, begin: float, end: float) -> float | None:
+        """First forbidden instant in ``[begin, end)``, or None if all is sunlit."""
+        cursor = begin
+        if end <= begin:
+            return None
+        for lo, hi in self.sunlit_windows():
+            if hi <= cursor:
+                continue
+            if lo > cursor:
+                return cursor
+            cursor = max(cursor, hi)
+            if cursor >= end:
+                return None
+        return cursor
+
     def in_moon(
         self, ra: float, dec: float, time: float, target_roll: float | None = None
     ) -> bool:
@@ -736,12 +963,14 @@ class Constraint(ConfigModel):
         if self.safety_constraint is None:
             return False
         assert self.ephem is not None, "Ephemeris must be set to use in_explicit_safety"
+        safety = self.body_safety_constraint
+        assert safety is not None
         return self._cached_check(
             "explicit_safety",
             ra,
             dec,
             time,
-            self.safety_constraint,
+            safety,
             target_roll=target_roll,
         )
 
@@ -855,6 +1084,8 @@ class Constraint(ConfigModel):
         acs_mode: ACSMode | int | None = None,
     ) -> bool:
         """Check imaging-quality and power-generation constraints."""
+        if not self.science_in_eclipse and self.in_eclipse(ra, dec, utime):
+            return True
         return in_attitude_constraint_scopes(
             self,
             [
@@ -955,6 +1186,8 @@ class Constraint(ConfigModel):
         acs_mode: ACSMode | int | None = None,
     ) -> str | None:
         """Return the first violated science/scheduling constraint name."""
+        if not self.science_in_eclipse and self.in_eclipse(ra, dec, utime):
+            return "science_eclipse"
         return science_attitude_constraint_name(
             self, ra, dec, utime, target_roll=target_roll, acs_mode=acs_mode
         )
@@ -1060,7 +1293,7 @@ class Constraint(ConfigModel):
         target_rolls: list[float] | None = None,
     ) -> npt.NDArray[np.bool_]:
         """Check imaging-quality and power-generation constraints."""
-        return self._in_constraint_batch_for_components(
+        result = self._in_constraint_batch_for_components(
             ras,
             decs,
             utime,
@@ -1076,6 +1309,10 @@ class Constraint(ConfigModel):
             ],
             target_rolls=target_rolls,
         )
+
+        if not self.science_in_eclipse and self.in_eclipse(0, 0, utime):
+            return np.ones_like(result, dtype=bool)
+        return result
 
     def in_imaging_quality_constraint_batch(
         self,
@@ -1146,7 +1383,7 @@ class Constraint(ConfigModel):
             decs,
             utime,
             [
-                self.safety_constraint,
+                self.body_safety_constraint,
                 self.star_tracker_hard_constraint,
                 self.radiator_hard_constraint,
                 self.telescope_hard_constraint,

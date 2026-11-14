@@ -94,13 +94,13 @@ Save a configuration to JSON for version control or sharing:
 
 **6. Save to YAML File**
 
-Save a configuration to YAML with helpful annotations explaining units and purpose:
+Save a configuration to YAML with comments that explain the units and purpose of each setting:
 
 .. code-block:: python
 
    config.to_yaml_file("spacecraft_config.yaml")
 
-The YAML output includes comprehensive comments explaining:
+The comments in the YAML output explain:
 
 - Default units for physical quantities (power in Watts, time in seconds, etc.)
 - Purpose and meaning of configuration settings
@@ -129,7 +129,7 @@ Example:
 
 .. code-block:: python
 
-   config = MissionConfig(name="STROBE-X Observatory")
+   config = MissionConfig(name="Example Observatory")
 
 random_seed
 ~~~~~~~~~~~
@@ -167,44 +167,47 @@ post-run plan validation.
 
 **Background**
 
-At the end of every :meth:`~conops.ditl.queue_ditl.QueueDITL.run`, COASTSim compares
-the exported plan against the ACS telemetry it actually produced — a step called *plan
-execution validation*.  One part of that validation scans every attitude sample in the
-telemetry and checks whether the spacecraft was pointing somewhere it shouldn't have been.
+At the end of every :meth:`~conops.ditl.queue_ditl.QueueDITL.calc`, COASTSim compares
+the exported plan against the ACS telemetry the run actually produced.  This step is
+called *plan execution validation*.  One part of it scans every attitude sample in the
+telemetry and checks whether the spacecraft was pointing somewhere it should not have
+been.
 
-Not all modes are held to the same standard.  During ``SCIENCE`` mode a pointing
+The ACS modes are not all held to the same standard.  During ``SCIENCE`` mode a pointing
 violation is unambiguously a simulation bug.  During ``SLEWING`` the spacecraft is
-actively rotating between targets and may briefly sweep through a soft-constraint zone
-by design — flagging that as an error would produce false positives.  The
-``attitude_constraint_scopes`` map lets you express, per ACS mode, which categories
-of attitude constraints the scheduler is expected to enforce.
+rotating between targets and may, by design, briefly sweep through a soft-constraint
+zone, so reporting that as an error would produce false positives.  The
+``attitude_constraint_scopes`` map states, for each ACS mode, which categories of
+attitude constraint the scheduler is expected to enforce in that mode.
 
-If any sample fails its configured scope check, a
+If any sample fails the scope check configured for its mode, a
 :class:`~conops.ditl.plan_validator.PlanExecutionMismatch` is recorded and
-:meth:`~conops.ditl.queue_ditl.QueueDITL.run` raises
-:exc:`~conops.ditl.plan_validator.PlanExecutionMismatchError` before returning.  The error
-message includes the first few violations — mode, obsid, RA/Dec/roll, and the constraint
-name — to aid debugging.
+:meth:`~conops.ditl.queue_ditl.QueueDITL.calc` raises
+:exc:`~conops.ditl.plan_validator.PlanExecutionMismatchError` before returning.  To help
+with debugging, the error message lists the first few violations and gives the mode,
+obsid, RA/Dec/roll and constraint name of each.
 
 **Scheduler admission guarantees vs. FM-monitored runtime conditions**
 
-Not every constraint violation is a scheduling failure. The scopes per mode encode
-which violations the scheduler claims to prevent, and therefore which post-simulation
-telemetry samples should be reported as planning mismatches. Fault Management still
-monitors configured telemetry thresholds at runtime.
+A constraint violation in the telemetry is not always a scheduling failure. The scopes
+configured for a mode state which violations the scheduler claims to prevent in that
+mode. They therefore also decide which telemetry samples the post-simulation validator
+reports as planning mismatches. Fault Management (FM) monitors its configured telemetry
+thresholds at runtime in either case. A violation falls into one of two groups:
 
-* **Scheduler admission guarantee** — a constraint the scheduler evaluates via
-  ``in_constraint()`` before accepting an attitude into the plan.  If telemetry shows
-  a violation in one of these modes, the scheduler broke its contract and the simulation
-  records a :class:`~conops.ditl.plan_validator.PlanExecutionMismatch`.  This covers the
-  configured scopes for that mode.
+* **Scheduler admission guarantee.** The violated constraint belongs to one of the
+  scopes configured for the mode. The scheduler evaluates such a constraint with
+  ``in_constraint()`` before it accepts an attitude into the plan.  If telemetry shows
+  a violation of it in that mode, the scheduler broke its contract and the simulation
+  records a :class:`~conops.ditl.plan_validator.PlanExecutionMismatch`.
 
-* **FM-monitored runtime condition** — a violation outside the selected validation
-  scopes (for example, an imaging-quality constraint while a mode is configured only
-  with ``hardware_safety``). The simulation's Fault Management system dispatches a
+* **FM-monitored runtime condition.** The violated constraint lies outside the
+  validation scopes selected for the mode. An example is an imaging-quality constraint
+  violated while the mode is configured only with ``hardware_safety``. The
+  post-simulation validator does not raise a mismatch for a violation outside the
+  mode's scopes. The simulation's Fault Management system still dispatches a
   :class:`~conops.config.fault_management.FaultEvent` in real time when a configured
-  threshold is crossed; the post-simulation validator does not raise a mismatch for
-  violations outside the mode's scoped contract.
+  threshold is crossed.
 
 **Scope values** (:class:`~conops.config.AttitudeConstraintScope`):
 
@@ -262,8 +265,8 @@ An empty list disables post-run attitude constraint validation for that ACS mode
 
 **Overriding scopes for individual modes:**
 
-Pass a partial dict — only the modes you specify are overridden; all others keep their
-defaults.  Keys can be :class:`~conops.common.ACSMode` enum members, their integer
+Pass a partial dict.  Only the modes you specify are overridden, and all others keep
+their defaults.  Keys can be :class:`~conops.common.ACSMode` enum members, their integer
 values, or their string names.
 
 .. code-block:: python
@@ -317,250 +320,7 @@ The :class:`~conops.config.SpacecraftBus` defines the spacecraft bus subsystems.
 * ``data_generation`` (:class:`~conops.config.HousekeepingData`): Data the bus generates at all times, such as housekeeping, by ACS mode; see :doc:`data_management`
 * ``star_trackers`` (:class:`~conops.config.StarTrackerConfiguration`): Optional star tracker configuration
 * ``radiators`` (:class:`~conops.config.RadiatorConfiguration`): Optional body-mounted radiator configuration
-* ``surfaces`` (:class:`~conops.config.SurfaceModel` | None): The spacecraft's surfaces as flat plates about its centre of mass, for the torques of sunlight and drag (see `Stored momentum`_ below); None builds a placeholder from the bus, panels and telescopes when those torques are tracked
-
-.. _Spacecraft frame:
-
-**Spacecraft frame**
-
-Every vector in the configuration, panel normals, radiator normals, antenna and star
-tracker boresights, surfaces, the inertia tensor and per-axis slew limits, is written
-in the spacecraft body frame. COAST points the body's science boresight and rolls
-about it; which body axis that boresight lies along, and which faces the Sun's side
-at zero roll, are the mission's to choose. :class:`~conops.config.SpacecraftFrame`
-declares them once on the bus:
-
-* ``boresight`` (tuple[float, float, float]): Body axis the science boresight lies
-  along, as a unit vector; where a telescope without a mounting of its own points.
-  Default ``(1, 0, 0)``.
-* ``sun_side`` (tuple[float, float, float]): Body axis facing the Sun's side at zero
-  roll, where a side-mounted panel faces, as a unit vector perpendicular to the
-  boresight. Default ``(0, 1, 0)``.
-
-The default is the frame COAST has always computed in, boresight +X and the Sun's side
-+Y, and a configuration that leaves it is unchanged. With another frame:
-
-* a :class:`~conops.config.Telescope` given neither a ``mounting`` nor a ``boresight``
-  takes the frame's mounting, so science RA/Dec and roll convert to the body attitude
-  as for any mounted telescope (see `Telescope Instruments`_); one given either keeps it;
-* :func:`~conops.config.create_solar_panel_vector` and
-  :func:`~conops.config.create_star_tracker_vector` take ``frame=`` and return their
-  vectors in the mission's frame, so a ``'boresight'`` panel faces the frame's
-  boresight, a ``'sidemount'`` panel its Sun's side, and a star tracker's default
-  points along the boresight;
-* the frame is written to and read from YAML and JSON with the bus, and a telescope's
-  mounting, once taken from it, is written with the telescope.
-
-.. code-block:: python
-
-   from conops.config import SpacecraftBus, SpacecraftFrame, Telescope, create_solar_panel_vector
-
-   # Boresight along body +Z, panels facing body -Y
-   frame = SpacecraftFrame(boresight=(0.0, 0.0, 1.0), sun_side=(0.0, -1.0, 0.0))
-   bus = SpacecraftBus(frame=frame)
-   panel_normal = create_solar_panel_vector("sidemount", cant_perp=15.0, frame=frame)
-   telescope = Telescope(name="Primary")  # points along body +Z
-
-**AttitudeControlSystem Configuration:**
-
-The :class:`~conops.config.AttitudeControlSystem` defines slew performance and path algorithms:
-
-* ``slew_acceleration`` (float): Maximum angular acceleration in deg/s²
-* ``max_slew_rate`` (float): Maximum slew rate in deg/s
-* ``slew_acceleration_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z acceleration limits in deg/s²
-* ``max_slew_rate_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z slew-rate limits in deg/s
-* ``slew_accuracy`` (float): Pointing accuracy after slew completion in degrees
-* ``settle_time`` (float): Time to settle after slew completion in seconds
-* ``slew_requirements`` (list of :class:`~conops.config.SlewRequirement`, optional): the
-  mission's slew requirement classes, each a ``name``, the widest slew of the class as
-  the great-circle angle between the pointings it joins (``max_great_circle_deg``) and
-  the most such a slew may take, settled (``max_seconds``). A check on the slews the ACS
-  model flies, not a constraint on them: each plan entry records the great-circle angle
-  of its slew (``great_circle_deg``) beside the rotation flown (``slewdist``), which the
-  roll lengthens; the planners log a slew that takes longer than its class allows, a
-  run reports them with ``slew_requirement_mismatches()`` apart from the plan's
-  execution mismatches, and ``print_statistics`` summarises the slews by class with the
-  longest of each and how many broke the allowance
-* ``thermal_settling`` (list of :class:`~conops.config.ThermalSettlingStep`, optional): the
-  settle after a slew by how far the slew moves the Sun's direction in the body frame,
-  since the structure settles thermally after the Sun moves across it. Each step covers
-  changes up to ``max_sun_vector_change_deg`` and gives ``settle_seconds``; a slew takes
-  the settle of the first step wide enough for its change, or the last step's beyond the
-  table. Empty, the settle is ``settle_time`` for every slew. With a table the ACS model's
-  slews and the planners' record the change (``sun_vector_change_deg``) and the settle
-  (``settle_seconds``) on each plan entry and in the slew log; dispatch's slew estimate at
-  selection, the queue's own estimate and the sequential planner's use the same settle, so
-  target selection and the battery and recorder ledgers see the slew's full time, the
-  settle counted at the arrival attitude; an estimate made without the time or a roll takes
-  the table's longest settle. A category with ``skip_thermal_settling`` takes
-  ``settle_time`` (see `observation_categories`_). Bounds on a slew's duration allow for
-  the table's longest settle.
-* ``max_roll_from_optimum_deg`` (float, optional): How far a roll a target asks for
-  (``roll_deg`` or ``roll_offset_deg`` on the :class:`~conops.targets.Pointing`) may
-  differ from the power-optimal roll, in degrees either way. An offset beyond it is
-  rejected; a target with an absolute roll beyond it at some time is not observed
-  then. None allows any roll the constraints allow.
-* ``slew_before_visible`` (bool, default False): Whether a slew to a science target that is not visible yet may start before it becomes visible, timed to arrive as it does. If False, ACS waits until the target is visible before starting the slew, so the slew time after the target rises is lost. When True, a slew to a target that is not visible yet is not flown if it would arrive no earlier than the end of its plan entry.
-* ``stored_momentum`` (:class:`~conops.config.momentum.StoredMomentumConfig`): Optional planning-level momentum tracking
-* ``slew_algorithm`` (:class:`~conops.common.enums.SlewAlgorithm`): Algorithm for computing slew paths:
-
-  - ``QUATERNION`` (default): Full 3-DOF SLERP coupling pointing and roll changes
-  - ``CONSTRAINT_AVOIDING``: Routes around any configured constraints (Sun, Earth, Moon, etc.)
-
-* ``slew_constraint`` (ConstraintConfig | None): Optional rust-ephem constraint for slew path planning. When set and ``slew_algorithm`` is ``CONSTRAINT_AVOIDING``, this constraint is used instead of the spacecraft's general pointing constraint. This allows different safety margins for slewing vs. science pointing.
-
-When either body-axis tuple is present, COAST applies it as an ellipsoidal
-coupled-axis envelope.  For a unit maneuver axis :math:`u` and axis limits
-:math:`L=(L_x,L_y,L_z)`, the effective limit along the path is
-:math:`1 / \sqrt{\sum_i (u_i/L_i)^2}`.  For example, equal X/Y limits of
-0.2 deg/s produce a total rate of 0.2 deg/s about a 45-degree X/Y axis, or
-approximately 0.141 deg/s on each component. Quaternion slews resolve the
-maneuver axis in the initial spacecraft body frame. When a body-axis tuple is
-configured, slew estimates require complete starting and target attitudes
-(RA, Dec, and roll); kinematic calls without a maneuver axis raise an error.
-Constraint-avoiding paths are evaluated as rest-to-rest segments using each
-segment's own body-frame rotation axis. If both tuples are omitted, the scalar
-fields retain their existing behavior, including legacy RA/Dec-only estimates.
-
-Gravity-gradient momentum tracking is disabled by default. Enable it by supplying
-a physical body-frame inertia tensor about the spacecraft center of mass and
-setting ``gravity_gradient_enabled``. Its principal moments must be positive and
-satisfy the triangle inequalities; a planar-body equality is allowed, including
-relative rounding of approximately 1.5e-8 (the square root of float64 machine
-epsilon). The named ``INERTIA_RELATIVE_TOLERANCE`` allows roughly eight significant
-digits of input precision, not physical mass-properties uncertainty. Symmetry
-uses the same tolerance relative to the largest tensor entry; accepted rounding
-asymmetry is averaged before validation and storage.
-COAST integrates the angular impulse in inertial coordinates, then reports the
-stored-momentum vector in the current body frame. This prevents attitude changes
-alone from appearing to generate momentum. The optional capacity enforcement below
-adds maneuver momentum to this model; the other torque sources, the magnetorquers
-and thruster dumps are described under `Stored momentum`_ and on :doc:`momentum`.
-
-The tracker reloads the inertia, initial momentum, sampling limits, and enable
-flag at the start of every run. Configuration changes between runs therefore
-take effect without reconstructing the simulation.
-
-This is a sampled torque integrator, not an attitude-trajectory interpolator.
-To guard against missing torque between samples, enabled runs require both the
-executed-attitude and ephemeris intervals to be no greater than the smaller of:
-
-* ``stored_momentum.max_sample_interval_s`` (default 10 seconds, configurable downward);
-* ``stored_momentum.max_attitude_step_deg`` (default 5 degrees, configurable
-  downward) divided by the fastest configured body-axis slew rate (or scalar
-  ``max_slew_rate`` when body-axis limits are absent).
-
-For example, with the default angular limit, a fastest rate of 2 degrees/second
-requires intervals of at most 2.5 seconds; lowering ``max_attitude_step_deg`` to
-2 degrees requires intervals of at most 1 second. Both settings can tighten,
-but not relax, the default sampling guards. Set ``DITL.step_size`` and generate
-an ephemeris at an appropriate resolution; ``QueueDITL`` uses the ephemeris step
-as its execution step. Coarse
-runs fail before ACS execution or power updates; a fine execution step cannot
-compensate for a coarse ephemeris. Disabled tracking leaves existing runs unchanged.
-
-These are conservative sampling guards, not a guaranteed integration-error
-tolerance. Verify convergence at finer cadence for final studies. The guard
-does not change scheduling cadence automatically or call the ACS state machine
-at synthetic intermediate times. Use fixed-plan replay when comparing numerical
-cadences without replanning the science schedule.
-
-.. code-block:: yaml
-
-   spacecraft_bus:
-     inertia_tensor_body_kg_m2:
-       - [1000.0, 0.0, 0.0]
-       - [0.0, 1200.0, 0.0]
-       - [0.0, 0.0, 800.0]
-     attitude_control:
-       stored_momentum:
-         gravity_gradient_enabled: true
-         max_sample_interval_s: 10.0
-         max_attitude_step_deg: 5.0
-         initial_momentum_body_n_m_s: [0.0, 0.0, 0.0]
-
-Momentum-constrained queue scheduling
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Set ``stored_momentum.enforce_capacity`` with a finite positive spherical actuator
-momentum limit in ``stored_momentum.capacity_n_m_s`` to enable admission and
-execution checks. The default leaves existing scheduling unchanged. A physical
-inertia tensor is required, even when gravity-gradient torque is disabled.
-Enforcement integrates the same torque sources the run tracks, into the run's own
-tracker, so it can be combined with thruster dumps: the dumps empty the wheels at
-the planning level and enforcement forecasts on from what they hold.
-
-The executor carries total angular momentum in inertial coordinates. At each
-sample the required actuator momentum in body coordinates is
-``R_eci_to_body @ H_total_eci - I_body @ omega_body``. The capacity bounds the norm
-of this vector, not the sum of the disturbance and maneuver momentum norms.
-The initial configured vector is actuator momentum; an initially moving body's
-``I @ omega`` is included separately. Candidate forecasts copy the current state
-and cannot consume or reset the live momentum budget.
-
-``QueueDITL`` retains its ordinary queue ranking, then checks each selected
-target's acquisition, settling, entire observation, and a finite return to the
-departure attitude followed by an idle reserve. It tries the preferred roll and
-a bounded alternative-roll grid, reducing speed only after a momentum violation.
-It may shorten an exposure, but never below ``ss_min`` or into the configured
-setup/cleanup/handoff budget. Before accepting a shortened exposure it searches
-the other rolls for a longer hold; a full snapshot ends the search. Collection
-ends at the exact requested exposure, while the physical hold (including the
-cleanup/handoff budget) extends to the next scheduler tick and is checked in full.
-Hard visibility, recovery and mission deadlines are never rounded upward.
-Mounted-telescope candidates use their trial instrument roll for science checks
-and their corresponding body attitude for hardware checks, without changing the
-live target. Acceleration limits, settling time, hardware
-keepouts and science availability constraints are retained. The return is a
-fallback: another admitted target can follow directly without returning first.
-
-.. code-block:: yaml
-
-   # Within spacecraft_bus.attitude_control:
-   stored_momentum:
-     gravity_gradient_enabled: true
-     capacity_n_m_s: 20.0
-     enforce_capacity: true
-     slew_rate_fractions: [1.0, 0.75, 0.5, 0.25, 0.125]
-     roll_step_deg: 30
-
-With capacity enforcement, integration samples the immutable executed trajectory
-internally, including acceleration corners. A complete short slew cannot hide
-between scheduler ticks. Hermite tracking segments also use polynomial interval
-bounds on actuator momentum, so an interior tracking-rate peak cannot hide
-between integration samples. These bounds retain the full inertia tensor and
-the vector combination of inertial and maneuver momentum. For enabled external
-torque, the interval model integrates the linearly interpolated endpoint torques,
-consistent with the sampled trapezoidal integrator; orbit/torque convergence
-checks are still required. A tracking interval that cannot be certified is
-rejected even if its endpoint samples fit, with a distinct diagnostic rather
-than a claim that the sampled peak exceeded the limit.
-Gravity-gradient enforcement requires orbit samples no
-farther apart than ``max_sample_interval_s``; internal attitude sampling also
-obeys ``max_attitude_step_deg``. It does not require housekeeping at the internal
-motion cadence. ``QueueDITL`` still takes its scheduling cadence from the supplied
-ephemeris's ``step_size``. This change does not add a separate scheduler-cadence
-configuration.
-
-All installed maneuvers and executed intervals share the same guard, including
-contacts, charging, safe mode, braking, idle and the final simulation interval.
-A capacity violation or absence of a validated idle continuation raises
-``MomentumLimitError``; it must not be treated as a successful science plan.
-Non-science guidance is guarded but is not automatically optimized for momentum.
-During idle, waiting another tick requires a validated escape from the predicted
-next-tick state, or a current hold that remains safe to run-end. This uses the
-actual momentum-limited recovery trajectory, not a nominal full-speed time reserve.
-Reduced science-slew caps are saved as ``PlanEntry.slew_rate_fraction`` and used
-when dispatching that entry. This does not add a complete activity replay format
-for all idle recovery maneuvers; retain the executed attitude history for auditing.
-
-This is a sampled rigid-body feasibility model, not a continuous-time certificate
-or a full actuator simulation. It does not include CMG steering singularities,
-individual actuator limits, moving-array inertia, or disturbances other than the
-configured torque sources. Check convergence
-and allow appropriate engineering margin. The bounded roll/speed search and
-return-to-departure fallback are conservative: rejecting a candidate does not
-prove it physically impossible, and the resulting yield is not maximum capacity.
+* ``surfaces`` (:class:`~conops.config.SurfaceModel` | None): The spacecraft's surfaces, modelled as flat plates placed about its centre of mass. They are used to compute the torques of sunlight and drag (see `Stored momentum`_ below). If this is None and those torques are tracked, a placeholder model is built from the bus, panels and telescopes
 
 .. code-block:: python
 
@@ -599,30 +359,418 @@ prove it physically impossible, and the resulting yield is not maximum capacity.
        ),
    )
 
+.. _Spacecraft frame:
+
+**Spacecraft frame**
+
+Every vector in the configuration is written in the spacecraft body frame. This covers
+panel normals, radiator normals, antenna and star tracker boresights, surfaces, the
+inertia tensor and per-axis slew limits. COAST points the body's science boresight at
+the target and rolls the spacecraft about that boresight. Each mission chooses which
+body axis the boresight lies along and which body axis faces the Sun's side at zero
+roll. :class:`~conops.config.SpacecraftFrame` declares both choices once, on the bus:
+
+* ``boresight`` (tuple[float, float, float]): The body axis the science boresight lies
+  along, as a unit vector. A telescope without a mounting of its own points along this
+  axis. Default ``(1, 0, 0)``.
+* ``sun_side`` (tuple[float, float, float]): The body axis that faces the Sun's side at
+  zero roll, which is the direction a side-mounted panel faces. It is a unit vector
+  and must be perpendicular to the boresight. Default ``(0, 1, 0)``.
+
+The default frame has the boresight along +X and the Sun's side along +Y. This is the
+frame COAST has always computed in, so a configuration that leaves the frame at its
+default is unchanged. Declaring another frame has the following effects:
+
+* A :class:`~conops.config.Telescope` given neither a ``mounting`` nor a ``boresight``
+  takes the frame's mounting. Its science RA/Dec and roll are then converted to the
+  body attitude in the same way as for any mounted telescope (see
+  `Telescope Instruments`_). A telescope given either a ``mounting`` or a ``boresight``
+  keeps what it was given.
+* A request that names a plain instrument without a mounting follows the boresight
+  and clocking declared on the bus. The instrument name recorded is still that of the
+  configured instrument, including during moving-target tracking.
+* Unmounted ``safety_constraint`` and ACS ``slew_constraint`` cones follow the
+  declared reference boresight. Explicit boresight-offset subtrees already describe
+  body hardware and are preserved.
+* Slew waypoints are chosen in the reference frame and are transformed into physical
+  body axes before the slew is executed and before its per-axis timing is computed.
+  Relabelling the exported quaternions afterwards would not amount to a frame
+  conversion.
+* :func:`~conops.config.create_solar_panel_vector` and
+  :func:`~conops.config.create_star_tracker_vector` take a ``frame=`` argument and
+  return their vectors in the mission's frame. A ``'boresight'`` panel then faces the
+  frame's boresight, a ``'sidemount'`` panel faces the frame's Sun's side, and a star
+  tracker's default direction is along the boresight.
+* The frame is written to and read from YAML and JSON with the bus. Once a telescope
+  has taken its mounting from the frame, that mounting is written with the telescope.
+
+.. code-block:: python
+
+   from conops.config import SpacecraftBus, SpacecraftFrame, Telescope, create_solar_panel_vector
+
+   # Boresight along body +Z, panels facing body -Y
+   frame = SpacecraftFrame(boresight=(0.0, 0.0, 1.0), sun_side=(0.0, -1.0, 0.0))
+   bus = SpacecraftBus(frame=frame)
+   panel_normal = create_solar_panel_vector("sidemount", cant_perp=15.0, frame=frame)
+   telescope = Telescope(name="Primary")  # points along body +Z
+
+**AttitudeControlSystem Configuration:**
+
+The :class:`~conops.config.AttitudeControlSystem` defines slew performance and path algorithms:
+
+* ``slew_acceleration`` (float): Maximum angular acceleration in deg/s²
+* ``max_slew_rate`` (float): Maximum slew rate in deg/s
+* ``slew_acceleration_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z acceleration limits in deg/s²
+* ``max_slew_rate_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z slew-rate limits in deg/s
+* ``slew_accuracy`` (float): Pointing accuracy after slew completion in degrees
+* ``safe_mode_attitude`` (:class:`~conops.config.activity_attitude.ActivityAttitude` | None): Optional fixed or power-positive attitude the spacecraft holds after fault management puts it in safe mode. An inherited attitude is rejected. None keeps the existing charging guidance; see :ref:`power-positive-fault-safe-mode`
+* ``settle_time`` (float): Time to settle after slew completion in seconds
+* ``slew_requirements`` (list of :class:`~conops.config.SlewRequirement`, optional): The
+  mission's slew requirement classes. Each class has a ``name`` and two limits:
+
+  - ``max_great_circle_deg`` is the widest slew that belongs to the class, measured as
+    the great-circle angle between the two pointings the slew joins.
+  - ``max_seconds`` is the longest time a slew of the class may take, including its
+    settle.
+
+  The classes are a check on the slews the ACS model flies. They do not constrain
+  those slews. Each plan entry records the great-circle angle of its slew
+  (``great_circle_deg``) beside the rotation actually flown (``slewdist``), which is
+  longer when the slew also changes the roll. The planners log any slew that takes
+  longer than its class allows. A run reports those slews through
+  ``slew_requirement_mismatches()``, separately from the plan's execution mismatches.
+  ``print_statistics`` summarises the slews by class, with the longest slew of each
+  class and the number that exceeded the allowance.
+* ``thermal_settling`` (list of :class:`~conops.config.ThermalSettlingStep`, optional): A
+  table that sets the settle time after a slew from how far the slew moves the Sun's
+  direction in the body frame. The table exists because the structure settles
+  thermally after the Sun moves across it.
+
+  Each step of the table covers changes of the Sun's direction up to
+  ``max_sun_vector_change_deg`` and gives a settle time, ``settle_seconds``. A slew
+  takes the settle of the first step that is wide enough for its change. A slew whose
+  change is beyond the table takes the last step's settle. If the table is empty, the
+  settle is ``settle_time`` for every slew.
+
+  When a table is configured:
+
+  - The ACS model's slews and the planners' slews record the change
+    (``sun_vector_change_deg``) and the settle (``settle_seconds``) on each plan entry
+    and in the slew log.
+  - Dispatch's slew estimate at target selection, the queue's own estimate and the
+    sequential planner's estimate all use the same settle. Target selection and the
+    battery and recorder ledgers therefore see the slew's full time. The settle is
+    counted at the arrival attitude.
+  - An estimate made without the time or a roll takes the table's longest settle.
+  - A category with ``skip_thermal_settling`` takes ``settle_time`` (see
+    `observation_categories`_).
+  - Bounds on a slew's duration allow for the table's longest settle.
+* ``max_roll_from_optimum_deg`` (float, optional): The most that a roll requested by a
+  target (``roll_deg`` or ``roll_offset_deg`` on the :class:`~conops.targets.Pointing`)
+  may differ from the power-optimal roll, in degrees in either direction. A requested
+  offset beyond this limit is rejected. A target with an absolute roll is not observed
+  at any time when that roll is beyond the limit. None allows any roll the constraints
+  allow.
+* ``slew_before_visible`` (bool, default False): Whether a slew to a science target that is not visible yet may start before the target becomes visible, timed so that the spacecraft arrives as it does. If False, the ACS waits until the target is visible before starting the slew, so the time spent slewing after the target rises is lost. When True, a slew to a target that is not visible yet is not flown if it would arrive no earlier than the end of the target's plan entry.
+* ``idle_min_hold_s`` (float, default 300): The shortest time, in seconds, an idle attitude must remain safe after the spacecraft arrives at it. It is required in addition to the reserve kept for the slew away from that attitude
+* ``stored_momentum`` (:class:`~conops.config.momentum.StoredMomentumConfig`): Optional planning-level momentum tracking
+* ``slew_algorithm`` (:class:`~conops.common.enums.SlewAlgorithm`): Algorithm for computing slew paths:
+
+  - ``QUATERNION`` (default): Full 3-DOF SLERP coupling pointing and roll changes
+  - ``CONSTRAINT_AVOIDING``: Routes around any configured constraints (Sun, Earth, Moon, etc.)
+
+* ``slew_constraint`` (ConstraintConfig | None): Optional rust-ephem constraint for slew path planning. When it is set and ``slew_algorithm`` is ``CONSTRAINT_AVOIDING``, this constraint is used in place of the spacecraft's general pointing constraint, so that slewing and science pointing can have different safety margins.
+* ``gsp_tracking_phase_step_deg`` (float, default 5): The increment, in degrees, of the search over roll phase for a ground-station pass's tracking attitude. A smaller value tries more candidate tracking attitudes and takes more computing time.
+
+The two body-axis tuples, ``slew_acceleration_body`` and ``max_slew_rate_body``, give
+a separate limit about each body axis. When either tuple is present, COAST applies it
+as an ellipsoidal coupled-axis envelope.  For a unit maneuver axis :math:`u` and axis
+limits :math:`L=(L_x,L_y,L_z)`, the effective limit along the path is
+:math:`1 / \sqrt{\sum_i (u_i/L_i)^2}`.  For example, equal X/Y limits of
+0.2 deg/s produce a total rate of 0.2 deg/s about a 45-degree X/Y axis, or
+approximately 0.141 deg/s on each component.
+
+The two slew algorithms find the maneuver axis differently. Quaternion slews resolve
+the maneuver axis in the initial spacecraft body frame. Constraint-avoiding paths are
+evaluated as rest-to-rest segments, and each segment uses its own body-frame rotation
+axis.
+
+When a body-axis tuple is configured, slew estimates require complete starting and
+target attitudes (RA, Dec, and roll), and a kinematic call made without a maneuver
+axis raises an error. If both tuples are omitted, the scalar fields behave as they did
+before the tuples existed, and estimates made from RA and Dec alone still work.
+
+Gravity-gradient momentum tracking is disabled by default. To enable it, supply a
+physical body-frame inertia tensor about the spacecraft center of mass and set
+``gravity_gradient_enabled``. The inertia tensor is validated as follows:
+
+* Its principal moments must be positive and satisfy the triangle inequalities.
+  Equality, which describes a planar body, is allowed, and so is relative rounding of
+  approximately 1.5e-8 (the square root of float64 machine epsilon).
+* That tolerance is the named constant ``INERTIA_RELATIVE_TOLERANCE``. It allows for
+  roughly eight significant digits of input precision. It is not an allowance for
+  physical uncertainty in the mass properties.
+* Symmetry is checked with the same tolerance, relative to the largest tensor entry.
+  Rounding asymmetry that is accepted is averaged out before the tensor is validated
+  and stored.
+
+COAST integrates the angular impulse in inertial coordinates and then reports the
+stored-momentum vector in the current body frame. Integrating in inertial coordinates
+prevents a change of attitude alone from appearing to generate momentum. The optional
+capacity enforcement described below adds maneuver momentum to this model. The other
+torque sources, the magnetorquers and thruster dumps are described under
+`Stored momentum`_ and on :doc:`momentum`.
+
+The tracker reloads the inertia, initial momentum, sampling limits, and enable
+flag at the start of every run. Configuration changes between runs therefore
+take effect without reconstructing the simulation.
+
+The tracker integrates torque at discrete samples and does not interpolate the
+attitude trajectory between them. A held attitude is sampled at the ephemeris
+resolution. A slew is sampled every ``stored_momentum.max_attitude_step_deg`` (default
+5 degrees) of motion at the fastest configured body-axis slew rate (or scalar
+``max_slew_rate`` when body-axis limits are absent). Tracking alone places no limit on
+the ephemeris interval, so a tracked run works at whatever resolution the ephemeris
+has.
+
+A sampling guard applies only where the capacity is enforced (see
+`Momentum-constrained queue scheduling`_). Enforcement integrates over intervals no
+longer than the smaller of:
+
+* ``stored_momentum.max_sample_interval_s`` (default 10 seconds);
+* ``stored_momentum.max_attitude_step_deg`` divided by the fastest configured slew
+  rate.
+
+For example, with the default angular limit, a fastest rate of 2 degrees/second
+gives intervals of at most 2.5 seconds, and lowering ``max_attitude_step_deg`` to
+2 degrees gives intervals of at most 1 second. ``max_sample_interval_s`` can be
+lowered but cannot be set above 10 seconds. ``max_attitude_step_deg`` has no upper
+limit, so it can be either lowered or raised.
+
+Where the capacity is enforced and any torque source is enabled, the ephemeris
+interval must also be no greater than ``max_sample_interval_s``, so generate the
+ephemeris at a resolution that meets this limit. ``QueueDITL`` uses the ephemeris
+step as its execution step. An enforced run with a coarser ephemeris fails with an
+error, and enforcement's finer internal sampling of the motion cannot compensate for
+a coarse ephemeris. When tracking is disabled, existing runs are unchanged.
+
+These sampling limits are conservative, but they do not guarantee an integration-error
+tolerance, so verify convergence at a finer cadence for final studies. The guard does
+not change the scheduling cadence automatically, and it does not call the ACS state
+machine at synthetic intermediate times. To compare numerical cadences without
+replanning the science schedule, use fixed-plan replay.
+
+.. code-block:: yaml
+
+   spacecraft_bus:
+     inertia_tensor_body_kg_m2:
+       - [1000.0, 0.0, 0.0]
+       - [0.0, 1200.0, 0.0]
+       - [0.0, 0.0, 800.0]
+     attitude_control:
+       stored_momentum:
+         gravity_gradient_enabled: true
+         max_sample_interval_s: 10.0
+         max_attitude_step_deg: 5.0
+         initial_momentum_body_n_m_s: [0.0, 0.0, 0.0]
+
+Momentum-constrained queue scheduling
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This section covers two settings under
+``spacecraft_bus.attitude_control.stored_momentum`` that affect how the queue
+schedules around the momentum the wheels hold: the attitude a thruster dump fires at,
+and enforcement of the wheels' capacity as a hard limit.
+
+.. rubric:: Thruster dump attitude
+
+A thruster dump is a hold during which the wheels are unloaded. It is configured by
+``thruster_dump``, placed under ``spacecraft_bus.attitude_control.stored_momentum``.
+``ThrusterDumpConfig.attitude`` sets the attitude the spacecraft fires at, and accepts
+the same :class:`~conops.config.activity_attitude.ActivityAttitude` as scheduled holds.
+
+* The default attitude is inherited.
+* With a required fixed pose, dispatch and the planners reserve the turn to that pose
+  as well as the full ``duration_seconds`` of firing at it.
+* The wheels are reset once, at the end of the firing. A firing that is still
+  incomplete at the physical end of the simulation does not reset the wheels.
+* A configured dump waits for an indivisible visit before turning and firing.
+
+The pose in the example below is illustrative and was chosen as a test input. The
+firing rule remains a mission configuration input. The angles of a fixed pose use the
+physical GCRS body-attitude convention of plan entries, including when the declared
+spacecraft frame has a +Z payload boresight.
+
+.. code-block:: yaml
+
+   thruster_dump:
+     duration_seconds: 120.0
+     residual_fraction: 0.0
+     attitude:
+       kind: fixed
+       ra_deg: 105.0
+       dec_deg: 10.0
+       roll_deg: 25.0
+
+Power-positive scheduled safe holds and fault-mode guidance also use this
+attitude model; see :ref:`power-positive-fault-safe-mode`.
+
+.. rubric:: Enforcing the momentum capacity
+
+Capacity enforcement checks the wheels' momentum against a limit both when a target
+is admitted to the plan and when the plan is executed. To enable it, set
+``stored_momentum.enforce_capacity`` and give the actuator momentum limit in
+``stored_momentum.capacity_n_m_s``. The limit must be finite and positive, and it is
+spherical, meaning the same about every axis. Enforcement is off by default, which
+leaves existing scheduling unchanged. A physical inertia tensor is required, even when
+gravity-gradient torque is disabled.
+
+Enforcement integrates the same torque sources the run tracks, and it integrates them
+into the run's own tracker. It can therefore be combined with thruster dumps. The
+dumps empty the wheels at the planning level, and enforcement continues its forecasts
+from the momentum the wheels then hold.
+
+The executor carries total angular momentum in inertial coordinates. At each
+sample the required actuator momentum in body coordinates is
+``R_eci_to_body @ H_total_eci - I_body @ omega_body``. The capacity bounds the norm
+of this vector. It does not bound the sum of the disturbance and maneuver momentum
+norms. The initial configured vector is actuator momentum, and if the body is moving
+at the start its ``I @ omega`` is included separately. Candidate forecasts work on a
+copy of the current state, so they cannot consume or reset the live momentum budget.
+
+.. rubric:: How the queue admits a target
+
+``QueueDITL`` keeps its ordinary queue ranking and then checks the momentum of each
+target it selects. The check covers the acquisition, the settling, the entire
+observation, and a finite return to the departure attitude followed by an idle
+reserve. The return is a fallback. Another admitted target can follow directly
+without the spacecraft returning first.
+
+To fit a target within the capacity, the queue searches as follows:
+
+* It tries the preferred roll and a bounded grid of alternative rolls.
+* It reduces the slew speed only after a momentum violation.
+* It may shorten an exposure, but never below ``ss_min`` and never into the configured
+  setup/cleanup/handoff budget.
+* Before it accepts a shortened exposure, it searches the other rolls for a longer
+  hold. A full snapshot ends the search.
+
+Throughout the search, acceleration limits, settling time, hardware keepouts and
+science availability constraints are retained. A candidate for a mounted telescope
+uses its trial instrument roll for science checks and the corresponding body attitude
+for hardware checks, and the live target is not changed.
+
+Collection ends at the exact requested exposure. The physical hold, which includes
+the cleanup/handoff budget, extends to the next scheduler tick and is checked in full.
+Hard visibility, recovery and mission deadlines are never rounded upward.
+
+.. code-block:: yaml
+
+   # Within spacecraft_bus.attitude_control:
+   stored_momentum:
+     gravity_gradient_enabled: true
+     capacity_n_m_s: 20.0
+     enforce_capacity: true
+     slew_rate_fractions: [1.0, 0.75, 0.5, 0.25, 0.125]
+     roll_step_deg: 30
+
+.. rubric:: How enforcement samples the motion
+
+With capacity enforcement, the integration samples the immutable executed trajectory
+internally, including its acceleration corners, so a complete short slew cannot hide
+between scheduler ticks.
+
+Hermite tracking segments also use polynomial interval bounds on actuator momentum,
+so a peak in tracking rate inside a segment cannot hide between integration samples.
+These bounds retain the full inertia tensor and the vector combination of inertial
+and maneuver momentum. Where external torque is enabled, the interval model
+integrates the linearly interpolated endpoint torques, which is consistent with the
+sampled trapezoidal integrator. Orbit/torque convergence checks are still required.
+A tracking interval that cannot be certified is rejected even if its endpoint samples
+fit. The rejection has its own diagnostic and does not claim that the sampled peak
+exceeded the limit.
+
+The sampling requirements are these:
+
+* Gravity-gradient enforcement requires orbit samples no farther apart than
+  ``max_sample_interval_s``.
+* Internal attitude sampling also obeys ``max_attitude_step_deg``.
+* Enforcement does not require housekeeping at the internal motion cadence.
+* ``QueueDITL`` still takes its scheduling cadence from the supplied ephemeris's
+  ``step_size``. There is no separate configuration for the scheduler cadence.
+
+.. rubric:: What is guarded, and what happens on a violation
+
+All installed maneuvers and executed intervals share the same guard. This includes
+contacts, charging, safe mode, braking, idle and the final simulation interval.
+Non-science guidance is guarded but is not automatically optimized for momentum.
+
+A capacity violation, or the absence of a validated idle continuation, raises
+``MomentumLimitError``. A run that raises it must not be treated as a successful
+science plan.
+
+During idle, waiting another tick requires one of two things: a validated escape from
+the state predicted for the next tick, or a current hold that remains safe to the end
+of the run. This check uses the actual momentum-limited recovery trajectory. It does
+not rely on a nominal full-speed time reserve.
+
+When a science slew is flown under a reduced speed cap, the cap is saved as
+``PlanEntry.slew_rate_fraction`` and used when that entry is dispatched. There is no
+complete activity replay format covering all idle recovery maneuvers, so retain the
+executed attitude history for auditing.
+
+.. rubric:: Limits of the model
+
+Capacity enforcement is a sampled rigid-body feasibility model. It is not a
+continuous-time certificate or a full actuator simulation, and it does not include:
+
+* CMG steering singularities;
+* individual actuator limits;
+* moving-array inertia;
+* disturbances other than the configured torque sources.
+
+Check convergence and allow appropriate engineering margin. The bounded roll/speed
+search and the return-to-departure fallback are conservative. Rejecting a candidate
+does not prove it physically impossible, and the resulting yield is not maximum
+capacity.
+
 .. _Stored momentum:
 
-Stored-momentum tracking is disabled by default; :doc:`momentum` describes the
-model, the dumps and the planners' use of it in full. In short: supplying a
-physical body-frame inertia tensor and enabling one or more torque sources tracks
-the momentum the wheels store, in inertial coordinates, reported in the body frame
-at every sample with each source's torque by name. The sources are the gravity
-gradient (``gravity_gradient_enabled``), sunlight and the atmosphere on the
-spacecraft's surfaces (``solar_radiation_pressure_enabled``,
-``aerodynamic_drag_enabled``, with ``spacecraft_bus.surfaces`` or a placeholder built
-from the bus, panels and telescopes, and the atmosphere ``atmosphere`` selects: the
-built-in table or NRLMSIS through the optional ``pymsis``), the spacecraft's residual
-dipole (``residual_dipole_body_a_m2``) and the magnetorquers' unloading
-(``magnetorquer_max_dipole_a_m2``, ``magnetorquer_time_constant_s``), the last two in
-the ``geomagnetic_field`` selected: the built-in tilted dipole or the IGRF through the
-optional ``ppigrf``. ``capacity_n_m_s``, ``planning_level`` and ``thruster_dump`` give
-the wheels a capacity and the spacecraft thruster dumps, which dispatch calls for
-and the planners reserve where the stored momentum reaches the planning level, held
-in the ``DESAT`` ACS mode; the capacity itself is a red line fault management
-records. ``slew_momentum_enabled`` counts the momentum the body carries while it
-slews against the capacity, which is then the wheels' whole capacity: a slew that
-does not fit the room the stored momentum leaves is flown slower, at the first of
-``slew_rate_fractions`` that fits, by dispatch and by the planners alike. A held
-attitude is sampled at the ephemeris resolution and a slew every
+Stored-momentum tracking is disabled by default. :doc:`momentum` describes the
+model, the dumps and the planners' use of it in full, and what follows is a summary
+of the settings under ``spacecraft_bus.attitude_control.stored_momentum``.
+
+Tracking is turned on by supplying a physical body-frame inertia tensor and enabling
+one or more torque sources. COAST then tracks the momentum the wheels store. It
+tracks the momentum in inertial coordinates and reports it in the body frame at every
+sample, with each source's torque by name. The sources are:
+
+* the gravity gradient (``gravity_gradient_enabled``);
+* sunlight on the spacecraft's surfaces (``solar_radiation_pressure_enabled``);
+* the atmosphere on the spacecraft's surfaces (``aerodynamic_drag_enabled``), in the
+  atmosphere that ``atmosphere`` selects, which is either the built-in table or
+  NRLMSIS through the optional ``pymsis``;
+* the spacecraft's residual dipole (``residual_dipole_body_a_m2``);
+* the magnetorquers' unloading (``magnetorquer_max_dipole_a_m2``,
+  ``magnetorquer_time_constant_s``).
+
+Sunlight and the atmosphere act on ``spacecraft_bus.surfaces``, or on a placeholder
+built from the bus, panels and telescopes. The residual dipole and the magnetorquers
+act in the field that ``geomagnetic_field`` selects, which is either the built-in
+tilted dipole or the IGRF through the optional ``ppigrf``.
+
+``capacity_n_m_s``, ``planning_level`` and ``thruster_dump`` give the wheels a
+capacity and the spacecraft thruster dumps. Where the stored momentum reaches the
+planning level, dispatch calls for a dump and the planners reserve one. A dump is held
+in the ``DESAT`` ACS mode. The capacity itself is a red line that fault management
+records.
+
+``slew_momentum_enabled`` counts the momentum the body carries while it slews against
+the capacity, and the capacity is then the wheels' whole capacity. A slew that does
+not fit in the room the stored momentum leaves is flown slower, at the first of
+``slew_rate_fractions`` that fits. Dispatch and the planners both apply this rule.
+
+A held attitude is sampled at the ephemeris resolution, and a slew is sampled every
 ``max_attitude_step_deg`` of motion, so tracking works at whatever resolution the
 ephemeris has.
 
@@ -641,8 +789,12 @@ The :class:`~conops.config.SolarPanelSet` defines the solar array configuration.
 
 * ``name`` (str): Panel identifier
 * ``gimbled`` (bool): Whether the panel uses the legacy ideal Sun-tracking
-  model, with no travel or rate limits
-* ``normal`` (tuple[float, float, float]): Panel normal vector in spacecraft body frame
+  model, which has no travel or rate limits. It cannot be combined with
+  ``single_axis_drive``
+* ``normal`` (tuple[float, float, float]): Panel normal vector in spacecraft body frame.
+  The axis meanings below are those of the default `Spacecraft frame`_. A bus that
+  declares another frame has its boresight and Sun's side along the axes that frame
+  names
 
   - +x is the spacecraft pointing direction (boresight)
   - +y is the spacecraft "up" direction
@@ -653,8 +805,9 @@ The :class:`~conops.config.SolarPanelSet` defines the solar array configuration.
 * ``conversion_efficiency`` (float | None): Per-panel efficiency override
 * ``single_axis_drive`` (SingleAxisSolarArrayDrive | None): Optional finite,
   rate-limited rotation about one spacecraft-body axis
-* ``drive_control`` (SolarArrayDriveControl): Mode-aware operational policy for
-  a finite drive; the default holds the initial/current angle in every mode
+* ``drive_control`` (SolarArrayDriveControl): The operating policy for a finite
+  drive, which depends on the ACS mode. The default holds the initial/current
+  angle in every mode
 
 .. code-block:: python
 
@@ -694,8 +847,9 @@ the best available Sun-facing angle without exceeding its travel or rate limits.
 Tracking in eclipse is disabled unless ``track_in_eclipse=True`` is explicitly
 configured.
 
-The drive kinematics and control policy are separate so hardware capability does
-not silently impose an operations concept.
+The drive's kinematics (``SingleAxisSolarArrayDrive``) and its control policy
+(``SolarArrayDriveControl``) are configured separately. Describing what the hardware
+can do therefore does not, by itself, decide how the drive is operated.
 
 .. code-block:: python
 
@@ -734,26 +888,32 @@ not silently impose an operations concept.
    )
 
 Drive configuration is immutable. Each simulation owns a separate
-:class:`~conops.config.SolarArrayDriveState` containing the executed angles,
-last update time, and state revision. Candidate pointing and roll calculations
-score one state snapshot without modifying it or granting motion under an
-attitude that has not executed. After attitude selection, each DITL sample
-advances the array exactly once under the executed attitude and reports endpoint
-power.
+:class:`~conops.config.SolarArrayDriveState`, which holds the executed angles, the
+last update time, and a state revision. When COAST evaluates candidate pointings and
+rolls, it scores them against one snapshot of that state. The snapshot is not
+modified, and the drive is not credited with motion under an attitude that has not
+been executed. After the attitude is selected, each DITL sample advances the array
+exactly once under the executed attitude and reports the power at the end of the
+sample.
 
 ``solar_array_drive_angles`` housekeeping telemetry records each resulting
 angle with its configured panel index and name. The
-``solar_array_drive_angles_deg`` property remains as an order-based compatibility
-view.
+``solar_array_drive_angles_deg`` property gives the same angles as a plain list in
+panel order, and remains for compatibility.
 
-Housekeeping roll offsets use a read-only roll search after the executed power
-sample, so they reflect the resulting physical drive angle without advancing its
-state again. Existing fixed-panel radiator shadowing is preserved. Combining
-``PanelGeometry`` with ``single_axis_drive`` is rejected until articulated shadow
-transforms are supported, rather than treating the zero-angle rectangle as the
-executed geometry. ``SequentialScheduler`` also rejects a finite drive with active
-tracking modes because it cannot propagate runtime drive state; use the queue
-simulation for dynamic finite drives.
+Housekeeping roll offsets come from a read-only roll search made after the executed
+power sample. They therefore reflect the resulting physical drive angle, and the
+search does not advance the drive state again. Existing fixed-panel radiator
+shadowing is preserved.
+
+Two combinations are rejected:
+
+* ``PanelGeometry`` with ``single_axis_drive``, until articulated shadow transforms
+  are supported. Accepting the combination would mean treating the zero-angle
+  rectangle as the executed geometry.
+* ``SequentialScheduler`` with a finite drive that has active tracking modes, because
+  that scheduler cannot propagate runtime drive state. Use the queue simulation for
+  dynamic finite drives.
 
 Solar Panel Vector Helper Function
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -856,7 +1016,8 @@ to avoidance constraints (e.g., never look within N° of the Sun).
 
 **StarTrackerOrientation Attributes:**
 
-* ``boresight`` (tuple[float, float, float]): Boresight direction as a unit vector in spacecraft body frame
+* ``boresight`` (tuple[float, float, float]): Boresight direction as a unit vector in spacecraft body frame.
+  The axis meanings below are those of the default `Spacecraft frame`_
 
   - +x is the spacecraft pointing direction (forward/boresight)
   - +y is the spacecraft "up" direction
@@ -935,12 +1096,12 @@ The ACS monitors star tracker constraints at each timestep and records:
 * ``star_tracker_hard_violations``: Number of trackers inside a HARD_KEEPOUT zone (always monitored)
 * ``star_tracker_soft_violations``: Whether any tracker is in its soft constraint zone
 * ``star_tracker_functional_count``: Number of trackers **not** in a soft constraint zone (``num_trackers - soft_violation_count``)
-* ``telescope_hard_violations``: 0 or 1 — whether the telescope hard constraint is currently violated
+* ``telescope_hard_violations``: 1 if the telescope hard constraint is currently violated, otherwise 0
 
 Hard violations are health-and-safety events and always cause a pointing-invalid result. Soft violations
 only affect pointing validity in modes listed in ``StarTrackerConfiguration.modes_require_lock``.
 
-Note: ``star_tracker_functional_count`` reflects **soft** violations only — it does not decrease when a
+Note that ``star_tracker_functional_count`` reflects **soft** violations only. It does not decrease when a
 tracker enters a hard keepout zone. Hard violations are tracked exclusively via
 ``star_tracker_hard_violations``.
 
@@ -952,8 +1113,8 @@ When star trackers are configured, ``MissionConfig.init_fault_management_default
   ``triggers_safe_mode=False``) that fires immediately RED when any tracker enters a **hard** keepout zone.
 * A ``telescope_hard_violations`` threshold (same parameters) when a telescope hard constraint is configured.
 
-``radiator_hard_violations`` receives the same default FM coverage when radiators are configured — see the
-radiators section below.
+``radiator_hard_violations`` receives the same default FM coverage when radiators are configured, as described
+in the radiators section below.
 
 radiators
 ~~~~~~~~~
@@ -999,7 +1160,8 @@ this field when radiators are configured.
 
 **RadiatorOrientation Attributes:**
 
-* ``normal`` (tuple[float, float, float]): Unit vector in spacecraft body frame
+* ``normal`` (tuple[float, float, float]): Unit vector in spacecraft body frame.
+  The axis meanings below are those of the default `Spacecraft frame`_
 
   - +x is spacecraft forward/boresight
   - +y is spacecraft "up"
@@ -1050,15 +1212,48 @@ this field when radiators are configured.
        radiators=[bus_radiator, payload_radiator]
    )
 
+Radiator Net Heat Model
+^^^^^^^^^^^^^^^^^^^^^^^
+
+COASTSim uses a first-order net-radiative model for each radiator:
+
+.. math::
+
+    Q_{net} = A\,\eta\,[\min(\epsilon\sigma(T_r^4 - T_s^4), C_d) - \alpha(S_0 f_{sun}E_{sun} + F_{earth} f_{earth}E_{earth})]
+
+Where:
+
+* :math:`S_0` is ``solar_constant_w_per_m2``
+* :math:`F_{earth}` is ``earth_ir_flux_w_per_m2``
+* :math:`E_{sun}, E_{earth}` are geometric exposure factors in [0, 1]
+* :math:`f_{sun}, f_{earth}` are loading weights
+* :math:`\alpha` is ``absorptivity`` and :math:`\epsilon` is ``emissivity``
+* :math:`C_d` is ``dissipation_coefficient_w_per_m2`` (emission cap)
+* :math:`\sigma` is the Stefan-Boltzmann constant
+* :math:`A` is radiator area and :math:`\eta` is ``efficiency``
+
+Positive :math:`Q_{net}` means net heat rejection (dumping heat).
+Negative :math:`Q_{net}` means net absorbed external radiative load.
+
+targets
+~~~~~~~
+
+The :class:`~conops.config.TargetConfig` holds the weights that queue scheduling
+uses to score candidate targets. The two subsections below describe them.
+
 Scheduler Optimization Weights
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Queue scheduling can combine target merit with configurable optimization weights.
-All weights default to ``0.0``. When every weight is zero, the queue keeps the
-legacy fast path: targets are sorted by merit and the first visible target is
-selected without the extra scoring pass.
+All weights default to ``0.0``. The queue sorts the targets by merit and selects
+the first visible one when all of the following hold: every weight in this
+section is zero, every dynamic merit weight is zero (see
+`Dynamic Merit: Urgency, Cadence and Program Balance`_),
+``group_contiguity_weight`` is zero, and no long-range allocation with a
+positive ``bonus`` is in use. This is a fast path that skips
+the scoring pass described below.
 
-When any weight is non-zero, visible candidates are scored as:
+Otherwise, every visible candidate is scored as:
 
 .. code-block:: text
 
@@ -1076,24 +1271,29 @@ The available weights are:
 * ``config.targets.slew_distance_weight`` - Merit penalty per degree of slew.
   This favors nearby pointings when candidates have similar target merit.
 * ``config.targets.slew_time_weight`` - Merit penalty per minute of estimated
-  slew time. ``QueueDITL`` candidate scoring uses a lightweight quaternion
-  attitude-distance estimate and the configured ACS slew-time curve, without
-  materializing the full slew path for every candidate. Once a target is
-  selected, ``QueueDITL`` computes the full attitude-aware
-  :class:`~conops.simulation.Slew` before enqueueing the command.
+  slew time. While it scores candidates, ``QueueDITL`` estimates each slew time
+  from a lightweight quaternion attitude-distance estimate and the configured
+  ACS slew-time curve, so it does not have to build the full slew path for every
+  candidate. Once a target is selected, ``QueueDITL`` computes the full
+  attitude-aware :class:`~conops.simulation.Slew` before enqueueing the command.
 * ``config.targets.collection_time_weight`` - Merit reward per minute of useful
   science collection. Collection time is capped by the target visibility window,
-  remaining target exposure, and ``ss_max``. In ``QueueDITL`` it is also capped
-  by the next science deadline, such as the next ground-station pass handoff or
-  the simulation end. If that downstream deadline leaves less than ``ss_min`` of
+  remaining target exposure, and ``ss_max``, the target's maximum snapshot
+  length. In ``QueueDITL`` it is also capped by the next science deadline, such
+  as the next ground-station pass handoff or the simulation end. If that
+  deadline leaves less than ``ss_min``, the target's minimum snapshot length, of
   collection time, the candidate is skipped.
 * ``config.targets.data_volume_weight`` - Merit penalty per gigabit of science
-  data a snapshot would put on the recorder, for the collection it would get at the
-  target's own rates. A price on data, so that high-data science gives way to
-  low-data science as the recorder fills. Independently of any weight,
-  ``QueueDITL`` lets a candidate collect no more than the recorder can take before
-  its next contact under its planning limit, and passes over one that cannot
-  collect its minimum snapshot (see :doc:`planning`).
+  data that a snapshot would put on the recorder. The volume is worked out for
+  the collection time the candidate would get, at the target's own data rates.
+  The weight acts as a fixed price on data, so that science producing a lot of
+  data ranks below science producing little. The price does not change with how
+  full the recorder is.
+
+  A separate limit applies whatever the weights are. ``QueueDITL`` lets a
+  candidate collect no more than the recorder can take, under the recorder's
+  planning limit, before its next contact. A candidate that cannot collect its
+  minimum snapshot within that room is passed over (see :doc:`planning`).
 * ``config.targets.radiator_sun_exposure_weight`` - Merit penalty per unit of
   radiator Sun exposure.
 * ``config.targets.radiator_earth_exposure_weight`` - Merit penalty per unit of
@@ -1121,74 +1321,64 @@ evaluates these terms at every selection:
    value = target.merit + urgency + cadence + completion_deficit
    score = value - slew and radiator costs + collection reward   (as above)
 
-Candidates are ranked by score. There are no absolute priority classes: all
+Candidates are ranked by score. There are no absolute priority classes. All
 work is compared on this one figure of merit, so the dynamic terms can always
 change the order. Work that must happen should be given a deadline or a
-cadence, whose urgency and cadence terms raise its merit as it falls due, or a
-base merit high enough for its importance.
+cadence, so that its urgency or cadence term raises its merit as it falls due.
+Otherwise, give it a base merit high enough for its importance.
+
+Each of the three dynamic terms has a weight:
 
 * ``config.targets.urgency_weight`` - Merit added at full urgency. Urgency
-  applies only to targets with a ``deadline`` (``queue.add(..., deadline=...)``
-  or ``submit_too(..., deadline=...)``), the latest time science collection may
-  begin. It is ``1`` once the closing time is within
-  ``config.targets.urgency_timescale_seconds`` (default one hour) and
-  ``timescale / time_to_close`` before that. The closing time is the deadline,
-  or the end of the current visibility window when no later window opens
-  before the deadline. A target cannot be selected once its deadline has passed.
-  A target with an ``earliest_start`` (``queue.add(..., earliest_start=...)``),
-  the earliest time science collection may begin, cannot be selected before it;
-  dispatch ends a lower-merit snapshot when such a target's window opens, so the
-  target can be selected then (see :doc:`planning`). A target with
-  ``visit_windows`` is selected only while one of its windows is open and not
-  yet visited, each window opening the same way.
+  applies only to targets with a ``deadline``, which is the latest time science
+  collection may begin. Set a deadline with ``queue.add(..., deadline=...)`` or
+  ``submit_too(..., deadline=...)``.
+
+  Urgency is measured against the target's closing time. The closing time is
+  the deadline, or the end of the current visibility window when no later
+  window opens before the deadline. Urgency is ``1`` once the closing time is
+  within ``config.targets.urgency_timescale_seconds`` (default one hour).
+  Before that it is ``timescale / time_to_close``.
 * ``config.targets.cadence_weight`` - Merit added once a target's category
-  ``cadence_seconds`` has elapsed since it last collected science, rising
-  linearly from ``0`` just after a visit. A target never yet observed gets the
-  full weight. With the weight set, dispatch does not select a target again
-  until a cadence after its last visit, as the planners space visits.
+  ``cadence_seconds`` has elapsed since the target last collected science. The
+  term rises linearly from ``0`` just after a visit. A target that has never
+  been observed gets the full weight. When the weight is set, dispatch also
+  does not select a target again until one cadence interval after its last
+  visit, which is how the planners space visits.
 * ``config.targets.completion_deficit_weight`` - Merit per unit of program
-  deficit: the category's ``time_share`` minus the program's delivered share of
-  the science collected so far in the run, bounded to ``[-1, 1]``. Programs
-  behind their allocation rise; programs ahead fall.
+  deficit. The deficit is the category's ``time_share`` minus the program's
+  delivered share of the science collected so far in the run, bounded to
+  ``[-1, 1]``. A program behind its allocation gains merit and a program ahead
+  of its allocation loses merit.
 
 Each dynamic term is its weight times a factor bounded to ``[0, 1]`` (``[-1, 1]``
 for the deficit), so no term can exceed its weight. With every weight at
 ``0.0`` (the defaults), selection is by base merit and the cost terms.
 
-The schedulers apply the same terms. :class:`~conops.schedulers.PriorityScheduler`,
+Three target settings limit when a target can be selected at all, whatever its
+score:
+
+* A target cannot be selected once its ``deadline`` has passed.
+* A target with an ``earliest_start`` (``queue.add(..., earliest_start=...)``),
+  the earliest time science collection may begin, cannot be selected before
+  that time. Dispatch ends a lower-merit snapshot when such a target's window
+  opens, so the target can be selected then (see :doc:`planning`).
+* A target with ``visit_windows`` is selected only while one of its windows is
+  open and not yet visited. Each window opens in the same way as an earliest
+  start.
+
+The schedulers apply the same terms.
+:class:`~conops.schedulers.PriorityScheduler` and
 :class:`~conops.schedulers.LocalSearchScheduler`, and
-:class:`~conops.ditl.RollingHorizonDITL` through them, evaluate the cadence and
-completion deficit against the plan as it is built as well as the science already
-collected (see :doc:`planning`).
+:class:`~conops.ditl.RollingHorizonDITL` when it plans with them, evaluate the
+cadence and the completion deficit against the plan as it is built as well as
+against the science already collected (see :doc:`planning`).
 
 When a target is selected, ``QueueDITL`` logs a ``QUEUE`` event with the full
-term breakdown (``Selected <obsid>: base=... urgency=... score=...``),
-and the target's ``merit`` is frozen at its value. That frozen value is
-exported on the plan entry and is what a Target of Opportunity must beat to
-interrupt the observation (see :doc:`target_of_opportunity`).
-
-Radiator Net Heat Model
-^^^^^^^^^^^^^^^^^^^^^^^
-
-COASTSim uses a first-order net-radiative model for each radiator:
-
-.. math::
-
-    Q_{net} = A\,\eta\,[\min(\epsilon\sigma(T_r^4 - T_s^4), C_d) - \alpha(S_0 f_{sun}E_{sun} + F_{earth} f_{earth}E_{earth})]
-
-Where:
-
-* :math:`S_0` is ``solar_constant_w_per_m2``
-* :math:`F_{earth}` is ``earth_ir_flux_w_per_m2``
-* :math:`E_{sun}, E_{earth}` are geometric exposure factors in [0, 1]
-* :math:`f_{sun}, f_{earth}` are loading weights
-* :math:`\alpha` is ``absorptivity`` and :math:`\epsilon` is ``emissivity``
-* :math:`C_d` is ``dissipation_coefficient_w_per_m2`` (emission cap)
-* :math:`\sigma` is the Stefan-Boltzmann constant
-* :math:`A` is radiator area and :math:`\eta` is ``efficiency``
-
-Positive :math:`Q_{net}` means net heat rejection (dumping heat).
-Negative :math:`Q_{net}` means net absorbed external radiative load.
+term breakdown (``Selected <obsid>: base=... urgency=... score=...``). The
+target's ``merit`` is then frozen at its value at that selection. The frozen
+value is exported on the plan entry, and it is what a Target of Opportunity
+must beat to interrupt the observation (see :doc:`target_of_opportunity`).
 
 payload
 ~~~~~~~
@@ -1198,13 +1388,13 @@ The :class:`~conops.config.Payload` contains the science instruments.
 **Payload Attributes:**
 
 * ``instruments`` (list[Instrument]): List of :class:`~conops.config.Instrument` (or subclass) instances
-* ``concurrency`` (:class:`~conops.config.ConcurrencyRules`): What may observe at once: ``max_observing``, the most instruments one observation may use; ``required_guider``, an instrument every observation that uses any must also use; ``exclusive``, pairs that may not observe together. An instrument observes when a request names it in a mode that observes: any mode but ``IDLE``, unless the mode sets ``observing`` to ``False``, as a standby mode that draws its power without observing does. The guider rule applies to observations, which point, and not to scheduled activities. The rules are checked against the ``instrument_modes`` a target names, its own and each sequence step's, when it is made, against a Target of Opportunity when it is submitted and against a scheduled activity's modes. A request naming no modes uses every instrument with modes and is checked as that where it enters, when it is added to the dispatch queue or given to a scheduler, not when it is made, since the simulation builds pointings of its own, such as a charging attitude, that observe nothing
+* ``concurrency`` (:class:`~conops.config.ConcurrencyRules`): Rules on which instruments may observe at once. See `Concurrency Rules`_
 
 **Instrument Attributes:**
 
 * ``name`` (str): Instrument identifier
 * ``power_draw`` (:class:`~conops.config.PowerDraw`): Power consumption by ACS mode, for an instrument without modes
-* ``modes`` (list[:class:`~conops.config.InstrumentMode`]): The instrument's operating modes, each a ``name``, a ``power_w`` and an optional ``eclipse_power_w``. With modes, the instrument draws its mode's power and ``power_draw`` is unused. During an observation it is in the mode the request names for it (``instrument_modes`` on the target), or ``SCIENCE`` when the request uses it without naming a mode; a request naming no modes uses the instrument it names, or every instrument with modes, in ``SCIENCE``. Outside the observation, and during an observation that does not use it, the instrument is in ``IDLE``, unless it defines a mode named like the ACS mode (``SAFE``, ``SLEWING``, ``PASS``, ``CHARGING``, ``DESAT``), which then applies. ``IDLE`` and ``SCIENCE`` must be defined when any mode is; other modes are free to add, and a mode's ``observing`` flag, ``True`` unless set, says whether the instrument counts as observing in it for the payload's concurrency rules. A mode's ``science_data`` is what the instrument generates while collecting in that mode (a full frame against a region of interest, say); a mode without it generates the instrument's ``data_generation`` science data, and an instrument with modes that an observation does not use generates nothing during it
+* ``modes`` (list[:class:`~conops.config.InstrumentMode`]): The instrument's operating modes, each a ``name``, a ``power_w`` and an optional ``eclipse_power_w``. With modes, the instrument draws its mode's power and ``power_draw`` is unused. See `Instrument Modes`_
 * ``heater`` (:class:`~conops.config.Heater`): Optional thermal heater, by ACS mode
 * ``data_generation`` (:class:`~conops.config.DataGeneration`): Science data the instrument generates while collecting, and its housekeeping data; targets can set their own science data for it by its ``name``. See :doc:`data_management`
 
@@ -1245,32 +1435,88 @@ The :class:`~conops.config.Payload` contains the science instruments.
        ]
    )
 
-A request says which instruments it uses and in which mode, by name; the
-spectrograph above draws 150 W during an observation whose
+A request says, by name, which instruments it uses and which mode each is in.
+The spectrograph above draws 150 W during an observation whose
 ``instrument_modes`` is ``{"Spectrograph": "SCIENCE"}`` and 20 W during one that
 leaves it out. See :doc:`planning`.
+
+Instrument Modes
+^^^^^^^^^^^^^^^^
+
+An instrument can list operating modes in ``modes``. Each
+:class:`~conops.config.InstrumentMode` has a ``name``, a ``power_w`` and an
+optional ``eclipse_power_w``. An instrument with modes draws the power of the
+mode it is in, and its ``power_draw`` is unused. When an instrument defines any
+mode it must define both ``IDLE`` and ``SCIENCE``. Other modes are free to add.
+
+The mode an instrument is in depends on the observation in progress:
+
+* During an observation that uses the instrument, it is in the mode the request
+  names for it in ``instrument_modes`` on the target. When the request uses the
+  instrument without naming a mode, it is in ``SCIENCE``.
+* A request that names no modes uses every instrument with modes, in
+  ``SCIENCE``. The instrument a request names for its pointing does not
+  restrict which instruments it uses.
+* Outside an observation, and during an observation that does not use it, the
+  instrument is in ``IDLE``. There is one exception. If the instrument defines a
+  mode with the same name as the current ACS mode (``SAFE``, ``SLEWING``,
+  ``PASS``, ``CHARGING``, ``DESAT``), that mode applies.
+
+A mode has two further settings:
+
+* ``observing`` says whether the instrument counts as observing in this mode
+  for the payload's `Concurrency Rules`_. It is ``True`` unless set.
+* ``science_data`` is the science data the instrument generates while collecting
+  in this mode. One mode might read out a full frame and another a region of
+  interest, for example. A mode without ``science_data`` generates the
+  instrument's ``data_generation`` science data. An instrument with modes
+  generates nothing during an observation that does not use it.
+
+Concurrency Rules
+^^^^^^^^^^^^^^^^^
+
+``payload.concurrency`` holds rules on which instruments may observe at once.
+There are three:
+
+* ``max_observing`` is the most instruments one observation may use.
+* ``required_guider`` is an instrument that every observation using any
+  instrument must also use.
+* ``exclusive`` lists pairs of instruments that may not observe together.
+
+An instrument observes when a request names it in a mode that observes. Every
+mode except ``IDLE`` observes, unless the mode sets ``observing`` to ``False``.
+A standby mode, in which the instrument draws power without observing, is the
+kind of mode that sets it to ``False``.
+
+The guider rule applies to observations, which point the spacecraft. It does
+not apply to scheduled activities.
+
+The rules are checked at these points:
+
+* A target is checked when it is made, against the ``instrument_modes`` it
+  names. Its own modes and the modes of each of its sequence steps are checked.
+* A Target of Opportunity is checked when it is submitted.
+* A scheduled activity is checked against its modes.
+* A request that names no modes uses every instrument with modes, and it is
+  checked on that basis. This check is made when the request is added to the
+  dispatch queue or given to a scheduler, and not when the request is made. The
+  check waits until then because the simulation builds pointings of its own
+  that observe nothing, such as a charging attitude.
 
 Observation Timing Budgets
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``payload.observation_timing`` reserves non-collection time inside each fixed
-science task. All three values are finite, nonnegative seconds and default to
-zero. ACS ``settle_time`` is already included in ``slewtime``; do not include it
-again in these payload budgets.
+``payload.observation_timing`` reserves time inside each fixed science task for
+work other than collecting science. It holds three budgets:
 
-A budget can be given as calibration steps instead of one number: ``setup_steps``
-and ``cleanup_steps`` list :class:`~conops.config.BudgetStep` entries in order, each
-with a ``name``, a ``duration_seconds``, the ``instrument_modes`` it puts the
-instruments in while it runs (empty: the observation's own modes apply through it)
-and a ``data_gb`` it puts on the recorder, such as its frames. The budget's seconds
-are then the steps' sum. A target acquisition followed by a characterisation
-frame before every observation, or a dark after it, is written this way; the
-instruments draw the step's modes during it, the mode telemetry records them, and
-the steps' data is counted with the observation's wherever its science data is,
-in the simulation, the recorder ledger and the data budget. A step's modes are
-checked against the payload when the configuration is made. A single target can
-carry its own timing with ``own_timing`` on the :class:`~conops.targets.Pointing`,
-in place of its category's (see :doc:`planning`).
+* ``setup_seconds`` is preparation after the slew and ACS settling, before
+  collection starts.
+* ``cleanup_seconds`` is cleanup after collection ends.
+* ``handoff_seconds`` is a margin after cleanup, before the next task.
+
+All three values are finite, nonnegative seconds and default to zero. ACS
+``settle_time`` is already included in ``slewtime``, so do not include it again
+in these payload budgets.
 
 .. code-block:: yaml
 
@@ -1280,85 +1526,156 @@ in place of its category's (see :doc:`planning`).
        cleanup_seconds: 5
        handoff_seconds: 10
 
-The task boundaries remain ``begin`` and ``end``. Useful collection starts at
-``begin + slewtime + setup_seconds`` and stops at
-``end - cleanup_seconds - handoff_seconds``. These are exported as
-``collection_begin`` and ``collection_end``, including with zero budgets.
-``ss_min``, ``ss_max``, requested exposure, and queue collection scoring refer
-to useful collection, not setup or teardown. Charging and ground contacts do
-not acquire these payload overheads.
-
 Setup is a generic budget for any pre-collection activity: configuration,
 calibration, acquisition, or another procedure. COAST does not prescribe how
 that time is used.
 
-An observation category can set its own budgets in ``observation_timing``, for
-instruments whose setup differs; a category without them takes the payload's.
-``MissionConfig.observation_timing_for(obsid)`` is the lookup the planners,
-dispatch and execution all use, and a plan entry's ``observation_timing`` is its
-own. Where the observation is not known, the planners bound its overheads by the
-largest of each budget over the payload and every category.
+These are planning budgets. They are not flight-procedure timeouts, and they
+are not a guarantee of on-time return. The flight procedure must independently
+bound startup, handle settling failure, and enforce the collection cutoff and
+cleanup deadline.
 
-``QueueDITL`` reserves the budgets before visibility, locked-attitude constraint,
-pass, and simulation deadlines. For a pass with multiple tracking profiles, the
-deadline is the earliest possible ingress trigger across those profiles, not
-just the default pass attitude. Science cleanup and handoff finish before that
-deadline; ingress constraints still determine which profile actually executes.
-For ``CONSTRAINT_AVOIDING``, a path evaluated at admission may change before
-ingress as constraints move. Admission therefore reserves a time-independent
-upper bound: two rest-to-rest rotations of at most 180 degrees, using the
-slowest configured rate and acceleration, plus one settling period, one second
-of numerical rounding headroom, and the existing pass-trigger buffer.
-Execution still evaluates the actual path and
-constraints at ingress. This can reserve extra idle time, but cannot move
-ingress ahead of the reserved cleanup deadline under the configured kinematic
-limits. Quaternion admission continues to use the exact attitude-specific
-duration. New slew algorithms must supply a duration bound before admission
-can use them; extending the waypoint planner also requires updating its bound.
-A pending recharge discovered by a timestep's
-power integration also shortens the collection window before data is counted,
-without delaying the charge command. If a later interruption cannot leave the
-reserved cleanup/handoff time, generation fails instead of exporting a normal
-observation with impossible timing. This can occur with unanticipated interrupts
-or a cleanup/handoff budget longer than the available recharge warning time.
+Collection window
+"""""""""""""""""
 
-Charging and ground-contact interruptions end the current visit, not the target's
-remaining integration allocation. A target with positive remaining ``exptime``
-stays eligible for later visits, subject to visibility and ``ss_min``, which relaxes
-to the remainder once the target has collected anything, in dispatch and in the
-plans alike; a remainder shorter than the simulation step is rounding, not science,
-and ends the target. Exhausted or explicitly completed targets are not reopened, and
-integration budgets are not reset at day boundaries.
+The task boundaries remain ``begin`` and ``end``. Useful collection starts at
+``begin + slewtime + setup_seconds`` and stops at
+``end - cleanup_seconds - handoff_seconds``. These two times are exported as
+``collection_begin`` and ``collection_end``, and they are exported even when
+the budgets are zero.
 
-Locked-attitude validation includes the ephemeris samples bracketing the whole
-planned interval, including the first sample at or after a fractional end time.
-If that upper sample violates a constraint, the task is shortened to the previous
-sample, with cleanup and handoff reserved before it; a visit too short for
-``ss_min`` is rejected. This prevents an unchecked final partial cell from
-crossing into a sampled keepout. It remains a sampled check, not proof against
-an excursion that enters and leaves a keepout entirely between adjacent samples.
+``ss_min``, ``ss_max``, requested exposure, and queue collection scoring all
+refer to useful collection. Setup and teardown time does not count toward
+them. Charging and ground contacts do not acquire these payload overheads.
 
-Housekeeping ``collection_seconds`` integrates the useful part of each timestep,
-including partial steps. Data generation and remaining requested exposure use
-this duration for both zero and nonzero budgets. Detailed phase reporting is
-separate from this collection-window contract. ACS ``SCIENCE`` still describes pointing during setup and teardown;
-its duration must not be used as useful exposure. Zero-budget plans also use
-exact collection windows instead of whole-timestep exposure decrements; legacy
-rounded exposure totals and observation boundaries can therefore change.
-Collection telemetry includes executed time on attempts later dropped for not
-meeting the minimum snapshot; it can exceed exposure in the delivered entries.
-Power remains governed by the existing mode-dependent model. ``DITL`` replay
-preserves serialized collection windows, deriving them from configuration only
-when absent. Collection cannot begin before the executed slew and setup finish,
-even if the slew takes longer than planned. A late start reduces collection;
-it does not move the planned cutoff or rewrite the delivered plan.
-``SequentialScheduler`` does not
-support these budgets and rejects nonzero values; use ``QueueDITL`` to generate
-budgeted plans.
+Budgets given as calibration steps
+""""""""""""""""""""""""""""""""""
 
-These are planning budgets, not flight-procedure timeouts or a guarantee of
-on-time return. The procedure must independently bound startup, handle settling
-failure, and enforce the collection cutoff and cleanup deadline.
+A setup or cleanup budget can be given as a list of calibration steps instead
+of one number. A target acquisition followed by a characterisation frame
+before every observation is written this way, and so is a dark after it.
+
+``setup_steps`` and ``cleanup_steps`` each list
+:class:`~conops.config.BudgetStep` entries in order. Each step has:
+
+* ``name``, which identifies the step.
+* ``duration_seconds``, how long the step takes.
+* ``instrument_modes``, the modes the step puts the instruments in while it
+  runs. When this is empty, the observation's own modes apply through the step.
+* ``data_gb``, the data the step puts on the recorder, such as its frames.
+
+The budget's seconds are then the sum of its steps' durations. While a step
+runs, the instruments draw the power of the step's modes, and the mode
+telemetry records those modes. The steps' data is counted with the
+observation's science data wherever that is counted: in the simulation, in the
+recorder ledger and in the data budget. A step's modes are checked against the
+payload when the configuration is made.
+
+Budgets for a category or a single target
+"""""""""""""""""""""""""""""""""""""""""
+
+An observation category can set its own budgets in its ``observation_timing``.
+This is meant for instruments whose setup differs. A category without its own
+budgets takes the payload's. A single target can also carry its own timing,
+with ``own_timing`` on the :class:`~conops.targets.Pointing`. That timing is
+used in place of its category's (see :doc:`planning`).
+
+``MissionConfig.observation_timing_for(obsid)`` is the lookup that the
+planners, dispatch and execution all use, and a plan entry's
+``observation_timing`` is its own. Where the planners do not know which
+observation is involved, they bound its overheads by the largest value of each
+budget over the payload and every category.
+
+Deadlines in QueueDITL
+""""""""""""""""""""""
+
+``QueueDITL`` reserves the budgets ahead of four kinds of deadline: the end of
+visibility, a locked-attitude constraint, a ground-station pass, and the end
+of the simulation.
+
+A pass sets its deadline through its ingress, which is the slew that takes the
+spacecraft to the pass attitude. For a pass with multiple tracking profiles,
+the deadline is the earliest possible ingress trigger across those profiles.
+The default pass attitude alone does not set it. Science cleanup and handoff
+finish before that deadline. The ingress constraints still determine which
+profile actually executes.
+
+The time reserved for the ingress depends on the slew algorithm. In the rules
+below, admission is the point at which ``QueueDITL`` accepts an observation
+and fixes its timing.
+
+* With ``QUATERNION`` slews, admission uses the exact duration for the
+  attitudes involved.
+* With ``CONSTRAINT_AVOIDING`` slews, a path evaluated at admission may change
+  before ingress as the constraints move. Admission therefore reserves an
+  upper bound that does not depend on time. The bound is two rest-to-rest
+  rotations of at most 180 degrees each, at the slowest configured rate and
+  acceleration, plus one settling period, one second of headroom for numerical
+  rounding, and the existing pass-trigger buffer. Execution still evaluates
+  the actual path and constraints at ingress. The bound can reserve extra idle
+  time, but under the configured kinematic limits the ingress cannot move
+  ahead of the reserved cleanup deadline.
+* A new slew algorithm must supply a duration bound before admission can use
+  it. Extending the waypoint planner also requires updating its bound.
+
+A recharge can shorten an observation as well. When a timestep's power
+integration finds that a recharge is pending, the collection window is
+shortened before data is counted, and the charge command is not delayed. If a
+later interruption cannot leave the reserved cleanup and handoff time,
+generation fails. It does not export a normal observation with impossible
+timing. This can occur with unanticipated interrupts, or with a cleanup and
+handoff budget longer than the available recharge warning time.
+
+Interrupted visits
+""""""""""""""""""
+
+A charging or ground-contact interruption ends the current visit. It does not
+end the target's remaining integration allocation. A target with positive
+remaining ``exptime`` stays eligible for later visits, subject to visibility
+and ``ss_min``. Once the target has collected anything, ``ss_min`` relaxes to
+the remainder, in dispatch and in the plans alike. A remainder shorter than
+the simulation step is treated as rounding and ends the target. Exhausted or
+explicitly completed targets are not reopened, and integration budgets are not
+reset at day boundaries.
+
+Locked-attitude validation
+""""""""""""""""""""""""""
+
+Locked-attitude validation checks the ephemeris samples that bracket the whole
+planned interval. These include the first sample at or after a fractional end
+time. If that upper sample violates a constraint, the task is shortened to the
+previous sample, with cleanup and handoff reserved before it. A visit that is
+then too short for ``ss_min`` is rejected. This prevents an unchecked final
+partial cell from crossing into a sampled keepout.
+
+The check remains a sampled one. It is not proof against an excursion that
+enters and leaves a keepout entirely between adjacent samples.
+
+Collection accounting
+"""""""""""""""""""""
+
+Housekeeping ``collection_seconds`` integrates the useful part of each
+timestep, including partial steps. Data generation and remaining requested
+exposure use this duration, whether the budgets are zero or not. Several
+related rules apply:
+
+* Detailed phase reporting is separate from this collection-window contract.
+  ACS ``SCIENCE`` still describes pointing during setup and teardown, so its
+  duration must not be used as useful exposure.
+* Zero-budget plans also use exact collection windows. Exposure is not
+  decremented by whole timesteps, so exposure totals and observation
+  boundaries can differ from results that were rounded that way.
+* Collection telemetry includes the executed time on attempts that were later
+  dropped for not meeting the minimum snapshot. It can therefore exceed the
+  exposure in the delivered entries.
+* Power remains governed by the mode-dependent power model.
+* ``DITL`` replay preserves serialized collection windows. It derives them
+  from configuration only when they are absent.
+* Collection cannot begin before the executed slew and setup finish, even if
+  the slew takes longer than planned. A late start reduces collection. It does
+  not move the planned cutoff or rewrite the delivered plan.
+* ``SequentialScheduler`` does not support these budgets and rejects nonzero
+  values. Use ``QueueDITL`` to generate budgeted plans.
 
 Telescope Instruments
 ^^^^^^^^^^^^^^^^^^^^^
@@ -1370,24 +1687,28 @@ A ``Telescope`` can be placed directly in ``Payload.instruments`` alongside any 
 
 **Telescope Attributes** (in addition to Instrument fields):
 
-* ``boresight`` (tuple[float, float, float]): Compatibility input and derived
-  property giving instrument ``+X`` in spacecraft body coordinates. Defaults to
-  ``(1, 0, 0)``. When supplied without ``mounting``, COAST normalizes the vector
-  and derives a deterministic mounting. Assigning it later replaces the complete
-  mounting atomically.
-* ``mounting`` (:class:`~conops.config.InstrumentMounting`): Full rigid
-  instrument-to-body rotation. The scalar-first Hamilton quaternion maps instrument
-  vectors into spacecraft body coordinates. Instrument ``+X`` is the science
-  boresight and instrument ``+Z`` is the zero-roll reference. This is the
-  authoritative geometry. Mounting objects are immutable; replace the complete
-  object to change the installation. A telescope given neither ``mounting`` nor
-  ``boresight`` takes the bus's `Spacecraft frame`_.
+* ``boresight`` (tuple[float, float, float]): The direction of instrument
+  ``+X`` in spacecraft body coordinates. It is a shorter way of giving the
+  mounting, kept for compatibility, and it can also be read back as a property
+  derived from ``mounting``. Defaults to ``(1, 0, 0)``. When it is supplied
+  without ``mounting``, COAST normalizes the vector and derives a deterministic
+  mounting from it. Assigning it later replaces the complete mounting in one
+  step.
+* ``mounting`` (:class:`~conops.config.InstrumentMounting`): The full rigid
+  rotation from the instrument to the spacecraft body. It is a scalar-first
+  Hamilton quaternion that maps instrument vectors into spacecraft body
+  coordinates. Instrument ``+X`` is the science boresight and instrument ``+Z``
+  is the zero-roll reference. ``mounting`` is the authoritative geometry.
+  Mounting objects are immutable, so replace the complete object to change the
+  installation. A telescope given neither ``mounting`` nor ``boresight`` takes
+  the bus's `Spacecraft frame`_.
 * ``optics`` (:class:`~conops.config.TelescopeConfig`): Optical configuration
 
 Science target RA/Dec and roll are defined in the selected telescope frame. COAST
 converts them to the physical spacecraft attitude before evaluating body-mounted
 panels, radiators, trackers, slew-axis limits, and executed-attitude constraints.
-Telescope-local keep-outs must be roll-independent and are evaluated against the
+
+Telescope-local keep-outs must be roll-independent. They are evaluated against the
 science line of sight during target selection and against the transformed telescope
 boresight during execution. Put roll-dependent constraints for body-mounted hardware
 on the spacecraft constraint configuration, where spacecraft roll is defined.
@@ -1396,9 +1717,10 @@ on the spacecraft constraint configuration, where spacecraft roll is defined.
 
 * ``aperture_m`` (float | None): Clear aperture diameter in metres
 * ``focal_length_m`` (float | None): Effective focal length in metres
-* ``f_number`` (float | None): Focal ratio — auto-derived as ``focal_length_m / aperture_m``
-  when both are provided and ``f_number`` is omitted; validated for consistency when all
-  three are supplied
+* ``f_number`` (float | None): Focal ratio. When ``aperture_m`` and ``focal_length_m``
+  are both provided and ``f_number`` is omitted, it is derived as
+  ``focal_length_m / aperture_m``. When all three are supplied, they are validated
+  for consistency
 * ``telescope_type`` (:class:`~conops.config.TelescopeType`): Optical design family
 * ``tube_length_m`` (float | None): Physical tube length in metres (useful for
   folded or catadioptric designs where tube length differs from focal length)
@@ -1485,8 +1807,8 @@ on the spacecraft constraint configuration, where spacecraft roll is defined.
        ),
    )
 
-   print(primary.optics.f_number)                     # 10.0
-   print(primary.optics.plate_scale_arcsec_per_um)    # ~3.44e-5 arcsec/µm
+   print(primary.optics.f_number)                     # 7.0
+   print(primary.optics.plate_scale_arcsec_per_um)    # ~0.0589 arcsec/µm
 
    # Mix Telescope and plain Instrument in the same payload
    payload = Payload(
@@ -1540,8 +1862,8 @@ The :class:`~conops.config.Battery` models the spacecraft battery system.
 * ``recharge_clear_threshold`` (float): SOC level that clears emergency recharge
   (0-1, defaults to ``recharge_threshold + 0.005`` capped at 1.0)
 * ``charge_level`` (float): Current charge in Watt-hours
-* ``planning_level`` (float | None): Battery level fraction the schedulers keep a plan above, charging in idle sunlit time when they must. Defaults to the depth-of-discharge floor, ``1 - max_depth_of_discharge``; ``None`` plans without regard to the battery. See :doc:`planning`.
-* ``planning_recharge_level`` (float): Battery level fraction a plan never assumes the battery above: charging, in a ``CHARGE`` entry or during an observation, is not counted past it (0-1, default 1.0, at least ``planning_level``)
+* ``planning_level`` (float | None): Battery level fraction that the schedulers keep a plan above. They add charging in idle sunlit time when that is needed to stay above it. Defaults to the depth-of-discharge floor, ``1 - max_depth_of_discharge``. ``None`` plans without regard to the battery. See :doc:`planning`.
+* ``planning_recharge_level`` (float): The highest battery level fraction a plan assumes the battery reaches. Charging is not counted past this level, whether it happens in a ``CHARGE`` entry or during an observation. The range is 0-1, the default is 1.0, and the value must be at least ``planning_level``
 
 .. code-block:: python
 
@@ -1567,7 +1889,10 @@ The :class:`~conops.config.Constraint` defines pointing constraints for the spac
 * ``sun_constraint``: Minimum angle from the Sun
 * ``anti_sun_constraint``: Maximum angle from anti-Sun direction
 * ``moon_constraint``: Minimum angle from the Moon
-* ``eclipse_intervals``: Intervals, each a ``(start, end)`` pair in Unix seconds, datetimes or ISO-8601 strings, during which the spacecraft is taken to be in eclipse whatever the ephemeris says, for a test of an eclipse the orbit does not give. The constraint's eclipse test, the solar panels, the bus and instrument eclipse power, the planners' battery ledger, the momentum sources' Sun, telemetry and the timeline plots all see them
+* ``science_in_eclipse`` (bool, default ``True``): Whether observations may run
+  in eclipse. Set ``False`` to restrict observing to sunlit intervals; an
+  observation category can override this default. See `Science in eclipse`_.
+* ``eclipse_intervals``: Intervals during which the spacecraft is taken to be in eclipse, whatever the ephemeris says. Each interval is a ``(start, end)`` pair in Unix seconds, datetimes or ISO-8601 strings. Use them to test an eclipse that the orbit does not give. The following all see these intervals: the constraint's eclipse test, the solar panels, the bus and instrument eclipse power, the planners' battery ledger, the Sun as the momentum sources see it, telemetry and the timeline plots
 * ``earth_constraint``: Minimum angle from Earth limb
 * ``panel_constraint``: Solar panel pointing constraint
 * ``ephem``: Ephemeris object (set at runtime, not serialized)
@@ -1590,7 +1915,78 @@ The :class:`~conops.config.Constraint` defines pointing constraints for the spac
    # Set ephemeris at runtime
    constraint.ephem = ephemeris
 
-A stray-light patch, a region beside the boresight into which a bright body scatters light, is written as a ``rust_ephem`` field-of-view polygon on ``science_constraint``: a :class:`~rust_ephem.constraints.BodyConstraint` for the Sun, Moon or Earth, or a :class:`~rust_ephem.constraints.BrightStarConstraint` for a list of stars, each with the patch as ``fov_polygon`` in the instrument frame (gnomonic degrees; at zero roll +v points north and +u east, and a roll is the position angle of +v east of north). Leave ``roll_deg`` unset so the roll in question is used. The patch turns with the instrument, so where it sits on the sky depends on the roll: the check is applied to science attitudes at their roll, named ``Science`` in the violation names, and the roll optimiser tests the candidate rolls in power order and takes the first that keeps the patch clear, or the power-optimal roll when none does. Charging, safe-mode and idle attitudes take the power-optimal roll regardless.
+Science in eclipse
+^^^^^^^^^^^^^^^^^^
+
+``constraint.science_in_eclipse`` sets whether observations may run while the
+spacecraft is in eclipse, and an observation category can override it for its
+own targets. Set the policy before creating requests or binding a program:
+
+.. code-block:: python
+
+   from conops.config import ObservationCategory
+
+   config.constraint.science_in_eclipse = False
+   config.observation_categories.categories.append(
+       ObservationCategory(
+           name="Eclipse-capable follow-up", obsid_min=9000, obsid_max=9999,
+           science_in_eclipse=True,
+       )
+   )
+
+``ObservationCategory.science_in_eclipse`` takes one of three values. ``None``
+inherits the mission default, ``True`` allows that category to observe during
+eclipse, and ``False`` forbids it. The mission default is ``True``, which
+places no restriction on observing in eclipse.
+
+The resolved policy for an observation is available through
+``config.science_in_eclipse_for(obsid)``. The same policy is shared by request
+visibility, dispatch, all three planners and rolling replanning, and it covers
+Targets of Opportunity and moving targets. A protected sequence is a target's
+observation sequence, whose steps are observed in order as one visit that is
+not cut short. A protected sequence must fit wholly inside a permitted window. Setup and cleanup hold times must also fit
+inside that window. The slew into the window may start earlier if the slew
+rules permit it.
+
+Both the ephemeris's natural eclipses and ``eclipse_intervals`` apply. The
+boundaries of natural eclipses use rust-ephem's ephemeris resolution. Injected
+intervals use half-open bounds, and their boundaries can fall between
+simulation ticks. Science credit and data collection are clipped before a
+forbidden interval. A saved plan that violates the policy is rejected before
+execution, so regenerate a plan after changing its observing policy or its
+eclipses.
+
+This policy controls only when observations are available. Instrument standby
+modes and ``eclipse_power_w`` still come from the mission's load
+configuration. Scheduled activities retain their explicit modes, and hardware
+keep-outs still apply to slews and holds. A scheduled activity placed over an
+eclipse is not needed just to prohibit science. Keep such an activity when it
+represents a separate required operation or a particular instrument mode.
+
+Roll-dependent stray light
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A stray-light patch is a region beside the boresight into which a bright body
+scatters light. It is written as a ``rust_ephem`` field-of-view polygon on
+``science_constraint``. Use a :class:`~rust_ephem.constraints.BodyConstraint`
+for the Sun, Moon or Earth, or a
+:class:`~rust_ephem.constraints.BrightStarConstraint` for a list of stars, and
+give each one the patch as its ``fov_polygon``.
+
+The polygon is in the instrument frame, in gnomonic degrees. At zero roll +v
+points north and +u east, and a roll is the position angle of +v east of north.
+Leave ``roll_deg`` unset so that the roll being tested is used.
+
+The patch turns with the instrument, so where it sits on the sky depends on the
+roll. Two things follow from this:
+
+* The check is applied to science attitudes at their roll. It is named
+  ``Science`` in the violation names.
+* The roll optimiser tests the candidate rolls in power order and takes the
+  first one that keeps the patch clear. When no roll keeps it clear, the
+  optimiser takes the power-optimal roll.
+
+Charging, safe-mode and idle attitudes take the power-optimal roll regardless.
 
 .. code-block:: python
 
@@ -1681,7 +2077,7 @@ The :class:`~conops.config.OnboardRecorder` simulates onboard data storage.
 * ``current_volume_gb`` (float): Current stored data in Gigabits
 * ``yellow_threshold`` (float): Warning threshold (fraction, 0-1)
 * ``red_threshold`` (float): Critical threshold (fraction, 0-1)
-* ``planning_limit`` (float | None): Fraction of capacity the schedulers keep the recorder below, assuming every contact downlinks for its whole length. Defaults to ``red_threshold``, where the red alert fires; ``None`` plans without regard to the recorder. See :doc:`planning`.
+* ``planning_limit`` (float | None): Fraction of capacity that the schedulers keep the recorder below. In doing so they assume that every contact downlinks for its whole length. Defaults to ``red_threshold``, where the red alert fires. ``None`` plans without regard to the recorder. See :doc:`planning`.
 
 .. code-block:: python
 
@@ -1765,68 +2161,34 @@ Each :class:`~conops.config.ObservationCategory` also carries:
 * ``cadence_seconds`` (float, optional): Desired interval between visits
 * ``time_share`` (float in ``[0, 1]``, optional): Allocated fraction of science time
 * ``time_budget_seconds`` (float, optional): The most science the category's targets
-  may collect over a run, counting what they had collected before it. Dispatch does
-  not select a target of a category whose budget leaves less than its minimum
-  snapshot, or a visit of its sequence, and sizes an observation to what is left; the
-  planners cap each snapshot to what the plan leaves and place nothing once less than
-  a minimum snapshot is left, a visit only whole; the long-range allocator gives the
-  category's requests no more than the budget leaves; the category summary reports
-  the budget and the fraction of it the run used
+  may collect over a run, counting what they had collected before it. The budget is
+  applied in four places:
+
+  - Dispatch does not select a target of a category whose budget leaves less than
+    the target's minimum snapshot, or less than a visit of its sequence. It sizes an
+    observation to what is left.
+  - The planners cap each snapshot to what the plan leaves. They place nothing once
+    less than a minimum snapshot is left, and they place a visit only whole.
+  - The long-range allocator gives the category's requests no more than the budget
+    leaves.
+  - The category summary reports the budget and the fraction of it the run used.
 * ``observation_timing`` (:class:`~conops.config.ObservationTiming`, optional): The
   category's own setup, cleanup and handoff budgets, where they differ from
   ``payload.observation_timing`` (see `Observation Timing Budgets`_)
 * ``antenna_repoints`` (``allowed``, ``reported`` or ``forbidden``, default ``allowed``):
-  What an antenna repoint during one of the category's observations means; ``forbidden``
-  keeps the category's snapshots between repoints (see :doc:`communications`)
+  How an antenna repoint during one of the category's observations is treated.
+  ``forbidden`` keeps the category's snapshots between repoints (see
+  :doc:`communications`)
+* ``science_in_eclipse`` (bool or ``None``, default ``None``): Override the
+  mission's eclipse observing policy, or inherit it with ``None`` (see
+  `Science in eclipse`_)
 * ``interruptible`` (bool, default ``True``): Whether a Target of Opportunity may cut
   short the category's observations (see :doc:`target_of_opportunity`)
-* ``skip_thermal_settling`` (bool, default ``False``): Whether a slew into one of the
-  category's observations settles for the ACS's ``settle_time`` rather than the thermal
-  settling table's time for its Sun-vector change (see ``thermal_settling`` under
-  `spacecraft_bus`_), for a category that accepts degraded data, such as a Target of
-  Opportunity
-
-Observation groups
-~~~~~~~~~~~~~~~~~~
-
-Beside the categories, ``observation_groups`` (:class:`~conops.config.ObservationGroups`)
-lists named sets of targets observed under one window and one budget, and preferred
-one after another: the targets of one redshift bin or one field. Each
-:class:`~conops.config.ObservationGroup` has:
-
-* ``name`` (str) and ``members`` (list of observation IDs); a target belongs to at most
-  one group
-* ``window_start`` and ``window_deadline`` (Unix seconds, a datetime or an ISO string,
-  optional): the window in which the group's science may begin, which narrows each
-  member's own earliest start and deadline
-* ``time_budget_seconds`` (float, optional): the most science the group's targets may
-  collect together over a run, counting what they had collected before it, applied
-  beside their categories' budgets by dispatch, the planners and the allocator
-* ``prefer_contiguous`` (bool, default ``True``): whether the group's targets are
-  preferred one after another. Dispatch adds ``targets.group_contiguity_weight`` to a
-  member's merit once another member has just been observed, so a member outranked
-  by a target outside the group follows it anyway; the priority-first placement, which
-  seeds the local-search and CP-SAT planners, goes on with the group once it has placed
-  one of its targets. With the weight at 0 dispatch does not prefer them.
-
-.. code-block:: python
-
-   from conops.config import ObservationGroup, ObservationGroups
-
-   config.observation_groups = ObservationGroups(groups=[
-       ObservationGroup(
-           name="bin 0.3-0.5",
-           members=[10021, 10034, 10047],
-           window_start="2029-03-10T00:00:00Z",
-           window_deadline="2029-03-20T00:00:00Z",
-           time_budget_seconds=6 * 3600,
-       ),
-   ])
-   config.targets.group_contiguity_weight = 20.0
-
-The category summary's companion, ``summary_by_group``, reports each group's targets,
-those observed, its visits and science, and its budget and the fraction used (see
-:doc:`visualization`, Reporting).
+* ``skip_thermal_settling`` (bool, default ``False``): When ``True``, a slew into one
+  of the category's observations settles for the ACS's ``settle_time``. Otherwise it
+  settles for the time the thermal settling table gives for the slew's Sun-vector
+  change (see ``thermal_settling`` under `spacecraft_bus`_). Set it for a category
+  that accepts degraded data, such as a Target of Opportunity
 
 .. code-block:: python
 
@@ -1867,49 +2229,110 @@ those observed, its visits and science, and its budget and the fraction used (se
    # Or use defaults
    categories = ObservationCategories.default_categories()
 
+Observation groups
+~~~~~~~~~~~~~~~~~~
+
+``observation_groups`` (:class:`~conops.config.ObservationGroups`) is a separate
+setting beside the categories. It lists named sets of targets that are observed under
+one window and one budget, and that are preferred one after another. The targets of
+one redshift bin, or of one field, are examples. Each
+:class:`~conops.config.ObservationGroup` has:
+
+* ``name`` (str) and ``members`` (list of observation IDs). A target belongs to at
+  most one group
+* ``window_start`` and ``window_deadline`` (Unix seconds, a datetime or an ISO string,
+  optional): The window in which the group's science may begin. It narrows each
+  member's own earliest start and deadline
+* ``time_budget_seconds`` (float, optional): The most science the group's targets may
+  collect together over a run, counting what they had collected before it. Dispatch,
+  the planners and the allocator apply it beside the budgets of the targets'
+  categories
+* ``prefer_contiguous`` (bool, default ``True``): Whether the group's targets are
+  preferred one after another. The preference acts in two places:
+
+  - Dispatch adds ``targets.group_contiguity_weight`` to a member's merit once another
+    member has just been observed. A member can then follow the one just observed
+    even when a target outside the group outranks it on its own merit. With the
+    weight at 0, dispatch does not prefer the group's targets.
+  - The priority-first placement, which seeds the local-search and CP-SAT planners,
+    goes on with the group once it has placed one of its targets.
+
+.. code-block:: python
+
+   from conops.config import ObservationGroup, ObservationGroups
+
+   config.observation_groups = ObservationGroups(groups=[
+       ObservationGroup(
+           name="bin 0.3-0.5",
+           members=[10021, 10034, 10047],
+           window_start="2029-03-10T00:00:00Z",
+           window_deadline="2029-03-20T00:00:00Z",
+           time_budget_seconds=6 * 3600,
+       ),
+   ])
+   config.targets.group_contiguity_weight = 20.0
+
+``summary_by_group`` is the group counterpart of the category summary. For each
+group it reports the targets, those observed, the visits and science, and the budget
+and the fraction of it used (see :doc:`visualization`, Reporting).
+
 scheduler
 ~~~~~~~~~
 
 The :class:`~conops.config.SchedulerConfig` selects how a simulation built with
-:func:`~conops.ditl.create_ditl` decides what to observe. The default is queue
-dispatch, so configurations without this section behave as before.
+:func:`~conops.ditl.create_ditl` decides what to observe. A configuration
+without this section uses the default, which is queue dispatch.
 
 **Attributes:**
 
-* ``mode`` (str): ``dispatch`` (:class:`~conops.ditl.QueueDITL` picks each next
-  target), ``planned`` (one plan built up front, executed by
-  :class:`~conops.ditl.DITL`) or ``rolling`` (:class:`~conops.ditl.RollingHorizonDITL`
-  rebuilds the plan as it runs)
-* ``kind`` (str): the scheduler that builds plans in ``planned`` and ``rolling``
-  modes: ``priority`` (the default), ``local_search`` or ``cp_sat`` (needs
-  ``coast-sim[cpsat]``)
-* ``include_passes`` (default true) and ``successor_retries`` (3 by default,
-  ``unlimited`` to try every start; see :doc:`planning`), for every scheduler
-* local search, for ``local_search`` and ``cp_sat``: ``seed`` (defaults to
-  ``random_seed``, which the priority scheduler uses to break ties), ``time_limit``,
-  ``max_iterations``, ``earliness_weight``, ``neighborhood``, ``history_length``
-* CP-SAT, for ``cp_sat`` only: ``solver_time_limit``, ``solver_deterministic_time``
-  (set it, with ``workers: 1`` and a ``seed``, for runs that repeat exactly),
-  ``chunk_seconds``, ``workers``, ``max_candidates``
-* ``replanning`` (:class:`~conops.config.ReplanSettings`): for ``rolling`` mode,
-  ``horizon_seconds`` (default one day), ``replan_interval_seconds`` (default 12
-  hours), ``commit_lead_time_seconds`` (default 0), ``rapid_replans`` and
-  ``allow_interrupts`` (both default true)
-* ``allocation`` (:class:`~conops.config.AllocationSettings`, unset by default): a
-  long-range allocator for ``dispatch`` and ``rolling`` modes, with ``bin_seconds``
-  (default one day), ``efficiency`` (default 0.75), ``reserve``, the fraction of
-  each day kept free for ToOs (default 0.1), ``solver`` (``milp``, the default,
-  which needs ``coast-sim[cpsat]``, or ``greedy``), ``time_limit_seconds`` for the
-  MILP solver, HiGHS (default 10), and ``bonus``; not allowed in ``planned`` mode.
+* ``mode`` (str): How the simulation decides what to observe. One of:
 
-  ``bonus`` (default 0.5) is the fraction of a request's value its allocated time
-  gains, in the bin it is allocated to, shown as the ``allocation`` merit term. It is
-  how strongly scheduling follows the allocation: allocated time competes with all
-  other work on merit, so a larger bonus keeps closer to the allocation, and
-  ``bonus: 0`` ignores when a request was allocated.
+  - ``dispatch``: :class:`~conops.ditl.QueueDITL` picks each next target.
+  - ``planned``: one plan is built up front and executed by
+    :class:`~conops.ditl.DITL`.
+  - ``rolling``: :class:`~conops.ditl.RollingHorizonDITL` rebuilds the plan as
+    it runs.
+* ``kind`` (str): The scheduler that builds plans in ``planned`` and ``rolling``
+  modes. One of ``priority`` (the default), ``local_search`` or ``cp_sat``.
+  ``cp_sat`` needs ``coast-sim[cpsat]``.
+* ``include_passes`` (default true) and ``successor_retries`` (3 by default, or
+  ``unlimited`` to try every start; see :doc:`planning`): These two apply to
+  every scheduler.
+* Local-search settings, which apply to ``local_search`` and ``cp_sat``:
+  ``seed``, ``time_limit``, ``max_iterations``, ``earliness_weight``,
+  ``neighborhood`` and ``history_length``. ``seed`` defaults to ``random_seed``.
+  The priority scheduler uses ``random_seed`` to break ties.
+* CP-SAT settings, which apply to ``cp_sat`` only: ``solver_time_limit``,
+  ``solver_deterministic_time``, ``chunk_seconds``, ``workers`` and
+  ``max_candidates``. For runs that repeat exactly, set
+  ``solver_deterministic_time`` together with ``workers: 1`` and a ``seed``.
+* ``replanning`` (:class:`~conops.config.ReplanSettings`): Settings for
+  ``rolling`` mode. They are ``horizon_seconds`` (default one day),
+  ``replan_interval_seconds`` (default 12 hours), ``commit_lead_time_seconds``
+  (default 0), ``rapid_replans`` and ``allow_interrupts`` (both default true).
+* ``allocation`` (:class:`~conops.config.AllocationSettings`, unset by default):
+  A long-range allocator for ``dispatch`` and ``rolling`` modes. It is not
+  allowed in ``planned`` mode. Its settings are:
 
-Scheduler settings left unset use the scheduler's defaults; setting one that does
-not apply to the chosen scheduler is an error. ``dispatch`` mode uses none of them.
+  - ``bin_seconds`` (default one day).
+  - ``efficiency`` (default 0.75).
+  - ``reserve`` (default 0.1), the fraction of each bin's capacity held back
+    for unplanned work such as ToOs. A bin's capacity is its length times
+    ``efficiency``.
+  - ``solver``, which is ``milp`` or ``greedy``. ``milp`` is the default and
+    needs ``coast-sim[cpsat]``.
+  - ``time_limit_seconds`` (default 10), for the MILP solver, HiGHS.
+  - ``bonus`` (default 0.5), the fraction of a request's value that its
+    allocated time gains, in the bin it is allocated to. It is shown as the
+    ``allocation`` merit term. The bonus sets how strongly scheduling follows
+    the allocation. Allocated time competes with all other work on merit, so a
+    larger bonus keeps the schedule closer to the allocation, and ``bonus: 0``
+    ignores when a request was allocated.
+
+A scheduler setting that is left unset takes the scheduler's default. Setting
+one that does not apply to the chosen scheduler is an error. ``dispatch`` mode
+uses only ``allocation``. It ignores ``kind``, ``include_passes``,
+``successor_retries``, the local-search and CP-SAT settings and ``replanning``.
 See :doc:`planning` for what each mode and scheduler does.
 
 .. code-block:: yaml
@@ -2189,3 +2612,39 @@ For detailed API documentation, see:
 * :class:`~conops.config.CommunicationsSystem`
 * :class:`~conops.config.ObservationCategories`
 * :class:`~conops.config.VisualizationConfig`
+
+.. _power-positive-fault-safe-mode:
+
+Power-positive fault safe mode
+------------------------------
+
+``AttitudeControlSystem.safe_mode_attitude`` sets the attitude the spacecraft
+holds after fault management puts it in safe mode. The setting is optional and
+takes the same :class:`~conops.config.activity_attitude.ActivityAttitude` used by
+scheduled holds. ``None`` preserves the existing guidance, which points the
+spacecraft for solar charging and corrects that pointing step by step.
+
+Two kinds of request are supported:
+
+* ``ActivityAttitude(kind="power_positive")`` is for fixed body-mounted panels.
+  It selects a feasible fixed pose with positive net generation at every sunlit
+  sample through the remaining ephemeris, including the configured bus and
+  payload SAFE loads. The selection prefers the ecliptic poles. It uses
+  ``SpacecraftBus.frame`` to orient the declared boresight towards them, and
+  does not assume that the boresight is body +X.
+* A fixed request holds the attitude it names. Its full hold and its ingress,
+  the slew into the hold, are checked for attitude safety. A fixed request
+  carries no promise of positive power.
+
+The pose chosen for the whole hold is retained, and the step-by-step charging
+guidance does not replace it. If no sampled pose and ingress qualify,
+:class:`~conops.simulation.safe_hold.SafeHoldUnavailableError` is raised
+explicitly. There is no unverified fallback.
+
+Fault SAFE remains latched and normal commands remain rejected. This differs
+from ``ScheduledActivity(safe_hold=True)``, whose SAFE interval ends with the
+activity.
+
+The power-positive policy supports fixed body-mounted arrays. It evaluates
+power at the ephemeris samples, and it permits battery draw in eclipse. See
+:doc:`planning` for the candidate search and margin settings.

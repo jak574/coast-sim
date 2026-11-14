@@ -189,7 +189,11 @@ class Pass(BaseModel):
         return f"{unixtime2date(self.begin):18s}  {self.station:3s}  {self.length / 60.0:4.1f} mins"
 
     def in_pass(self, utime: float) -> bool:
-        return self.begin <= utime <= self.end
+        # Tracking profiles include their terminal sample; network bookings
+        # hand over at that instant, so only the incoming station owns it.
+        return self.begin <= utime and (
+            utime <= self.end if self.requires_tracking else utime < self.end
+        )
 
     def time_to_pass(self) -> str:
         """Return a string for how long it is until the next pass"""
@@ -547,7 +551,9 @@ class Pass(BaseModel):
 class PassTimes(ContactScheduler):
     """Predict and book ground-station passes for every antenna type.
 
-    Probability and overlap selection happen before execution. Only fixed
+    Probability and contact selection happen before execution. Continuous
+    scheduling trims overlapping windows into station handovers; whole-pass
+    scheduling selects complete non-overlapping windows. Only fixed
     antennas require spacecraft tracking profiles and tracking eligibility;
     omni and gimballed antennas reserve station time while science continues.
     """
@@ -578,6 +584,11 @@ class PassTimes(ContactScheduler):
         self._geometry: dict[str, StationGeometry] = {}
         self._rates: dict[str, npt.NDArray[np.float64]] = {}
         self._routed_rates: dict[tuple[str, str | None], npt.NDArray[np.float64]] = {}
+        self._visibility_windows: dict[
+            str, tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]
+        ] = {}
+        self._window_availability: dict[tuple[str, int, int], bool] = {}
+        self._window_availability_ready = False
 
         # Ground stations registry from config
         if config.ground_stations is None:
@@ -1201,6 +1212,57 @@ class PassTimes(ContactScheduler):
         self._rates[station.code] = rates
         return rates[startindex:endindex]
 
+    def _prepare_window_availability(self) -> None:
+        """Freeze network access in station/time order, independent of query order."""
+        if self._window_availability_ready:
+            return
+        communications = self.config.spacecraft_bus.communications
+        for station in self.ground_stations.stations:
+            if (effective_downlink_rate_mbps(station, communications) or 0.0) <= 0.0:
+                continue
+            geometry = self.station_geometry(station, 0, len(self.times))
+            starts, ends = find_boundaries(
+                geometry.elevation_deg > station.min_elevation_deg
+            )
+            self._visibility_windows[station.code] = (starts, ends)
+            for start, stop in zip(starts, ends):
+                end = (
+                    self.times[stop]
+                    if stop < len(self.times)
+                    else self.times[-1] + self.ephem.step_size
+                )
+                key = (station.code, int(start), int(stop))
+                self._window_availability[key] = self.accepts(
+                    station, float(end - self.times[start])
+                )
+        self._window_availability_ready = True
+
+    def _accepts_window(
+        self,
+        station: GroundStation,
+        first: int,
+        length: float,
+        *,
+        apply_scheduling: bool,
+    ) -> bool:
+        """Draw network availability once for the complete physical window.
+
+        A daily query can clip the same window twice. Its boundary does not
+        create a new station opportunity or change an earlier access decision.
+        """
+        if not self.continuous_contacts or not apply_scheduling:
+            return self.accepts(station, length, apply_scheduling=apply_scheduling)
+        self._prepare_window_availability()
+        boundaries = self._visibility_windows.get(station.code)
+        if boundaries is None:
+            return False
+        starts, ends = boundaries
+        window = int(np.searchsorted(starts, first, side="right")) - 1
+        assert window >= 0 and first < ends[window]
+        start, stop = int(starts[window]), int(ends[window])
+        key = (station.code, start, stop)
+        return self._window_availability[key]
+
     def _build_pass(
         self,
         station: GroundStation,
@@ -1237,8 +1299,8 @@ class PassTimes(ContactScheduler):
             passstart, passend = booked_window
         passlen = passend - passstart
 
-        if booked_window is None and not self.accepts(
-            station, passlen, apply_scheduling=apply_scheduling
+        if booked_window is None and not self._accepts_window(
+            station, global_start_idx, passlen, apply_scheduling=apply_scheduling
         ):
             return None
 
@@ -1315,7 +1377,7 @@ class PassTimes(ContactScheduler):
             day: Day of year of the first day.
             length: Number of days to predict.
             apply_scheduling: Apply the scheduling-probability draw and overlap
-                deconfliction that select new contact opportunities. Pass False
+                selection under the configured contact policy. Pass False
                 to reconstruct the physical passes for contacts that are
                 already scheduled, so a replay cannot drop them.
         """
@@ -1334,12 +1396,68 @@ class PassTimes(ContactScheduler):
         self._predict_range(timestamp_unix, startindex, endindex, apply_scheduling)
 
     def predict(self) -> list[Pass]:
-        """Book passes over the entire ephemeris before execution starts."""
+        """Schedule the configured contact policy over the whole ephemeris.
+
+        Continuous contacts retain overlapping tails and hand over when the
+        selected station sets. Whole-pass contacts use overlap deconfliction.
+        Probability is drawn once per accepted visibility-window candidate.
+        """
         self.passes = []
+        self.dropped_overlapping_passes = []
         self.dropped_constraint_passes = []
         times = self.times
         self._predict_range(times, 0, len(times), True)
         return self.passes
+
+    def _schedule_continuous_contacts(self) -> None:
+        """Trim accepted visibility windows into non-overlapping handovers.
+
+        Keep the current station until it sets or its effective rate becomes
+        zero. At a switch choose by current rate, elevation, then station code.
+        Coverage and execution consume these bookings without selecting again.
+        """
+        stations = self.ground_stations.stations
+        times = self.times
+        available = np.zeros((len(stations), len(times)), dtype=bool)
+        indices = {station.code: k for k, station in enumerate(stations)}
+        for window in self.passes:
+            start, stop = np.searchsorted(times, [window.begin, window.end])
+            available[indices[window.station], start:stop] = True
+        rates = np.zeros(available.shape)
+        elevations = np.full(available.shape, -90.0)
+        for k in np.flatnonzero(available.any(axis=1)):
+            station = stations[k]
+            rates[k] = self.downlink_rates(station, 0, len(times))
+            elevations[k] = self.station_geometry(station, 0, len(times)).elevation_deg
+        available &= rates > 0.0
+        bookings: list[tuple[float, float, str]] = []
+        current = -1
+        begin = 0.0
+        for step, timestamp in enumerate(times):
+            if current >= 0 and available[current, step]:
+                continue
+            candidates = np.flatnonzero(available[:, step])
+            chosen = (
+                min(
+                    (int(k) for k in candidates),
+                    key=lambda k: (
+                        -float(rates[k, step]),
+                        -float(elevations[k, step]),
+                        stations[k].code,
+                    ),
+                )
+                if len(candidates)
+                else -1
+            )
+            if chosen != current:
+                if current >= 0:
+                    bookings.append((begin, float(timestamp), stations[current].code))
+                current, begin = chosen, float(timestamp)
+        if current >= 0:
+            bookings.append(
+                (begin, float(times[-1]) + self.ephem.step_size, stations[current].code)
+            )
+        self.restore_bookings(bookings)
 
     def restore_bookings(self, bookings: Sequence[tuple[float, float, str]]) -> None:
         """Rebuild already booked passes without drawing or selecting them again."""
@@ -1426,4 +1544,7 @@ class PassTimes(ContactScheduler):
         # Order the passes by time
         self.passes.sort(key=lambda x: x.begin, reverse=False)
         if apply_scheduling:
-            self._deconflict_overlapping_passes()
+            if self.continuous_contacts:
+                self._schedule_continuous_contacts()
+            else:
+                self._deconflict_overlapping_passes()

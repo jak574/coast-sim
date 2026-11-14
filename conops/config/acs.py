@@ -8,6 +8,7 @@ from ..common.enums import SlewAlgorithm
 from ..common.motion import RestToRestMotion
 from ..common.numerics import ROUNDOFF
 from ._base import ConfigModel
+from .activity_attitude import ActivityAttitude
 from .constants import DTOR
 from .momentum import StoredMomentumConfig
 
@@ -63,6 +64,20 @@ class AttitudeControlSystem(ConfigModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+
+    safe_mode_attitude: ActivityAttitude | None = Field(
+        default=None,
+        description="Optional fixed or power-positive fault SAFE guidance; None keeps legacy guidance",
+    )
+
+    @field_validator("safe_mode_attitude")
+    @classmethod
+    def _safe_mode_request(
+        cls, value: ActivityAttitude | None
+    ) -> ActivityAttitude | None:
+        if value is not None and value.kind == "inherited":
+            raise ValueError("fault safe mode needs a fixed or power-positive attitude")
+        return value
 
     slew_acceleration: float = Field(
         default=0.5, description="Maximum angular acceleration in degrees/second²"
@@ -289,7 +304,7 @@ class AttitudeControlSystem(ConfigModel):
         vmax = self.effective_max_slew_rate(rotation_axis_body)
         if a <= 0 or vmax <= 0:
             return 0.0
-        return RestToRestMotion(angle_deg, a, vmax).duration
+        return RestToRestMotion(angle=angle_deg, acceleration=a, rate=vmax).duration
 
     def max_motion_angle(
         self,
@@ -330,7 +345,7 @@ class AttitudeControlSystem(ConfigModel):
         if a <= 0 or vmax <= 0:
             return min(max(0.0, t * vmax), angle_deg)  # best-effort fallback
 
-        return RestToRestMotion(angle_deg, a, vmax).at(t)[0]
+        return RestToRestMotion(angle=angle_deg, acceleration=a, rate=vmax).at(t)[0]
 
     def slew_time(
         self,

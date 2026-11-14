@@ -1061,6 +1061,10 @@ class TargetQueue:
 
             # Check if target is visible for full observation
             visibility_window = target.visible(utime, endtime)
+            # Reservation and repoint cuts limit this snapshot, not the
+            # target's last chance to observe. Score its physical visibility
+            # window so identical dispatch and planned visits have one value.
+            merit_window = visibility_window if visibility_window else None
             if visibility_window and self._repoints_forbidden(target):
                 # Not during a repoint, and the minimum snapshot before the
                 # next one; the window then ends where the repoint begins.
@@ -1140,7 +1144,7 @@ class TargetQueue:
                 terms = merit_model.value_terms(
                     target,
                     utime,
-                    visibility_window=visibility_window,
+                    visibility_window=merit_window,
                     delivered_shares=delivered_shares,
                 )
                 value = self._with_allocation(terms, target, collection)

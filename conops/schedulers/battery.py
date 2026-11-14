@@ -18,9 +18,9 @@ whenever they are lit, whatever the spacecraft is doing, so every span is
 counted at the attitude held through it: a slew along its path, an
 observation or a charge at its attitude, a contact along its tracking
 profile, and idle time at the attitude the spacecraft is left in. Charging
-is an addition too: the schedulers put a charging entry, pointing the panels
-at the Sun, into every idle sunlit stretch a charge fits as they build the
-plan, and the walk counts what those entries put back (see
+is an addition too: the schedulers reserve a charging entry, pointing the panels
+at the Sun, only where the full forecast needs one, and the walk counts its net
+benefit along with both transition slews (see
 :meth:`~conops.schedulers.PriorityScheduler.schedule`). The ledger knows the
 horizon's sunlit runs, the charging attitude in each and what it generates
 step by step, which is what the schedulers place charges from. The segments
@@ -80,7 +80,8 @@ class Addition(NamedTuple):
     counts the addition at the angles it is reached with."""
     profile: int = -1
     """The ledger's record of the mode and attitude held at each of its
-    steps, from which the walk counts it at any drive angles; -1 if none."""
+    steps, from which the walk counts it at any drive angles; -1 when no
+    drive needs it, so identical static-panel additions compare equal."""
 
 
 Additions = tuple[Addition, ...]
@@ -487,6 +488,8 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
             float(entry.ra),
             float(entry.dec),
             float(entry.roll),
+            entry.activity_mode,
+            entry.activity_hold_begin,
             after,
             rest,
             path_start,
@@ -511,7 +514,7 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         elif obstype == ObsType.CHARGE:
             mode = ACSMode.CHARGING
         elif obstype == ObsType.ACTIVITY:
-            mode = ACSMode.DESAT if entry.desaturation else ACSMode.IDLE
+            mode = entry.activity_mode
         else:
             self._addition_cache[key] = None
             return None
@@ -568,6 +571,12 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
                 step_mode = ACSMode.PASS if mode is ACSMode.PASS else ACSMode.SLEWING
             elif utime >= end:
                 step_mode = ACSMode.SLEWING
+            elif (
+                obstype == ObsType.ACTIVITY
+                and entry.activity_hold_begin is not None
+                and utime < entry.activity_hold_begin
+            ):
+                step_mode = ACSMode.IDLE
             else:
                 step_mode = mode
             return (
@@ -673,9 +682,12 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         counts for nothing.
         """
         profile = tuple(held_at(float(step)) for step in self.steps(begin, end))
-        self._profiles.append(profile)
+        profile_index = -1
+        if self.driven:
+            profile_index = len(self._profiles)
+            self._profiles.append(profile)
         deltas = self._deltas(begin, profile, self.drive_start)[0]
-        return Addition(begin, end, sum(deltas), deltas, len(self._profiles) - 1)
+        return Addition(begin, end, sum(deltas), deltas, profile_index)
 
     def _deltas(
         self, begin: float, profile: _Profile, angles: Angles

@@ -2,20 +2,22 @@
 planners and executed by both simulations."""
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from conops import DITL, QueueDITL, create_ditl
 from conops.common import ObsType
 from conops.common.enums import ACSMode
-from conops.config import MissionConfig
+from conops.config import MissionConfig, StoredMomentumConfig, ThrusterDumpConfig
+from conops.config.scheduler import SchedulerMode
 from conops.ditl import RollingHorizonDITL
 from conops.schedulers import LocalSearchScheduler, PriorityScheduler, SchedulingContext
 from conops.targets import (
     ACTIVITY_OBSID,
     Plan,
     Pointing,
+    Program,
     ScheduledActivity,
     assign_obsids,
 )
@@ -278,11 +280,44 @@ class TestPlanning:
         ).schedule()
         assert _activities(plan) == []
 
+    @pytest.mark.parametrize("fixed", [False, True])
+    @pytest.mark.parametrize("limit", ["run", "ephemeris"])
+    def test_an_activity_tail_stops_at_the_physical_boundary(
+        self, fixed, limit
+    ) -> None:
+        """An internal cutoff may be crossed; the run and ephemeris may not."""
+        config = _config(3)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        activity = ScheduledActivity(
+            name="Long hold",
+            begin=T0 + 90 * MIN,
+            duration_seconds=2 * HOUR,
+            slide_seconds=0 if fixed else 10 * MIN,
+            fixed=fixed,
+        )
+        run_hours = 2.25 if limit == "run" else 4
+        scheduler = PriorityScheduler(
+            config,
+            [],
+            BEGIN,
+            BEGIN + timedelta(hours=2),
+            simulation_end=BEGIN + timedelta(hours=run_hours),
+            step_size=STEP,
+            include_passes=False,
+            activities=[activity],
+        )
+        [entry] = _activities(scheduler.schedule())
+        assert float(entry.begin) == activity.begin
+        assert float(entry.end) == T0 + min(run_hours, 3) * HOUR
+        [block] = scheduler.timeline
+        assert block.end == float(entry.end)
+
     def test_a_sliding_activity_due_at_the_horizon_end_is_left_out(self) -> None:
         """A sliding block is reserved from its latest start; at or past the
-        horizon's end that reservation would have no length, and the plan
-        leaves the block out rather than holding a block of no length."""
-        config = _config(HOURS)
+        internal horizon's end that reservation would have no length. The
+        physical run and ephemeris continue, so a later plan can reserve it."""
+        config = _config(HOURS + 4)
         at_the_end = ScheduledActivity(
             name="Late calibration",
             begin=T0 + (HOURS - 2) * HOUR,
@@ -296,6 +331,7 @@ class TestPlanning:
             END,
             step_size=STEP,
             activities=[at_the_end],
+            simulation_end=END + timedelta(hours=4),
         )
         plan = scheduler.schedule()
         assert _activities(plan) == []
@@ -320,7 +356,7 @@ class TestPlanning:
         pytest.importorskip("ortools")
         from conops.schedulers import CpSatScheduler
 
-        config = _config(HOURS)
+        config = _config(HOURS + 4)
         at_the_end = ScheduledActivity(
             name="Late calibration",
             begin=T0 + (HOURS - 2) * HOUR,
@@ -334,6 +370,7 @@ class TestPlanning:
             END,
             step_size=STEP,
             activities=[at_the_end],
+            simulation_end=END + timedelta(hours=4),
             time_limit=5.0,
         )
         plan = scheduler.schedule()
@@ -388,6 +425,309 @@ class TestDispatch:
         for earlier, following in zip(entries, entries[1:]):
             assert float(following.begin) >= float(earlier.end)
             assert float(following.end) - float(following.begin) == 300
+
+
+class TestPartialRun:
+    @pytest.mark.parametrize("mode", list(SchedulerMode))
+    @pytest.mark.parametrize(
+        "begin,duration,slide,fixed,hold_begin,hold_end",
+        [
+            (1.5, 1, 0, True, 1.5, 2.5),
+            (1, 1, 0.75, False, 1.75, 2.75),
+            (1, 0.25, 2, False, 2, 2.25),
+            (2.5, 1, 0, True, 2.5, 3.5),
+            (1.5, 2, 0, True, 1.5, 3.5),
+        ],
+        ids=[
+            "resume-fixed",
+            "resume-closed-slide",
+            "open-slide",
+            "cut-end",
+            "cut-both",
+        ],
+    )
+    def test_overlapping_activity_reports_its_full_hold(
+        self, tmp_path, mode, begin, duration, slide, fixed, hold_begin, hold_end
+    ) -> None:
+        config = _config(4)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        config.scheduler.mode = mode
+        config.scheduler.include_passes = False
+        config.scheduler.replanning.replan_interval_seconds = 15 * MIN
+        activity = ScheduledActivity(
+            name="Partial calibration",
+            begin=T0 + begin * HOUR,
+            duration_seconds=duration * HOUR,
+            slide_seconds=slide * HOUR,
+            fixed=fixed,
+            data_gb=1.5,
+        )
+        program = Program(
+            begin=T0,
+            end=T0 + 4 * HOUR,
+            activities=[activity],
+            requests=[_target(config, 100, *PATCH[0], minutes=40, snapshot=5)],
+        )
+        program = Program.load(program.save(tmp_path / "program.json"))
+        before = program.model_dump(mode="json")
+        ditl = create_ditl(
+            config,
+            program=program,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(hours=3),
+        )
+        ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
+        assert ditl.calc()
+        [entry] = _activities(ditl.plan)
+        assert (float(entry.begin), float(entry.end)) == (
+            T0 + max(2, hold_begin) * HOUR,
+            T0 + min(3, hold_end) * HOUR,
+        )
+        assert (entry.activity_hold_begin, entry.activity_hold_end) == (
+            T0 + hold_begin * HOUR,
+            T0 + hold_end * HOUR,
+        )
+        assert entry.activity_partial == (hold_begin < 2 or hold_end > 3)
+        assert entry.activity_finishes == (hold_end <= 3)
+        assert entry.fixed_data_gb == (0 if hold_begin < 2 else activity.data_gb)
+        assert ditl._add_activity_data.call_count == (0 if hold_begin < 2 else 1)
+        assert ditl.validate_plan_matches_execution() == []
+        assert all(
+            float(e.end) <= float(entry.begin) or float(e.begin) >= float(entry.end)
+            for e in _science(ditl.plan)
+        )
+        assert [a.model_dump(mode="json") for a in program.activities] == before[
+            "activities"
+        ]
+        events = [e for e in ditl.log if e.event_type == "ACTIVITY"]
+        assert len(events) == 2
+        assert ("resumes" in events[0].description) == (hold_begin < 2)
+        assert ("before completion" in events[1].description) == (hold_end > 3)
+        restored = Plan.load(ditl.plan.save(tmp_path / "plan.json"))
+        [loaded] = _activities(restored)
+        assert loaded.activity_partial == entry.activity_partial
+        assert loaded.activity_hold_begin == entry.activity_hold_begin
+        assert loaded.activity_hold_end == entry.activity_hold_end
+
+    @pytest.mark.parametrize("mode", list(SchedulerMode))
+    @pytest.mark.parametrize("boundary", ["truncated", "exact-end", "resumed"])
+    def test_a_dump_unloads_only_when_its_full_hold_ends(self, mode, boundary) -> None:
+        truncated = boundary == "truncated"
+        config = _config(4)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        config.scheduler.mode = mode
+        config.scheduler.include_passes = False
+        config.spacecraft_bus.inertia_tensor_body_kg_m2 = (
+            (1000, 0, 0),
+            (0, 1000, 0),
+            (0, 0, 1000),
+        )
+        config.spacecraft_bus.attitude_control.stored_momentum = StoredMomentumConfig(
+            gravity_gradient_enabled=True,
+            initial_momentum_body_n_m_s=(0.4, 0, 0),
+            capacity_n_m_s=10,
+            thruster_dump=ThrusterDumpConfig(duration_seconds=HOUR),
+        )
+        activity = ScheduledActivity(
+            name="Boundary dump",
+            begin=T0 + (1.5 if boundary == "resumed" else 2.5) * HOUR,
+            duration_seconds=HOUR,
+            fixed=True,
+            desaturation=True,
+        )
+        stop = T0 + 3 * HOUR if truncated else activity.end
+        ditl = create_ditl(
+            config,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(seconds=stop - T0),
+            activities=[activity],
+        )
+        ditl._unload_stored_momentum = Mock(wraps=ditl._unload_stored_momentum)
+        assert ditl.calc()
+        [entry] = _activities(ditl.plan)
+        assert entry.activity_finishes is not truncated
+        assert ditl._unload_stored_momentum.call_count == (0 if truncated else 1)
+        if not truncated:
+            ditl._unload_stored_momentum.assert_called_once_with(stop, entry.obsid)
+        assert (
+            ditl._stored_momentum_tracker.stored_momentum_norm_n_m_s
+            == pytest.approx(0.4 if truncated else 0)
+        )
+        assert ditl.validate_plan_matches_execution() == []
+
+        if mode is SchedulerMode.PLANNED:
+            scheduler = PriorityScheduler(
+                config,
+                [],
+                BEGIN + timedelta(hours=2),
+                BEGIN + timedelta(seconds=stop - T0),
+                activities=[activity],
+                include_passes=False,
+            )
+            scheduler.schedule()
+            _, norms = scheduler._momentum.profile(scheduler.timeline)
+            assert norms[-1] == pytest.approx(0.4 if truncated else 0)
+            rolling = RollingHorizonDITL(
+                config,
+                [],
+                begin=BEGIN + timedelta(hours=2),
+                end=BEGIN + timedelta(seconds=stop - T0),
+            )
+            rolling._stored_momentum_tracker.start_from_eci((0.4, 0, 0))
+            forecast = rolling._momentum_start(T0 + 2 * HOUR, stop, [entry])
+            assert forecast == pytest.approx((0.4, 0, 0) if truncated else (0, 0, 0))
+
+    @pytest.mark.parametrize("legacy", [False, True])
+    def test_replaying_a_saved_activity_over_a_shorter_interval(self, tmp_path, legacy):
+        config = _config(4)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        activity = assign_obsids(
+            [
+                ScheduledActivity(
+                    name="Saved hold",
+                    begin=T0 + 1.5 * HOUR,
+                    duration_seconds=2 * HOUR,
+                    fixed=True,
+                    desaturation=True,
+                    data_gb=2,
+                )
+            ]
+        )[0]
+        scheduler = PriorityScheduler(
+            config,
+            [],
+            BEGIN,
+            BEGIN + timedelta(hours=4),
+            activities=[activity],
+            include_passes=False,
+        )
+        plan = Plan.load(scheduler.schedule().save(tmp_path / "input.json"))
+        [entry] = _activities(plan)
+        if legacy:
+            entry.activity_hold_begin = None
+            entry.activity_hold_end = None
+        ditl = DITL(
+            config=config,
+            ephem=config.constraint.ephem,
+            plan=plan,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(hours=3),
+        )
+        ditl.acs.ra, ditl.acs.dec, ditl.acs.roll = entry.ra, entry.dec, entry.roll
+        ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
+        ditl._unload_stored_momentum = Mock()
+        assert ditl.calc()
+        assert (float(entry.begin), float(entry.end)) == (T0 + 2 * HOUR, T0 + 3 * HOUR)
+        assert entry.activity_hold_begin == activity.begin
+        assert entry.activity_hold_end == activity.end
+        assert entry.activity_partial and not entry.activity_finishes
+        ditl._add_activity_data.assert_not_called()
+        ditl._unload_stored_momentum.assert_not_called()
+        assert ditl.validate_plan_matches_execution() == []
+
+    @pytest.mark.parametrize("mode", list(SchedulerMode))
+    @pytest.mark.parametrize("reload", [False, True])
+    def test_expired_activities_are_not_executed_or_renumbered(
+        self, tmp_path, mode, reload
+    ) -> None:
+        config = _config(4)
+        config.scheduler.mode = mode
+        start, stop = BEGIN + timedelta(hours=2), BEGIN + timedelta(hours=4)
+        live = ScheduledActivity(
+            name="In run",
+            begin=T0 + 3 * HOUR,
+            duration_seconds=10 * MIN,
+            data_gb=1.5,
+        )
+        activities = [
+            ScheduledActivity(
+                name="After run",
+                begin=T0 + 4 * HOUR,
+                duration_seconds=10 * MIN,
+            ),
+            live,
+            ScheduledActivity(
+                name="Expired",
+                begin=T0 + HOUR,
+                duration_seconds=10 * MIN,
+                data_gb=20,
+            ),
+            ScheduledActivity(
+                name="Ends at begin",
+                begin=T0 + 90 * MIN,
+                duration_seconds=30 * MIN,
+            ),
+            ScheduledActivity(
+                name="Slide ends at begin",
+                begin=T0 + 80 * MIN,
+                duration_seconds=10 * MIN,
+                slide_seconds=30 * MIN,
+            ),
+        ]
+        program = Program(
+            begin=T0,
+            end=T0 + 4 * HOUR,
+            activities=activities,
+        )
+        if reload:
+            program = Program.load(program.save(tmp_path / "program.json"))
+        before = program.model_dump(mode="json")
+        [expected] = [a for a in assign_obsids(activities) if a.name == live.name]
+        ditl = create_ditl(config, program=program, begin=start, end=stop)
+        ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
+
+        assert ditl.calc()
+
+        [entry] = _activities(ditl.plan)
+        assert (entry.name, entry.obsid) == (live.name, expected.obsid)
+        assert (float(entry.begin), float(entry.end)) == (live.begin, live.end)
+        assert ditl.validate_plan_matches_execution() == []
+        ditl._add_activity_data.assert_called_once()
+        volume, recorded = ditl._add_activity_data.call_args.args
+        assert volume == live.data_gb and recorded.obsid == expected.obsid
+        assert program.model_dump(mode="json") == before
+
+    def test_direct_dispatch_ignores_an_expired_activity(self) -> None:
+        config = _config(4)
+        ditl = QueueDITL(
+            config=config,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(hours=4),
+            activities=[
+                ScheduledActivity(
+                    name="Expired",
+                    begin=T0 + HOUR,
+                    duration_seconds=10 * MIN,
+                )
+            ],
+        )
+        assert ditl.calc()
+        assert _activities(ditl.plan) == []
+        assert not any(e.event_type == "ACTIVITY" for e in ditl.log)
+        assert ditl.validate_plan_matches_execution() == []
+
+    def test_an_open_slide_window_is_still_pending(self) -> None:
+        config = _config(4)
+        ditl = QueueDITL(
+            config=config,
+            begin=BEGIN + timedelta(hours=2),
+            end=BEGIN + timedelta(hours=4),
+            activities=[
+                ScheduledActivity(
+                    name="Still open",
+                    begin=T0 + HOUR,
+                    duration_seconds=10 * MIN,
+                    slide_seconds=2 * HOUR,
+                )
+            ],
+        )
+        assert ditl._setup_simulation_timing()
+        pending = ditl._activity_pending(ditl.ustart)
+        assert pending is not None and pending.name == "Still open"
+        assert ditl._next_activity_begin(ditl.ustart) == T0 + 3 * HOUR
 
 
 def _slow_slew_run(
@@ -519,6 +859,7 @@ class TestRolling:
         assert float(entries[-1].end) == T0 + 600 + duration + HOUR
         assert sum(e.fixed_data_gb for e in entries) == pytest.approx(1.5)
         assert ditl.recorder.current_volume_gb == pytest.approx(1.5)
+        assert [a.begin for a in activities] == [T0 + 600, T0 + 900]
 
     def test_an_activity_in_progress_is_reserved_across_horizons(self) -> None:
         config = _config(2)
@@ -566,9 +907,106 @@ class TestRolling:
         ditl.step_size = STEP
         assert ditl.calc()
         entries = _activities(ditl.plan)
-        assert len(entries) > 1
+        [entry] = entries
+        assert (float(entry.begin), float(entry.end)) == (activity.begin, activity.end)
+        assert ditl.validate_plan_matches_execution() == []
         assert sum(e.fixed_data_gb for e in entries) == 1.5
         assert ditl.recorder.current_volume_gb == pytest.approx(1.5)
+
+    @pytest.mark.parametrize("fixed", [False, True])
+    @pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+    def test_activity_crossing_a_planning_horizon_is_kept_whole(
+        self, fixed, kind, tmp_path
+    ) -> None:
+        """A planning cutoff is not the end of an activity already reserved.
+
+        The 01:30–02:30 hold crosses the first 02:00 horizon. A replan commits
+        it before it begins and another runs inside it; neither may shorten it
+        to 02:00, repeat its data, or place science in its remaining half hour.
+        """
+        config = _config(6)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        activity = ScheduledActivity(
+            name="Across horizon",
+            begin=T0 + 90 * MIN,
+            duration_seconds=HOUR,
+            slide_seconds=0 if fixed else 10 * MIN,
+            fixed=fixed,
+            data_gb=1.5,
+        )
+        if kind == "priority":
+            scheduler, options = PriorityScheduler, {}
+        elif kind == "local_search":
+            scheduler, options = LocalSearchScheduler, {"time_limit": 0.0}
+        else:
+            pytest.importorskip("ortools")
+            from conops.schedulers import CpSatScheduler
+
+            scheduler, options = (
+                CpSatScheduler,
+                {
+                    "time_limit": 0.0,
+                    "solver_time_limit": 2.0,
+                    "solver_deterministic_time": 0.05,
+                    "workers": 1,
+                    "seed": 1,
+                },
+            )
+        captured = []
+        schedule = scheduler.schedule
+
+        def record(builder):
+            plan = schedule(builder)
+            captured.append(Plan.model_validate_json(plan.model_dump_json()))
+            for block in builder.timeline:
+                if block.entry.obsid == ACTIVITY_OBSID:
+                    assert block.end == float(block.entry.end)
+            return plan
+
+        ditl = RollingHorizonDITL(
+            config,
+            [
+                _target(
+                    config,
+                    100,
+                    *PATCH[0],
+                    minutes=60,
+                    snapshot=20,
+                    earliest_start=T0 + 2 * HOUR,
+                )
+            ],
+            begin=BEGIN,
+            end=BEGIN + timedelta(hours=6),
+            horizon=timedelta(hours=2),
+            replan_interval=timedelta(hours=1),
+            commit_lead_time=timedelta(minutes=40),
+            scheduler=scheduler,
+            scheduler_options=options,
+            include_passes=False,
+            activities=[activity],
+        )
+        ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
+        with patch.object(scheduler, "schedule", record):
+            assert ditl.calc()
+
+        [initial] = _activities(captured[0])
+        [entry] = _activities(ditl.plan)
+        assert (float(initial.begin), float(initial.end)) == (
+            activity.begin,
+            activity.end,
+        )
+        assert (float(entry.begin), float(entry.end)) == (activity.begin, activity.end)
+        assert ditl.validate_plan_matches_execution() == []
+        science = _science(ditl.plan)
+        assert science
+        assert all(float(e.begin) >= activity.end for e in science)
+        events = [e for e in ditl.log if e.event_type == "ACTIVITY"]
+        assert [e.time for e in events] == [activity.begin, activity.end]
+        ditl._add_activity_data.assert_called_once()
+        restored = Plan.load(ditl.plan.save(tmp_path / "plan.json"))
+        [loaded] = _activities(restored)
+        assert float(loaded.end) - float(loaded.begin) == HOUR
 
     def test_each_plan_reserves_the_activities(self) -> None:
         config = _config(HOURS)

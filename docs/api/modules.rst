@@ -1,43 +1,33 @@
 API Reference
 =============
 
-This section contains the complete API documentation for all modules in COASTSim.
+This section documents every public module in COASTSim. Each class and function
+is documented on the page of the module that defines it. Names that a package
+re-exports, such as ``conops.config.MissionConfig``, link to that page.
 
-Core Modules
-------------
+Configuration
+-------------
 
 .. toctree::
    :maxdepth: 2
 
    conops.config
-   conops.config.acs
-   conops.config.communications
-   conops.config.data_generator
-   conops.config.fault_management
-   conops.config.momentum
-   conops.config.observation_categories
-   conops.config.power
-   conops.config.scheduler
-   conops.config.spacecraft_bus
-   conops.config.thermal
+
+Simulations
+-----------
+
+.. toctree::
+   :maxdepth: 2
+
    conops.ditl
-   conops.ditl.ditl
-   conops.ditl.ditl_event
-   conops.ditl.ditl_log
-   conops.ditl.ditl_log_store
-   conops.ditl.ditl_mixin
-   conops.ditl.ditl_stats
-   conops.ditl.factory
-   conops.ditl.plan_validator
-   conops.ditl.queue_ditl
-   conops.ditl.rolling_ditl
-   conops.ditl.telemetry
+
+Spacecraft Simulation
+---------------------
+
+.. toctree::
+   :maxdepth: 2
+
    conops.simulation
-   conops.simulation.acs
-   conops.simulation.acs_command
-   conops.simulation.coverage
-   conops.simulation.momentum
-   conops.simulation.roll
 
 Scheduling and Planning
 -----------------------
@@ -45,84 +35,23 @@ Scheduling and Planning
 .. toctree::
    :maxdepth: 2
 
-   conops.benchmark
-   conops.benchmark.contenders
-   conops.benchmark.harness
-   conops.benchmark.metrics
-   conops.benchmark.scenarios
    conops.schedulers
-   conops.schedulers.allocator
-   conops.schedulers.battery
-   conops.schedulers.consumable
-   conops.schedulers.context
-   conops.schedulers.cpsat_scheduler
-   conops.schedulers.local_search_scheduler
-   conops.schedulers.priority_scheduler
-   conops.schedulers.protocols
-   conops.schedulers.queue_scheduler
-   conops.schedulers.recorder
-   conops.schedulers.registry
-   conops.schedulers.sequential_scheduler
-   conops.schedulers.scheduler
+
+Targets and Plans
+-----------------
+
+.. toctree::
+   :maxdepth: 2
+
    conops.targets
-   conops.targets.merit
-   conops.targets.pointing
-   conops.targets.plan
-   conops.targets.plan_entry
-   conops.targets.plan_schema
-   conops.targets.target_queue
 
-Spacecraft Components
----------------------
+Benchmarking
+------------
 
 .. toctree::
    :maxdepth: 2
 
-   conops.battery
-   conops.solar_panel
-   conops.instrument
-   conops.recorder
-   conops.config.radiator
-   conops.config.geometry
-
-Orbit and Pointing
-------------------
-
-.. toctree::
-   :maxdepth: 2
-
-   conops.ephemeris
-   conops.slew
-   conops.vector
-
-Constraints and Environment
----------------------------
-
-.. toctree::
-   :maxdepth: 2
-
-   conops.constraint
-   conops.saa
-   conops.emergency_charging
-
-Ground Support
---------------
-
-.. toctree::
-   :maxdepth: 2
-
-   conops.groundstation
-   conops.passes
-
-Utilities
----------
-
-.. toctree::
-   :maxdepth: 2
-
-   conops.common
-   conops.common.enums
-   conops.constants
+   conops.benchmark
 
 Visualization
 -------------
@@ -131,3 +60,11 @@ Visualization
    :maxdepth: 2
 
    conops.visualization
+
+Utilities
+---------
+
+.. toctree::
+   :maxdepth: 2
+
+   conops.common

@@ -1,8 +1,7 @@
 conops.schedulers.protocols
-============================
+===========================
 
 .. automodule:: conops.schedulers.protocols
-   :members: DispatchPolicy, Scheduler
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

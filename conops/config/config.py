@@ -251,6 +251,8 @@ class MissionConfig(ConfigModel):
         frame's boresight, with its zero-roll reference completing the
         frame; one given a mounting, or a legacy boresight, keeps it."""
         bus = getattr(self, "spacecraft_bus", None)
+        if isinstance(self.constraint, Constraint):
+            self.constraint._body_frame_source = bus
         frame = getattr(bus, "frame", None)
         payload = getattr(self, "payload", None)
         # A test double's configuration has no frame or payload.
@@ -301,6 +303,13 @@ class MissionConfig(ConfigModel):
                 if step.instrument_modes:
                     check(step.instrument_modes)
         return self
+
+    def science_in_eclipse_for(self, obsid: int) -> bool:
+        """The category override, or the mission's eclipse observing default."""
+        override = self.observation_categories.get_category(
+            int(obsid)
+        ).science_in_eclipse
+        return self.constraint.science_in_eclipse if override is None else override
 
     def observation_timing_for(self, obsid: int) -> ObservationTiming:
         """The setup, cleanup and handoff budgets of the observation ``obsid``:

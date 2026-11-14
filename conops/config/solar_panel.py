@@ -1,12 +1,18 @@
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import numpy.typing as npt
 import rust_ephem
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from ..common import dtutcfromtimestamp
 from ..common.enums import ACSMode
@@ -224,8 +230,7 @@ class SingleAxisSolarArrayDrive(ConfigModel):
         return float(np.clip(current + delta, self.min_angle_deg, self.max_angle_deg))
 
 
-@dataclass(frozen=True, slots=True)
-class SolarArrayDriveState:
+class SolarArrayDriveState(BaseModel):
     """Executed finite-drive state, kept separate from panel configuration.
 
     ``angles_deg`` is aligned with ``SolarPanelSet.panels``. Entries are ``None``
@@ -235,11 +240,14 @@ class SolarArrayDriveState:
     caches can identify the state snapshot they scored.
     """
 
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     angles_deg: tuple[float | None, ...]
     updated_at_s: float | None = None
     revision: int = 0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _validate_state(self) -> "SolarArrayDriveState":
         if self.updated_at_s is not None and not np.isfinite(self.updated_at_s):
             raise ValueError("drive-state update time must be finite")
         if self.revision < 0:
@@ -248,6 +256,7 @@ class SolarArrayDriveState:
             angle is not None and not np.isfinite(angle) for angle in self.angles_deg
         ):
             raise ValueError("drive-state angles must be finite")
+        return self
 
     @property
     def driven_angles_deg(self) -> list[float] | None:
@@ -1239,7 +1248,11 @@ class SolarPanelSet(ConfigModel):
         return illumination, power
 
     def optimal_charging_pointing(
-        self, time: float, ephem: rust_ephem.Ephemeris
+        self,
+        time: float,
+        ephem: rust_ephem.Ephemeris,
+        *,
+        frame: "SpacecraftFrame | None" = None,
     ) -> tuple[float, float]:
         """Find optimal RA/Dec pointing for maximum solar panel illumination.
 
@@ -1251,6 +1264,9 @@ class SolarPanelSet(ConfigModel):
         Args:
             time: Unix timestamp
             ephem: Ephemeris object
+            frame: Body axes used by the panel normals. When supplied,
+                return a pointing about that frame's reference boresight;
+                the caller converts the complete attitude to body coordinates.
 
         Returns:
             tuple: (ra, dec) in degrees for optimal charging pointing
@@ -1273,7 +1289,8 @@ class SolarPanelSet(ConfigModel):
         avg_normal = np.zeros(3)
         for p in panels:
             weight = p.max_power / total_power
-            avg_normal += np.array(p.normal) * weight
+            normal = p.normal if frame is None else frame.canonical_vector(p.normal)
+            avg_normal += np.array(normal) * weight
 
         # Determine dominant axis
         abs_normal = np.abs(avg_normal)

@@ -17,26 +17,32 @@ keeping the best plan it finds within a time or iteration budget.
 
 import random
 import time
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from copy import copy
 from datetime import datetime
 from itertools import pairwise
 
 from pydantic import BaseModel, ConfigDict
 
 from ..common import ObsType
+from ..common.numerics import TIME_TOLERANCE_S
 from ..config import MissionConfig
+from ..ditl.ditl_log import DITLLog
 from ..ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
-from ..targets import Plan, Pointing
+from ..targets import Plan, Pointing, ScheduledActivity
+from ..targets.merit import MeritBreakdown
 from ..targets.plan_entry import snapshot_min_seconds
 from .battery import Additions
 from .priority_scheduler import (
+    ActivitySchedulingError,
     PriorityScheduler,
     _Block,
     _collection_seconds,
     _Request,
     program_shares,
 )
-from .recorder import RecorderAmount, amounts_equal, combine_amounts
+from .recorder import RecorderAmount
 
 # A move is drawn uniformly from [0, 1) and its kind read off these
 # cumulative bounds: insert a snapshot, replace one, release one, remove
@@ -59,6 +65,19 @@ class _Snapshot(BaseModel):
     release: float | None = None
     """Earliest slew start, which keeps the snapshot where an earlier plan had
     it until a move releases it."""
+    visit: int | None = None
+    """An explicit visit window for an insertion; None selects the next open one."""
+
+
+class _PendingWindow(BaseModel):
+    """One admissible request window which an exact insertion may recover."""
+
+    model_config = ConfigDict(frozen=True)
+
+    obsid: int
+    visit: int | None
+    opens: float
+    deadline: float
 
 
 class _State(BaseModel):
@@ -81,6 +100,8 @@ class _State(BaseModel):
     """The same by observation group, for the groups' time budgets."""
     last_visit: dict[int, float]
     """When each cadence target was last observed, collected or planned."""
+    last_visit_window: dict[int, int] = {}
+    """The actual window of each timed visit, independent of sequence overhead."""
     volumes: tuple[RecorderAmount, ...]
     """Science production planned in each segment of the recorder ledger."""
     energy: tuple[Additions, ...]
@@ -131,10 +152,13 @@ class LocalSearchScheduler(PriorityScheduler):
     * moving a snapshot to a nearby position.
 
     A change is kept by late-acceptance hill climbing: when it is no worse than
-    the current plan, or than the plan of ``history_length`` steps ago, so the
-    search can cross plateaus. The objective is merit-weighted science time.
-    A snapshot of a request with a
-    deadline is worth less the later it starts: starting at the deadline
+    the current plan, or than the plan of ``history_length`` evaluated changes
+    ago, so the search can cross plateaus. The objective is merit-weighted
+    science time.
+    By default, science retains its value anywhere within its allowed window;
+    equal-valued plans prefer earlier delivery. With an explicit positive
+    ``earliness_weight``, a snapshot is worth less the later it starts:
+    starting at the deadline
     rather than the start of the horizon, or its earliest start if later,
     costs ``earliness_weight`` of its value. With ``allocated`` time, a
     snapshot's seconds that use what is left of the span its collection starts
@@ -155,13 +179,20 @@ class LocalSearchScheduler(PriorityScheduler):
             ``time_limit`` alone for reproducible plans.
         seed: Random seed; defaults to the configuration's.
         neighborhood: How many positions apart a swap or move can be.
-        history_length: Length of the late-acceptance history.
-        earliness_weight: Fraction of a deadline request's value lost by
-            starting at its deadline, in [0, 1]. Values below 1 keep a late
-            snapshot worth more than none.
+        history_length: Evaluated changes retained in the late-acceptance history.
+            No-op proposals still consume the max_iterations attempt budget.
+        earliness_weight: Optional fraction of a deadline request's value lost
+            by starting at its deadline, in [0, 1]; defaults to zero. Values
+            below 1 keep a late snapshot worth more than none.
+        additional_start_plans: Other plans to decode and compare with the
+            priority-first and primary start plans before searching. Each
+            contender uses the current request state and its own reservations.
     """
 
     scheduler_name = "local_search"
+    _fixed: list[_Block]
+    _by_obsid: dict[int, _Request]
+    _best: _Decoded
 
     def __init__(
         self,
@@ -175,17 +206,19 @@ class LocalSearchScheduler(PriorityScheduler):
         seed: int | None = None,
         neighborhood: int = 3,
         history_length: int = 50,
-        earliness_weight: float = 0.5,
+        earliness_weight: float = 0.0,
         start_plan: Plan | None = None,
+        additional_start_plans: Sequence[Plan] = (),
         **options: object,
     ) -> None:
         super().__init__(config, targets, begin, end, **options)  # type: ignore[arg-type]
         self.start_plan = start_plan
-        """A plan to start from where it scores higher than the priority-first
-        plan: its science entries decoded in time order at their own times,
-        such as the plan a dispatch run of the same requests executed. The
-        search, or the solver, then improves on the better of the two, so the
-        plan returned scores at least as well as either."""
+        """A supplied plan, such as executed dispatch, rechecked at the current
+        horizon state. Its decoded science seeds the search; its independently
+        feasible complete timeline, including supporting dumps, also remains
+        an incumbent until a better complete feasible plan replaces it."""
+        self.additional_start_plans = tuple(additional_start_plans)
+        """Other feasible starts to compare without replacing the primary seed."""
         self.seed_score: float | None = None
         """Objective of ``start_plan`` decoded, where one was given."""
         if time_limit < 0:
@@ -203,20 +236,291 @@ class LocalSearchScheduler(PriorityScheduler):
         self.history_length = history_length
         self.earliness_weight = earliness_weight
         self.iterations = 0
-        """Changes tried in the last :meth:`schedule`."""
+        """Changes tried in the last search pass."""
         self.accepted = 0
-        """Changes the search kept."""
+        """Changes kept in the last search pass."""
+        self.search_iterations: list[int] = []
+        """Changes tried in each search pass of the last schedule."""
+        self.search_limits: list[str] = []
+        """What ended each pass: iteration budget, wall clock, or disabled."""
         self.initial_score = 0.0
         """Objective of the priority-first plan."""
         self.start_score = 0.0
-        """Objective of the decoded starting sequence; equals ``initial_score``."""
+        """Objective of the chosen decoded start, including any better seed."""
         self.score = 0.0
         """Objective of the returned plan."""
+        self.incumbent_score: float | None = None
+        """Whole-horizon value of the best complete seed or independent plan."""
+        self.incumbent_retained = False
+        """Whether the complete incumbent beat the finalized search result."""
+        self._initial_volumes: tuple[RecorderAmount, ...] = ()
+        self._initial_energy: tuple[Additions, ...] = ()
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, then search for a better one, within
         the wheels' momentum where the configuration tracks it."""
-        return self._plan_within_momentum(self._plan_once)
+        self.search_iterations.clear()
+        self.search_limits.clear()
+        return self._schedule_with_incumbents()
+
+    def _schedule_with_incumbents(self) -> Plan:
+        """Compare complete feasible plans, each with its own support activities.
+
+        Momentum passes repair a proposed plan around its new dumps. Their
+        local tail scores do not certify improvement over a different complete
+        seed. Keep that seed independently until the final plan is feasible and
+        better over the same whole horizon.
+        """
+        self.incumbent_score = None
+        self.incumbent_retained = False
+        incumbent: LocalSearchScheduler | None = None
+        for seed in (self.start_plan, *self.additional_start_plans):
+            if seed is None:
+                continue
+            trial = self._complete_seed(seed)
+            if trial is None:
+                continue
+            if incumbent is None or trial._improves(
+                trial.score, trial.timeline, incumbent.score, incumbent.timeline
+            ):
+                incumbent = trial
+
+        independent = None
+        if incumbent is not None and incumbent.dumps:
+            # Retain the separately feasible priority baseline even if a native
+            # search fails or loses value while repairing its momentum. Keep
+            # its support available to the ordinary seeded search too.
+            priority = self._priority_incumbent()
+            if priority is not None and priority._improves(
+                priority.score, priority.timeline, incumbent.score, incumbent.timeline
+            ):
+                incumbent = priority
+            # A weaker priority baseline can still lead to a better optimized
+            # plan, so also search without advisory seed science or support.
+            independent = self._independent_incumbent()
+
+        if incumbent is not None:
+            # Give the optimizer the feasible incumbent's support layout too;
+            # retaining it only as a final fallback wastes searches repairing
+            # a different proposal around unrelated dump reservations.
+            self.dumps = list(incumbent.dumps)
+
+        try:
+            plan = self._plan_within_momentum(self._plan_once)
+            plan = self._refine_settled_plan(plan)
+            plan = self._augment_selected_plan(plan)
+        except ActivitySchedulingError:
+            if incumbent is None:
+                raise
+            # A reconstructed proposal can make an activity unreachable. Its
+            # failed reservations must not invalidate a separately checked seed.
+            plan = None
+        if incumbent is None:
+            assert plan is not None
+            return plan
+
+        if independent is not None and independent._improves(
+            independent.score, independent.timeline, incumbent.score, incumbent.timeline
+        ):
+            incumbent = independent
+
+        self.incumbent_score = incumbent.score
+        committed = incumbent._selected_contract(
+            [block for block in incumbent._fixed if not block.is_fixed]
+        )
+        proposed_score = (
+            incumbent._complete_score(self.timeline) if plan is not None else 0
+        )
+        if (
+            plan is not None
+            and not (committed - self._selected_contract(self.timeline))
+            and self._complete_feasible()
+            and incumbent._improves(
+                proposed_score, self.timeline, incumbent.score, incumbent.timeline
+            )
+        ):
+            self.score = incumbent._complete_score(self.timeline, freeze_merits=True)
+            return plan
+
+        # The executable winner keeps its own reservations and forecast, not
+        # the rejected proposal's dumps or a score for only its unlocked tail.
+        self.incumbent_retained = True
+        self.score = incumbent.score
+        self.timeline, self.plan = incumbent.timeline, incumbent.plan
+        self.dumps, self.unplaced = incumbent.dumps, incumbent.unplaced
+        self.ctx = incumbent.ctx
+        self._ledger, self._battery = incumbent._ledger, incumbent._battery
+        self._momentum = incumbent._momentum
+        self._fixed = incumbent._fixed
+        self._by_obsid = incumbent._by_obsid
+        self._best = incumbent._best
+        self._origin = incumbent._origin
+        self._slew_caps = incumbent._slew_caps
+        self._owned_locked = incumbent._owned_locked
+        self._kept = incumbent._kept
+        self._kept_visits = incumbent._kept_visits
+        self._kept_visit_windows = incumbent._kept_visit_windows
+        self._resume_from = incumbent._resume_from
+        # Keep subsequent resource audits and exact redecoding anchored to
+        # the winning horizon state, including recovery before a first build.
+        initial = incumbent._best.states[0]
+        self._initial_remaining = initial.remaining
+        self._initial_allocated = initial.allocated_left
+        self._initial_last_visit = initial.last_visit
+        self._initial_last_visit_window = initial.last_visit_window
+        self._initial_categories = initial.categories
+        self._initial_groups = initial.groups
+        self._initial_volumes = initial.volumes
+        self._initial_energy = initial.energy
+        self._delivered = initial.programs
+        self.log.add_events(incumbent.log.events)
+        self._log(self.ctx.ustart, "Retained the complete feasible incumbent")
+        return self.plan
+
+    def _independent_trial(self) -> "LocalSearchScheduler":
+        """Isolate a contender's reservations and momentum-repair state."""
+        trial = copy(self)
+        trial.log = DITLLog()
+        trial._momentum_cache = {}
+        trial._sequence_pointings = dict(self._sequence_pointings)
+        trial._momentum_rejected = set()
+        trial._slew_caps = {}
+        trial._owned_locked = None
+        trial._momentum_seed = None
+        trial._kept = []
+        trial._kept_visits = {}
+        trial._kept_visit_windows = {}
+        trial._resume_from = None
+        return trial
+
+    def _priority_incumbent(self) -> "LocalSearchScheduler | None":
+        """Retain a complete priority plan with its own feasible support."""
+        trial = self._independent_trial()
+        trial.dumps = []
+        try:
+            plan = PriorityScheduler._plan_within_momentum(
+                trial, lambda: PriorityScheduler._plan_once(trial)
+            )
+        except ActivitySchedulingError:
+            return None
+        return self._complete_seed(plan)
+
+    def _independent_incumbent(self) -> "LocalSearchScheduler | None":
+        """Optimize without advisory support, retaining mandatory commitments.
+
+        Search inventories remain shared with the calling schedule, so even a
+        rejected contender's iterations and solver endings are reported.
+        """
+        trial = self._independent_trial()
+        trial.dumps = []
+        trial.start_plan = None
+        trial.additional_start_plans = ()
+        try:
+            plan = trial._plan_within_momentum(trial._plan_once)
+            plan = trial._refine_settled_plan(plan)
+            plan = trial._augment_selected_plan(plan)
+        except ActivitySchedulingError:
+            return None
+        completed = self._complete_seed(plan)
+        if completed is not None:
+            completed.log.add_events(trial.log.events)
+        return completed
+
+    def _complete_seed(self, seed: Plan) -> "LocalSearchScheduler | None":
+        """Recheck a seed under the current state without running an optimizer."""
+        trial = self._independent_trial()
+        trial.dumps = trial._seed_dumps(seed)
+        try:
+            trial._reserve_fixed()
+            trial._fixed = [trial._copy_block(block) for block in trial.timeline]
+            trial._initialize_decoder()
+            trial._settle_from(seed)
+            decoded = trial._decode_plan(seed)
+            if not decoded.sequence:
+                return None
+            trial._finish(decoded.final.timeline)
+            trial._best = decoded
+        except ActivitySchedulingError:
+            # A seed is advisory: new commitments or hardware constraints may
+            # make its support unreachable. The ordinary planner still runs.
+            return None
+        if not trial._complete_feasible():
+            return None
+        trial.score = trial._complete_score(trial.timeline, freeze_merits=True)
+        trial._set_unplaced(decoded.final.remaining)
+        return trial
+
+    def _seed_dumps(self, seed: Plan) -> list[ScheduledActivity]:
+        """Retain whole in-horizon firings using the current firing policy."""
+        momentum = self.config.spacecraft_bus.attitude_control.stored_momentum
+        firing = momentum.thruster_dump
+        if not momentum.enabled or firing is None:
+            return []
+        begin = max(
+            self.begin.timestamp(),
+            self.start_state.time
+            if self.start_state is not None
+            else self.begin.timestamp(),
+        )
+        occupied = {activity.obsid for activity in self.activities}
+        occupied.update(int(target.obsid) for target in self.targets)
+        dumps = []
+        for entry in seed:
+            start, end = entry.activity_hold_begin, entry.activity_hold_end
+            if (
+                entry_obstype(entry) != ObsType.ACTIVITY
+                or not entry.desaturation
+                or entry.obsid in occupied
+                or start is None
+                or end is None
+                or start < begin
+                or end > self.end.timestamp()
+                or abs(end - start - firing.duration_seconds) > TIME_TOLERANCE_S
+            ):
+                continue
+            dumps.append(
+                ScheduledActivity(
+                    name=entry.name or "Desaturation",
+                    begin=start,
+                    duration_seconds=firing.duration_seconds,
+                    attitude=firing.attitude,
+                    desaturation=True,
+                    obsid=int(entry.obsid),
+                )
+            )
+            occupied.add(entry.obsid)
+        return dumps
+
+    def _complete_feasible(self) -> bool:
+        """Check final recorder, battery and strict wheel-capacity bounds."""
+        volumes = self._ledger.initial_volumes(
+            [entry for block in self.timeline for entry in block.steps or [block.entry]]
+        )
+        if not self._ledger.fits_all(volumes, []):
+            return False
+        if not self._within_level(self._timeline_energy(self.timeline)):
+            return False
+        forecast = self._momentum
+        return (
+            forecast is None
+            or forecast.capacity_n_m_s is None
+            or forecast.first_crossing(
+                self.timeline, forecast.capacity_n_m_s, demand=True
+            )
+            is None
+        )
+
+    def _complete_score(
+        self, timeline: Sequence[_Block], *, freeze_merits: bool = False
+    ) -> float:
+        """Score future science against the seed's original horizon state."""
+        fixed = {self._science_key(block) for block in self._fixed}
+        science = [
+            block
+            for block in timeline
+            if not block.is_fixed and self._science_key(block) not in fixed
+        ]
+        return self._timeline_score(science, freeze_merits=freeze_merits)
 
     def _plan_once(self) -> Plan:
         start = self._start_from_priority_plan()
@@ -229,6 +533,78 @@ class LocalSearchScheduler(PriorityScheduler):
         # Copies, because placing science reconnects the fixed blocks' slews.
         fixed = [self._copy_block(block) for block in self.timeline]
         fixed_entries = {id(block.entry) for block in self.timeline}
+        requests = self._initialize_decoder()
+
+        self._place_requests(self._with_allocated_time(requests))
+        self._greedy_timeline = list(self.timeline)
+        # Not the locked entries, and not an activity placed again, as a
+        # copy, to hold the attitude of science placed before it.
+        science = [
+            b
+            for b in self._greedy_timeline
+            if not b.is_fixed and id(b.entry) not in fixed_entries
+        ]
+        self._fixed = fixed
+        self.initial_score = self._timeline_score(science)
+        # A failed window was ruled out only for the priority order. The
+        # optimizers try different orders, where it may fit. Completed and
+        # committed visits are already excluded from visit_candidates.
+        for request in self._by_obsid.values():
+            request.skipped.clear()
+        # Released at their priority-first times, the snapshots decode to
+        # the priority-first plan; moves release them one at a time.
+        start = self._decode(
+            [
+                _Snapshot(
+                    obsid=int(b.entry.obsid),
+                    seconds=_collection_seconds(b),
+                    release=float(b.entry.begin),
+                    visit=b.entry.visit,
+                )
+                for b in science
+            ]
+        )
+        self.start_score = self._objective(start.final)
+        priority_fixed = self._fixed
+        priority_volumes, priority_energy = self._initial_volumes, self._initial_energy
+        best_fixed = priority_fixed
+        best_volumes, best_energy = priority_volumes, priority_energy
+        self.seed_score = None
+        for candidate, dispatch_seed in (
+            (self.start_plan, True),
+            *((plan, False) for plan in self.additional_start_plans),
+            (self._momentum_seed, False),
+        ):
+            if candidate is None:
+                continue
+            # Each contender owns its hold reservations. A new dump can
+            # change the priority order while the preceding optimized plan
+            # still fits. Repair it with the same exact decoder checks.
+            self._fixed = [self._copy_block(block) for block in priority_fixed]
+            self._initial_volumes, self._initial_energy = (
+                priority_volumes,
+                priority_energy,
+            )
+            self._settle_from(candidate)
+            seeded = self._decode_plan(candidate)
+            candidate_score = self._objective(seeded.final)
+            if dispatch_seed:
+                self.seed_score = candidate_score
+            if self._improves(
+                candidate_score,
+                seeded.final.timeline,
+                self.start_score,
+                start.final.timeline,
+            ):
+                start, self.start_score = seeded, candidate_score
+                best_fixed = self._fixed
+                best_volumes, best_energy = self._initial_volumes, self._initial_energy
+            self._fixed = best_fixed
+            self._initial_volumes, self._initial_energy = best_volumes, best_energy
+        return start
+
+    def _initialize_decoder(self) -> list[_Request]:
+        """Snapshot the horizon state before placing candidate science."""
         requests = self._requests()
         self._by_obsid = {int(r.target.obsid): r for r in requests}
         self._initial_remaining = {
@@ -241,44 +617,13 @@ class LocalSearchScheduler(PriorityScheduler):
             for n, span in enumerate(spans)
         }
         self._initial_last_visit = dict(self._last_visit)
+        self._initial_last_visit_window = dict(self._last_visit_window)
         self._initial_categories = dict(self._category_seconds)
         self._initial_groups = dict(self._group_seconds)
         self._initial_volumes = tuple(self._volumes)
         self._initial_energy = tuple(self._energy)
 
-        self._place_requests(self._with_allocated_time(requests))
-        self._greedy_timeline = list(self.timeline)
-        # Not the locked entries, and not an activity placed again, as a
-        # copy, to hold the attitude of science placed before it.
-        science = [
-            b
-            for b in self._greedy_timeline
-            if not b.is_fixed and id(b.entry) not in fixed_entries
-        ]
-        self.initial_score = self._timeline_score(science)
-
-        self._fixed = fixed
-        if self.start_plan is not None:
-            self._settle_from(self.start_plan)
-        # Released at their priority-first times, the snapshots decode to
-        # the priority-first plan; moves release them one at a time.
-        start = self._decode(
-            [
-                _Snapshot(
-                    obsid=int(b.entry.obsid),
-                    seconds=_collection_seconds(b),
-                    release=float(b.entry.begin),
-                )
-                for b in science
-            ]
-        )
-        self.start_score = self._objective(start.final)
-        if self.start_plan is not None:
-            seeded = self._decode_plan(self.start_plan)
-            self.seed_score = self._objective(seeded.final)
-            if self.seed_score > self.start_score:
-                start, self.start_score = seeded, self.seed_score
-        return start
+        return requests
 
     def _settle_from(self, plan: Plan) -> None:
         """Hold each fixed block that may begin late where ``plan`` held its
@@ -289,8 +634,13 @@ class LocalSearchScheduler(PriorityScheduler):
         a locked entry or science kept from the pass before, runs past is
         held when that ends, and one that would then run into the block
         after it is left where it was reserved."""
+        original = [self._copy_block(block) for block in self._fixed]
         held = {
-            int(entry.obsid): float(entry.begin)
+            int(entry.obsid): (
+                entry.activity_hold_begin
+                if entry.activity_hold_begin is not None
+                else float(entry.begin) + entry.slewtime
+            )
             for entry in plan
             if entry_obstype(entry) == ObsType.ACTIVITY
         }
@@ -310,6 +660,9 @@ class LocalSearchScheduler(PriorityScheduler):
                 continue
             self._settle_block(block, begin)
             block.latest_ready = block.ready
+        changes = self._fixed_data_changes(original, self._fixed)
+        self._initial_volumes = self._ledger.add_all(self._initial_volumes, changes)
+        self._initial_energy = self._charged_energy(self._fixed)
 
     def _decode_plan(self, plan: Plan) -> _Decoded:
         """Decode a plan's science as a start sequence: one snapshot per
@@ -345,17 +698,28 @@ class LocalSearchScheduler(PriorityScheduler):
                         obsid=obsid,
                         seconds=last.seconds + seconds,
                         release=last.release,
+                        visit=last.visit,
                     )
                     continue
                 visit_of = obsid
                 snapshots.append(
-                    _Snapshot(obsid=obsid, seconds=seconds, release=float(entry.begin))
+                    _Snapshot(
+                        obsid=obsid,
+                        seconds=seconds,
+                        release=float(entry.begin),
+                        visit=entry.visit,
+                    )
                 )
                 continue
             visit_of = None
             if seconds > 0.0:
                 snapshots.append(
-                    _Snapshot(obsid=obsid, seconds=seconds, release=float(entry.begin))
+                    _Snapshot(
+                        obsid=obsid,
+                        seconds=seconds,
+                        release=float(entry.begin),
+                        visit=entry.visit,
+                    )
                 )
         # Each snapshot where the plan had it, before the plan's next one
         # begins: one the timeline cannot take there is left out, where
@@ -387,12 +751,237 @@ class LocalSearchScheduler(PriorityScheduler):
     def _finish_best(self, best: _Decoded) -> Plan:
         """Return the best plan found, or the priority-first plan if better."""
         best_score = self._objective(best.final)
-        if best_score >= self.initial_score:
+        if self._improves(
+            best_score, best.final.timeline, self.initial_score, self._greedy_timeline
+        ):
             self.score = best_score
             self._set_unplaced(best.final.remaining)
-            return self._finish(best.final.timeline)
-        self.score = self.initial_score
-        return self._finish(self._greedy_timeline)
+            timeline = best.final.timeline
+        else:
+            self.score = self.initial_score
+            timeline = self._greedy_timeline
+
+        return self._finish(timeline)
+
+    @staticmethod
+    def _science_key(block: _Block) -> tuple[tuple[object, ...], ...]:
+        """Identify a retained visit by its collection windows, not its ingress."""
+        return tuple(
+            (e.obsid, e.collection_begin, e.collection_end, e.visit, e.step)
+            for e in block.steps or [block.entry]
+        )
+
+    @staticmethod
+    def _selected_contract(
+        timeline: Sequence[_Block], *, inherited_poses: bool = False
+    ) -> Counter[tuple[object, ...]]:
+        """Science and settled holds an augmentation must leave unchanged."""
+        return Counter(
+            (
+                e.obsid,
+                e.obstype,
+                e.step,
+                e.calibration,
+                e.visit,
+                e.end,
+                e.collection_begin,
+                e.collection_end,
+                e.activity_hold_begin,
+                e.activity_hold_end,
+                None
+                if inherited_poses and block.is_activity and block.follows
+                else e.ra,
+                None
+                if inherited_poses and block.is_activity and block.follows
+                else e.dec,
+                None
+                if inherited_poses and block.is_activity and block.follows
+                else e.roll,
+                None
+                if inherited_poses and block.is_activity and block.follows
+                else e.spacecraft_attitude,
+                e.instrument_name,
+                tuple(sorted(e.instrument_modes.items())),
+                e.fixed_data_gb,
+                e.safe_hold,
+                e.desaturation,
+            )
+            for block in timeline
+            for e in block.steps or [block.entry]
+        )
+
+    def _augment_selected_plan(self, plan: Plan) -> Plan:
+        """Fill unused time while preserving every already selected visit/hold.
+
+        A following hold normally inherits a newly inserted observation's
+        attitude. Keeping its selected pose instead can leave room for science
+        and a return slew before the hold, without delaying the observation
+        after it. Treat the selected plan as reserved, then use the ordinary
+        priority placement checks for its unused exposure. This is a final,
+        deterministic construction pass, separate from the search budget.
+        """
+        if not plan.entries or not getattr(self, "_by_obsid", None):
+            return plan
+        original = list(self.timeline)
+        trial, requests = self._placement_trial(original, keep_poses=True)
+        if not requests:
+            return plan
+        trial._place_requests(trial._with_allocated_time(requests))
+        return self._consider_placement(trial, plan, original)
+
+    def _refine_settled_plan(self, plan: Plan) -> Plan:
+        """Rebuild once where settling released time hidden from the search.
+
+        The earlier search reserves a sliding activity at its latest start.
+        Once it settles earlier, a whole visit previously unable to fit may
+        become feasible. Keep its settled time and every committed science
+        window; inherited holds may follow the newly chosen science as usual.
+        """
+        if not plan.entries or not getattr(self, "_by_obsid", None):
+            return plan
+        reserved = {b.entry.obsid: b.ready for b in self._fixed if b.is_activity}
+        if not any(
+            b.is_activity and b.ready < reserved.get(b.entry.obsid, b.ready)
+            for b in self.timeline
+        ):
+            return plan
+        fixed = {self._science_key(b) for b in self._fixed}
+        retained = [
+            b for b in self.timeline if b.is_fixed or self._science_key(b) in fixed
+        ]
+        trial, requests = self._placement_trial(retained, keep_poses=False)
+        # Removing future science must not leave an implicit change of pose
+        # into a retained hold. Rebuild each ingress from the real predecessor.
+        pred = trial._origin
+        for block in trial.timeline:
+            slew = trial._connect(pred, block, trial._earliest_start(pred))
+            if slew is None:
+                return plan
+            trial._apply_slew(block, slew)
+            pred = block
+        trial._volumes = trial._ledger.initial_volumes(
+            [e for b in trial.timeline for e in b.steps or [b.entry]]
+        )
+        trial._energy = trial._timeline_energy(trial.timeline)
+        trial._place_requests(trial._with_allocated_time(requests))
+        return self._consider_placement(trial, plan, retained, inherited_poses=True)
+
+    def _placement_trial(
+        self, reserved: Sequence[_Block], *, keep_poses: bool
+    ) -> tuple["LocalSearchScheduler", list[_Request]]:
+        """Copy a reserved timeline and count its future exposure and budgets."""
+        trial = copy(self)
+        trial.log = DITLLog()
+        trial.timeline = [self._copy_for_reconnection(b) for b in reserved]
+        for block in trial.timeline:
+            if block.is_activity:
+                # Keep settled times. Augmentation reserves a return to the
+                # selected pose; reconstruction retains inherited guidance.
+                if keep_poses:
+                    block.follows = False
+                block.activity = None
+        trial._resume_from = None
+        trial._movable = {}
+        trial._rest_of = {}
+        trial.unplaced = []
+        trial._kept_visits = {}
+        trial._kept_visit_windows = {}
+        trial._locked_visits = defaultdict(list)
+        selected_visits: dict[int, set[int]] = defaultdict(set)
+        for block in trial.timeline:
+            ends = [
+                float(e.collection_end)
+                for e in block.steps or [block.entry]
+                if not e.calibration and e.collection_end is not None
+            ]
+            if block.is_fixed or not ends:
+                continue
+            obsid = int(block.entry.obsid)
+            end = max(ends)
+            # Future reservations space visits on either side through the
+            # locked-visit checks. Treating them as past history would hide
+            # unused earlier windows and forbid earlier cadence visits.
+            trial._locked_visits[obsid].append((float(block.entry.begin), end))
+            if block.entry.visit is not None:
+                selected_visits[obsid].add(block.entry.visit)
+        trial._volumes = trial._ledger.initial_volumes(
+            [e for b in trial.timeline for e in b.steps or [b.entry]]
+        )
+        trial._energy = trial._timeline_energy(trial.timeline)
+        requests = trial._requests()
+        for request in requests:
+            if request.timed:
+                request.visit_candidates = [
+                    v
+                    for v in request.visit_candidates
+                    if v not in selected_visits[int(request.target.obsid)]
+                ]
+                request.remaining = request.target.per_visit_seconds * len(
+                    request.visit_candidates
+                )
+        shares = program_shares(trial._delivered)
+        positive = [r for r in requests if r.wants_more and trial._value(r, shares) > 0]
+        return trial, positive
+
+    def _consider_placement(
+        self,
+        trial: "LocalSearchScheduler",
+        plan: Plan,
+        retained: Sequence[_Block],
+        *,
+        inherited_poses: bool = False,
+    ) -> Plan:
+        """Accept only a better finalized plan with its retained contracts intact."""
+        # Charging and settling can reconnect blocks too. Validate the plan
+        # execution will receive, rather than an intermediate placement.
+        trial._finish(trial.timeline)
+        fixed = {self._science_key(b) for b in self._fixed}
+        science = [
+            b
+            for b in trial.timeline
+            if not b.is_fixed and self._science_key(b) not in fixed
+        ]
+        score = trial._timeline_score(science)
+        if score <= self.score:
+            return plan
+        before = self._selected_contract(retained, inherited_poses=inherited_poses)
+        after = self._selected_contract(trial.timeline, inherited_poses=inherited_poses)
+        if before - after:
+            return plan
+        volumes = trial._ledger.initial_volumes(
+            [e for b in trial.timeline for e in b.steps or [b.entry]]
+        )
+        if not trial._ledger.fits_all(volumes, []):
+            return plan
+        if not trial._within_level(trial._timeline_energy(trial.timeline)):
+            return plan
+        forecast = trial._momentum
+        if (
+            forecast is not None
+            and forecast.capacity_n_m_s is not None
+            and forecast.first_crossing(
+                trial.timeline, forecast.capacity_n_m_s, demand=True
+            )
+            is not None
+        ):
+            return plan
+        self.score = trial._timeline_score(science, freeze_merits=True)
+        remaining = dict(self._initial_remaining)
+        for block in science:
+            obsid = int(block.entry.obsid)
+            remaining[obsid] -= _collection_seconds(block)
+        self._set_unplaced(remaining)
+        self.log.add_events(trial.log.events)
+        message = (
+            "Rebuilt science around settled activities; retained windows and holds "
+            "are unchanged, with inherited attitudes following the new science"
+            if inherited_poses
+            else f"Filled idle time with {sum((after - before).values())} additional "
+            "entries; selected science and settled holds are unchanged"
+        )
+        self._log(self.ctx.ustart, message)
+        self.timeline, self.plan = trial.timeline, trial.plan
+        return self.plan
 
     # ── Objective ────────────────────────────────────────────────────────
 
@@ -400,26 +989,109 @@ class LocalSearchScheduler(PriorityScheduler):
     def _objective(state: _State) -> float:
         return state.score
 
-    def _timeline_score(self, science: Sequence[_Block]) -> float:
-        """Score a priority-first timeline's science blocks, in time order."""
+    def _improves(
+        self,
+        score: float,
+        timeline: Sequence[_Block],
+        incumbent_score: float,
+        incumbent: Sequence[_Block],
+        *,
+        accept_equal_timing: bool = False,
+    ) -> bool:
+        """Prefer more value, then earlier science, retaining an exact tie.
+
+        Postponing equal-valued science can lose it at a rolling commitment
+        boundary. Complete timing ties may reproduce a solver hint; the
+        search's best plan retains its incumbent on a complete tie.
+        A lower primary score is never accepted by this comparison.
+        """
+        if score < incumbent_score:
+            return False
+        if score > incumbent_score:
+            return True
+        early = (
+            self._deadline_earliness(timeline),
+            self._frontloaded_science(timeline),
+        )
+        previous = (
+            self._deadline_earliness(incumbent),
+            self._frontloaded_science(incumbent),
+        )
+        return early > previous or (accept_equal_timing and early == previous)
+
+    def _deadline_earliness(self, timeline: Sequence[_Block]) -> float:
+        """Prefer earlier windowed science only after primary value ties."""
         total = 0.0
-        programs = dict(self._delivered)
-        left = dict(self._initial_allocated)
-        for block in sorted(science, key=lambda b: float(b.entry.begin)):
+        for block in timeline:
+            if block.is_fixed or block.entry.collection_begin is None:
+                continue
             request = self._by_obsid.get(int(block.entry.obsid))
             if request is None:
                 continue
-            value = self._value(request, program_shares(programs))
-            total += self._scored(left, request, block, value)
-            self._add_program_seconds(programs, request, block)
+            if request.timed and request.visit != block.entry.visit:
+                request = request.model_copy(update={"visit": block.entry.visit})
+            deadline = request.deadline
+            if deadline is None:
+                continue
+            opens = max(self.ctx.ustart, request.earliest_start or self.ctx.ustart)
+            available = deadline - opens
+            if available <= 0:
+                continue
+            delay = max(0.0, float(block.entry.collection_begin) - opens)
+            total += (
+                float(request.target.merit)
+                * _collection_seconds(block)
+                * (1.0 - min(1.0, delay / available))
+            )
         return total
 
-    @staticmethod
-    def _add_program_seconds(
-        programs: dict[str, float], request: _Request, block: _Block
-    ) -> None:
-        program = request.category.program_name
-        programs[program] = programs.get(program, 0.0) + _collection_seconds(block)
+    def _frontloaded_science(self, timeline: Sequence[_Block]) -> float:
+        """Integral of fixed-merit science delivered before the horizon ends."""
+        total = 0.0
+        for block in timeline:
+            if block.is_fixed:
+                continue
+            request = self._by_obsid.get(int(block.entry.obsid))
+            merit = float(
+                request.target.merit if request is not None else block.entry.merit
+            )
+            for entry in block.steps or [block.entry]:
+                if entry.calibration:
+                    continue
+                begin, end = entry.collection_interval_between(
+                    float(entry.begin), float(entry.end)
+                )
+                total += merit * (end - begin) * (self.ctx.uend - (begin + end) * 0.5)
+        return total
+
+    def _timeline_score(
+        self,
+        science: Sequence[_Block],
+        *,
+        freeze_merits: bool = False,
+    ) -> float:
+        """Score a priority-first timeline's science blocks, in time order."""
+        total = 0.0
+        science = sorted(
+            (b for b in science if int(b.entry.obsid) in self._by_obsid),
+            key=lambda b: float(b.entry.begin),
+        )
+        retained = sorted(self._fixed, key=lambda block: block.end)
+        cursor = 0
+        programs = dict(self._delivered)
+        left = dict(self._initial_allocated)
+        for block in science:
+            request = self._by_obsid[int(block.entry.obsid)]
+            before = float(block.entry.begin)
+            while cursor < len(retained) and retained[cursor].end <= before:
+                self._add_program_collection(programs, [retained[cursor]], before)
+                cursor += 1
+            value = self._value(request, program_shares(programs), block.entry)
+            total += self._scored(
+                left, request, block, value, freeze_merits=freeze_merits
+            )
+            self._add_program_collection(programs, [block], block.end)
+        return total
 
     def _scored(
         self,
@@ -427,6 +1099,8 @@ class LocalSearchScheduler(PriorityScheduler):
         request: _Request,
         block: _Block,
         value: float,
+        *,
+        freeze_merits: bool = False,
     ) -> float:
         """Return a snapshot's contribution to the score.
 
@@ -434,9 +1108,12 @@ class LocalSearchScheduler(PriorityScheduler):
         collection starts in, are worth ``_allocated_factor`` more, and use up
         that time in ``left``.
         """
-        return self._contribution(request, block, value) * self._allocation_scale(
-            left, request, block
-        )
+        scale = self._allocation_scale(left, request, block)
+        value = MeritBreakdown.allocated_value(value, scale)
+        if freeze_merits:
+            for entry in [block.entry, *block.steps]:
+                entry.merit = value
+        return self._contribution(request, block, value)
 
     def _allocation_scale(
         self, left: dict[tuple[int, int], float], request: _Request, block: _Block
@@ -472,6 +1149,10 @@ class LocalSearchScheduler(PriorityScheduler):
         placed (see :meth:`_value`).
         """
         entry = block.entry
+        # A request's selected visit is mutable placement state. Historical
+        # blocks must use their own window, not whichever visit was tried last.
+        if request.timed and request.visit != entry.visit:
+            request = request.model_copy(update={"visit": entry.visit})
         worth = value * _collection_seconds(block)
         deadline = request.deadline
         if deadline is None or self.earliness_weight == 0.0:
@@ -508,6 +1189,7 @@ class LocalSearchScheduler(PriorityScheduler):
             categories=dict(self._initial_categories),
             groups=dict(self._initial_groups),
             last_visit=dict(self._initial_last_visit),
+            last_visit_window=dict(self._initial_last_visit_window),
             volumes=self._initial_volumes,
             energy=self._initial_energy,
             allocated_left=dict(self._initial_allocated),
@@ -555,10 +1237,20 @@ class LocalSearchScheduler(PriorityScheduler):
                 if state.cursor > 0
                 else self.ctx.ustart
             )
-            request.select_visit(
-                request.next_visit(last, max(cursor_time, not_before or cursor_time)),
-                self.ctx,
-            )
+            if snapshot.visit is None:
+                visit = request.next_visit(
+                    last,
+                    max(cursor_time, not_before or cursor_time),
+                    after_visit=state.last_visit_window.get(obsid),
+                )
+            else:
+                admissible = request.open_visits(
+                    last,
+                    max(cursor_time, not_before or cursor_time),
+                    after_visit=state.last_visit_window.get(obsid),
+                )
+                visit = snapshot.visit if snapshot.visit in admissible else None
+            request.select_visit(visit, self.ctx)
             if request.visit is None:
                 return state
 
@@ -583,7 +1275,7 @@ class LocalSearchScheduler(PriorityScheduler):
             # after a contact that makes room.
             additions = [
                 *self._block_additions(block),
-                *self._ingress_deltas(succ, succ_slew),
+                *self._following_data_changes(block, timeline[index:], succ_slew),
             ]
             if not self._ledger.fits_all(state.volumes, additions):
                 continue
@@ -599,16 +1291,21 @@ class LocalSearchScheduler(PriorityScheduler):
             # Freeze the value the snapshot has here onto its entry, with the
             # allocation's share, as the priority-first scheduler does: a
             # Target of Opportunity must beat it to interrupt the observation.
-            value = self._value(request, program_shares(state.programs))
+            programs = dict(state.programs)
+            self._add_program_collection(
+                programs, timeline[state.cursor : index], float(block.entry.begin)
+            )
+            value = self._value(request, program_shares(programs), block.entry)
             allocated_left = dict(state.allocated_left)
             scale = self._allocation_scale(allocated_left, request, block)
-            block.entry.merit = value * scale
-            score = state.score + self._contribution(request, block, value) * scale
+            value = MeritBreakdown.allocated_value(value, scale)
+            for entry in [block.entry, *block.steps]:
+                entry.merit = value
+            score = state.score + self._contribution(request, block, value)
 
             left = dict(state.remaining)
             left[obsid] = remaining - _collection_seconds(block)
-            programs = dict(state.programs)
-            self._add_program_seconds(programs, request, block)
+            self._add_program_collection(programs, [block], block.end)
             categories = dict(state.categories)
             name = request.category.name
             categories[name] = categories.get(name, 0.0) + _collection_seconds(block)
@@ -618,10 +1315,13 @@ class LocalSearchScheduler(PriorityScheduler):
                     request.group.name, 0.0
                 ) + _collection_seconds(block)
             last_visit = state.last_visit
+            last_visit_window = state.last_visit_window
             if (
                 request.cadence is not None or request.timed
             ) and block.entry.collection_end is not None:
                 last_visit = {**last_visit, obsid: float(block.entry.collection_end)}
+                if block.entry.visit is not None:
+                    last_visit_window = {**last_visit_window, obsid: block.entry.visit}
             return _State.model_construct(
                 timeline=placed,
                 cursor=index + 1,
@@ -631,6 +1331,7 @@ class LocalSearchScheduler(PriorityScheduler):
                 categories=categories,
                 groups=groups,
                 last_visit=last_visit,
+                last_visit_window=last_visit_window,
                 volumes=self._ledger.add_all(state.volumes, additions),
                 energy=self._charged_energy(placed),
                 allocated_left=allocated_left,
@@ -663,18 +1364,18 @@ class LocalSearchScheduler(PriorityScheduler):
         """Return whether decoding continues identically from two states.
 
         Equal remaining exposure means equal program totals, so the program
-        shares, and with them every later snapshot's value, agree too. When
-        the recorder limits the plan, what is on it must agree as well.
+        shares, and with them every later snapshot's value, agree too. Scores
+        and recorder histories must match exactly: rebasing cumulative values
+        can change an unchanged plan through floating-point cancellation.
         """
         if (
-            a.remaining != b.remaining
+            a.score != b.score
+            or a.remaining != b.remaining
+            or a.volumes != b.volumes
             or a.last_visit != b.last_visit
+            or a.last_visit_window != b.last_visit_window
             or a.allocated_left != b.allocated_left
             or len(a.timeline) - a.cursor != len(b.timeline) - b.cursor
-        ):
-            return False
-        if self._ledger.active and any(
-            not amounts_equal(x, y) for x, y in zip(a.volumes, b.volumes, strict=True)
         ):
             return False
         if self._battery.active and a.energy != b.energy:
@@ -720,30 +1421,26 @@ class LocalSearchScheduler(PriorityScheduler):
         states: list[_State],
         old: int,
     ) -> _Decoded:
-        """Finish a decoding with the current one's states from position ``old``."""
+        """Reuse a suffix after its exact score/resource state was reached."""
         here = states[-1]
         there = current.states[old]
         prefix = here.timeline[: here.cursor]
         offset = here.cursor - there.cursor
         for later in current.states[old + 1 :]:
-            # What the reused snapshots add to the score is the same from here.
-            score = here.score + later.score - there.score
+            # Keep cumulative values unchanged. Even adding and subtracting
+            # the same prefix can introduce a rounding difference.
             states.append(
                 _State.model_construct(
                     timeline=[*prefix, *later.timeline[there.cursor :]],
                     cursor=later.cursor + offset,
                     remaining=later.remaining,
-                    score=score,
+                    score=later.score,
                     programs=later.programs,
                     categories=later.categories,
                     groups=later.groups,
                     last_visit=later.last_visit,
-                    volumes=tuple(
-                        combine_amounts(combine_amounts(a, b), c, -1.0)
-                        for a, b, c in zip(
-                            here.volumes, later.volumes, there.volumes, strict=True
-                        )
-                    ),
+                    last_visit_window=later.last_visit_window,
+                    volumes=later.volumes,
                     energy=self._charged_energy(
                         [*prefix, *later.timeline[there.cursor :]]
                     ),
@@ -762,24 +1459,74 @@ class LocalSearchScheduler(PriorityScheduler):
         history = [current_score] * self.history_length
         deadline = time.perf_counter() + self.time_limit
         self.iterations = self.accepted = 0
+        evaluated = 0
 
         while time.perf_counter() < deadline and (
             self.max_iterations is None or self.iterations < self.max_iterations
         ):
             move = self._random_move(current, rng)
-            slot = self.iterations % self.history_length
             self.iterations += 1
             if move is None:
                 continue
+            slot = evaluated % self.history_length
+            evaluated += 1
             candidate = self._redecode(current, *move)
             score = self._objective(candidate.final)
             if score >= current_score or score >= history[slot]:
                 current, current_score = candidate, score
                 self.accepted += 1
-                if score > best_score:
+                if self._improves(
+                    score, candidate.final.timeline, best_score, best.final.timeline
+                ):
                     best, best_score = candidate, score
             history[slot] = current_score
+        self.search_iterations.append(self.iterations)
+        if self.time_limit == 0 or self.max_iterations == 0:
+            ending = "disabled"
+        elif self.max_iterations is not None and self.iterations >= self.max_iterations:
+            ending = "iteration budget"
+        else:
+            ending = "wall clock"
+        self.search_limits.append(ending)
         return best
+
+    def _window_insertion(
+        self, current: _Decoded, rng: random.Random
+    ) -> tuple[list[_Snapshot], int, int, int] | None:
+        """Propose one missing visit before its deadline is crossed.
+
+        This consumes one ordinary search trial; the exact decoder still checks
+        ingress, collection, resources and the suffix displaced by the visit.
+        """
+        missing = [
+            window
+            for window in self._pending_windows(current)
+            if window.visit is None
+            or not any(
+                int(block.entry.obsid) == window.obsid
+                and block.entry.visit == window.visit
+                for block in current.final.timeline
+            )
+        ]
+        if not missing:
+            return None
+        window = rng.choice(missing)
+        crossing = len(current.sequence)
+        for index, (before, after) in enumerate(
+            zip(current.states[:-1], current.states[1:], strict=True)
+        ):
+            if (
+                after.cursor > before.cursor
+                and after.timeline[after.cursor - 1].end > window.deadline
+            ):
+                crossing = index
+                break
+        # A slow ingress can span several preceding snapshots. Restricting
+        # insertion to the deadline's neighbours cannot discover that legal
+        # placement; let the ordinary trial explore any earlier position.
+        at = rng.randrange(crossing + 1)
+        added = self._released(window.obsid).model_copy(update={"visit": window.visit})
+        return [*current.sequence[:at], added, *current.sequence[at:]], at, at, 1
 
     def _random_move(
         self, current: _Decoded, rng: random.Random
@@ -794,6 +1541,12 @@ class LocalSearchScheduler(PriorityScheduler):
         kind = rng.random()
 
         if kind < _INSERT_BELOW:
+            # Spend half the insertion trials before a missing window's deadline,
+            # rather than proposing a time after that visit has already closed.
+            if kind < _INSERT_BELOW / 2:
+                insertion = self._window_insertion(current, rng)
+                if insertion is not None:
+                    return insertion
             # Insert a full-length snapshot of a request with exposure left.
             open_requests = self._open_requests(current)
             if not open_requests:
@@ -867,6 +1620,42 @@ class LocalSearchScheduler(PriorityScheduler):
                 request, current.final.remaining[obsid], self._initial_remaining[obsid]
             )
         ]
+
+    def _pending_windows(self, decoded: _Decoded) -> list[_PendingWindow]:
+        """Missing windows with exposure left, in deterministic deadline order."""
+        windows = []
+        for obsid in self._open_requests(decoded):
+            request = self._by_obsid[obsid]
+            target = request.target
+            if request.timed:
+                for visit in request.visit_candidates:
+                    window = target.visit_windows[visit]
+                    if (
+                        window.start < self.ctx.uend
+                        and window.deadline >= self.ctx.ustart
+                    ):
+                        windows.append(
+                            _PendingWindow(
+                                obsid=obsid,
+                                visit=visit,
+                                opens=window.start,
+                                deadline=window.deadline,
+                            )
+                        )
+            elif target.deadline is not None and target.deadline >= self.ctx.ustart:
+                opens = target.earliest_start
+                windows.append(
+                    _PendingWindow(
+                        obsid=obsid,
+                        visit=None,
+                        opens=self.ctx.ustart if opens is None else opens,
+                        deadline=target.deadline,
+                    )
+                )
+        return sorted(
+            windows,
+            key=lambda w: (w.deadline, w.obsid, -1 if w.visit is None else w.visit),
+        )
 
     def _idle_before(self, current: _Decoded) -> list[float]:
         """Return, for each snapshot in the sequence, the idle seconds before it.

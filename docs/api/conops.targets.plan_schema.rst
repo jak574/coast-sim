@@ -1,5 +1,5 @@
-conops.targets.plan\_schema
-===========================
+conops.targets.plan_schema
+==========================
 
 .. automodule:: conops.targets.plan_schema
    :members:

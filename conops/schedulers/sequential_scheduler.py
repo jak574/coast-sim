@@ -11,11 +11,11 @@ ground passes or model slews and observation timing the way
 
 import bisect
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
 import rust_ephem
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from ..common import dtutcfromtimestamp
 from ..config import AttitudeConstraintScope, MissionConfig
@@ -35,11 +35,13 @@ def _is_plan_entry(target: object) -> bool:
     return issubclass(type(target), PlanEntry)
 
 
-@dataclass
-class _Selection:
+class _Selection(BaseModel):
     """A target chosen at one time, with the geometry it was chosen for."""
 
-    target: PlanEntry
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # Keep the existing request identity, including supported duck-typed targets.
+    target: SkipValidation[PlanEntry]
     roll: float
     attitude: Attitude
     """Spacecraft body attitude held for the observation."""
@@ -215,7 +217,13 @@ class SequentialScheduler:
                 latest_end - utime,
             )
             if clear_seconds >= min_window + slewtime:
-                return _Selection(target, roll, attitude, slewtime, clear_seconds)
+                return _Selection(
+                    target=target,
+                    roll=roll,
+                    attitude=attitude,
+                    slewtime=slewtime,
+                    clear_seconds=clear_seconds,
+                )
         return None
 
     def _point(self, target: PlanEntry, utime: float) -> tuple[float, Attitude]:
@@ -312,13 +320,14 @@ class SequentialScheduler:
         """Build the plan entry for a selection and charge its exposure to the target."""
         target = selection.target
         assert target.exptime is not None
-        telescope = target.science_telescope() if _is_plan_entry(target) else None
         entry = PlanEntry(config=self.config)
         entry.ephem = self.ephem
         entry.ra = target.ra
         entry.dec = target.dec
         entry.roll = selection.roll
-        entry.instrument_name = telescope.name if telescope is not None else None
+        entry.instrument_name = (
+            target.science_instrument_name() if _is_plan_entry(target) else None
+        )
         if _is_plan_entry(target):
             entry.science_data = target.science_data
         entry.spacecraft_attitude = target.spacecraft_attitude

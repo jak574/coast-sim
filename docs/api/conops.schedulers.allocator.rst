@@ -2,6 +2,6 @@ conops.schedulers.allocator
 ===========================
 
 .. automodule:: conops.schedulers.allocator
-   :members: LongRangeAllocator, Allocation, AllocatedTime
+   :members:
+   :undoc-members:
    :show-inheritance:
-   :no-index:
