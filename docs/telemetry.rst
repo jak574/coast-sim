@@ -28,6 +28,9 @@ The example below builds one record by hand to show the most commonly used field
 
 .. code-block:: python
 
+   from datetime import datetime
+
+   from conops import ACSMode
    from conops.ditl.telemetry import Housekeeping
 
    # Example housekeeping record
@@ -36,7 +39,7 @@ The example below builds one record by hand to show the most commonly used field
        ra=45.0,                    # Right ascension in degrees
        dec=-23.5,                  # Declination in degrees
        roll=0.0,                   # Roll angle in degrees
-       acs_mode="SCIENCE",         # ACS mode
+       acs_mode=ACSMode.SCIENCE,   # ACS mode
        panel_illumination=0.85,    # Solar panel illumination (0-1)
        power_usage=125.0,          # Total power usage in W
        power_bus=45.0,             # Spacecraft bus power in W
@@ -134,8 +137,10 @@ quaternion applies the inverse rotation ``R_x(-roll)``.
      timestep, keyed by instrument name. It is ``None`` when no instrument defines
      modes. The mode is resolved in the same way as the instrument's power draw.
      An instrument that the current observation uses is in the mode the observation
-     gives it. Every other instrument is in ``IDLE`` or in a mode named like the
-     ACS mode. The ``instrument_mode_hours()`` method on a DITL sums these values
+     gives it. Every other instrument is in ``IDLE`` while the ACS is in ``SCIENCE``
+     mode. In any other ACS mode it is in its own mode of the same name as the ACS
+     mode, such as ``SLEWING``, if it defines one, and in ``IDLE`` if it does not.
+     The ``instrument_mode_hours()`` method on a DITL sums these values
      into hours per instrument and mode, and ``print_statistics()`` reports the
      totals
    - ``power_usage``: Total spacecraft power consumption in W
@@ -266,13 +271,23 @@ During DITL simulation, telemetry data is automatically recorded and stored in t
 
 .. code-block:: python
 
+   from datetime import datetime
+
+   from rust_ephem import TLEEphemeris
+
    from conops.ditl import QueueDITL
    from conops import MissionConfig
 
    config = MissionConfig()
+   ephem = TLEEphemeris(
+       tle="examples/example.tle",
+       begin=datetime(2025, 1, 1),
+       end=datetime(2025, 1, 2),
+       step_size=60,
+   )
    # FOR calculation is disabled by default.
    # Enable it only when this telemetry is needed.
-   ditl = QueueDITL(config=config, calculate_field_of_regard=True)
+   ditl = QueueDITL(config=config, ephem=ephem, calculate_field_of_regard=True)
    ditl.calc()  # Run simulation
 
    # Access telemetry data

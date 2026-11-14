@@ -91,6 +91,8 @@ before :meth:`~conops.ditl.ditl.DITL.calc` is called:
 * For a ground-station tracking entry (``GSP``), the spacecraft slews onto the pass tracking
   profile. The contact starts at ``contact_begin`` and ends at ``end``.
 * For a charging entry (``CHARGE``), the spacecraft charges until ``end``.
+* For a scheduled activity entry (``ACTIVITY``), the spacecraft slews to the entry's
+  attitude if it is elsewhere and holds there until ``end``.
 * An entry of any other type is logged and skipped.
 
 ``DITL`` predicts the passes from the configured ground stations and matches them to the
@@ -133,7 +135,7 @@ The JSON file holds the plan's metadata fields first, followed by the list of en
 
    {
      "version": 3,
-     "coast_sim_version": "0.1.3",
+     "coast_sim_version": "0.9.0",
      "created_at": "2025-12-01T00:00:00+00:00",
      "start": "2025-12-01T00:00:00+00:00",
      "end": "2025-12-01T23:59:00+00:00",
@@ -185,8 +187,8 @@ The JSON file holds the plan's metadata fields first, followed by the list of en
          "obsid": 65535,
          "obstype": "GSP",
          "slewdist": 5.2,
-         "ss_min": 45.0,
-         "ss_max": 180.0,
+         "ss_min": 0.0,
+         "ss_max": 480.0,
          "exptime": 480,
          "exporig": 600,
          "isat": false,
@@ -220,7 +222,7 @@ Metadata Fields
        the same time window (see :ref:`auto-versioning` below).
    * - ``coast_sim_version``
      - string
-     - COASTSim package version that produced the file (e.g. ``"0.1.3"``).
+     - COASTSim package version that produced the file (e.g. ``"0.9.0"``).
    * - ``created_at``
      - string
      - ISO-8601 UTC timestamp of when the :class:`~conops.targets.Plan` instance was created
@@ -346,7 +348,8 @@ Entry Fields
      - string
      - Observation type. Valid values: ``"AT"`` (Astronomical Target), ``"PPT"`` (Preprogrammed Target),
        ``"TOO"`` (Target of Opportunity), ``"SAFE"`` (Safe mode pointing), ``"CHARGE"`` (Emergency charging),
-       ``"GSP"`` (Ground Station Pass).
+       ``"GSP"`` (Ground Station Pass), ``"IDLE"`` (Idle hold), ``"ACTIVITY"`` (Scheduled
+       non-science activity).
    * - ``slewdist``
      - float
      - Angular slew distance in degrees.
@@ -362,19 +365,22 @@ Entry Fields
      - Settling time that is included in ``slewtime``, in seconds.
    * - ``ss_min``
      - float
-     - Minimum Sun-spacecraft separation angle encountered (degrees).
+     - Minimum length of one snapshot of the target, in seconds. A snapshot is one
+       unbroken period of collection. For ``GSP`` entries the value is ``0``.
    * - ``ss_max``
      - float
-     - Maximum Sun-spacecraft separation angle encountered (degrees).
+     - Maximum length of one snapshot of the target, in seconds. For ``GSP`` entries
+       the value is the contact duration.
    * - ``exptime``
-     - int
+     - float | null
      - Exposure time in seconds (may be shorter than original if interrupted).
    * - ``exporig``
-     - int
+     - float | null
      - Originally requested exposure time in seconds.
    * - ``isat``
      - bool
-     - ``true`` if the detector was saturated during the exposure.
+     - Flag that the ACS sets to ``true`` on a target it builds for a slew whose type is
+       not ``PPT``. It is ``false`` otherwise. Only pointing entries have this field.
    * - ``done``
      - bool
      - ``true`` if the observation completed successfully.
@@ -493,7 +499,7 @@ Visualization
 
 GSP entries are excluded from the science observation bands in
 :func:`~conops.visualization.mpl.ditl_timeline.plot_ditl_timeline` and
-:func:`~conops.visualization.plotly.ditl_timeline.plot_ditl_timeline`.
+:func:`~conops.visualization.plotly.ditl_timeline.plot_ditl_timeline_plotly`.
 Ground station passes are still shown in the timeline's dedicated "Ground Contact" row.
 
 Example GSP entry
@@ -617,7 +623,7 @@ Attitude Timeseries File Format
 
    {
      "version": 0,
-     "coast_sim_version": "0.6.1",
+     "coast_sim_version": "0.9.0",
      "created_at": "2025-12-01T00:00:00+00:00",
      "plan_file": "plan_20251201T000000Z_20251201T235900Z_v3.json",
      "plan_version": 3,
@@ -850,7 +856,11 @@ A program has the following fields.
 
     A moving target's track is written to the file if the track was given, or was looked
     up, before the save. A moving target that names a body and has no track has its track
-    looked up during the run.
+    looked up when its visibility is first computed. ``create_ditl`` computes it while it
+    queues the targets for a dispatch run or builds the plan for a planned run. A rolling
+    run computes it when it builds a plan during the run. ``Program.bind`` looks tracks up
+    only when it is called with ``refresh_tracks=True``. ``create_ditl`` calls it without
+    that argument.
 
 ``toos``
     The :class:`~conops.targets.TOORequest` records. Each one holds a request of any kind,
@@ -863,7 +873,7 @@ A program has the following fields.
 
 ``activities``
     The :class:`~conops.targets.ScheduledActivity` records. To build a repeating series
-    of activities, use :func:`~conops.targets.periodic_activities`.
+    of activities, use :func:`~conops.targets.activity.periodic_activities`.
 
 ``observation_groups``
     The :class:`~conops.config.ObservationGroups`. A group names requests by their obsids,
@@ -944,53 +954,67 @@ COASTSim. It handles the differences as follows:
 * Fields not present in the file (e.g. ``created_at``, ``num_entries``) are filled with
   schema defaults. ``num_entries`` is always recomputed from the actual entry list after
   loading.
-* Older files may store ``start``, ``end``, ``begin``, or ``end`` as numeric Unix
-  timestamps (float/int) where current files use ISO-8601 strings. These are accepted and
-  converted to :class:`~datetime.datetime` objects internally. Only the on-disk format
-  changed to ISO-8601.
+* Older files may store an entry's times (``begin``, ``end``, ``contact_begin``,
+  ``contact_end``, ``collection_begin`` and ``collection_end``) as numeric Unix timestamps
+  (float/int) where current files use ISO-8601 strings. Both forms are accepted. In memory
+  an entry's times are floats holding Unix seconds, as they were before. Only the on-disk
+  format changed to ISO-8601.
+* The plan-level ``start`` and ``end`` are not read from the file, whichever form they are
+  stored in. They are computed from the entries after loading and are reported as ISO-8601
+  strings.
 * Older files may store ``version`` as a semantic-version string (e.g. ``"0.1.3"``). Such
   a value is coerced to ``0``.
 * Older files must already use the field names documented above (including ``exporig``).
   There is currently no automatic renaming or aliasing of deprecated keys.
 
-The ``from_attributes=True`` model configuration means the schema can also validate
-any object that exposes the expected attributes, as well as plain dicts.
+``Plan`` does not set ``from_attributes`` in its model configuration, so
+``model_validate`` accepts plain dicts by default. To validate an object that exposes the
+expected attributes, pass ``from_attributes=True`` in the call, as ``PlanSchema.from_plan``
+does.
 
 API Reference
 -------------
 
 .. automethod:: conops.targets.plan.Plan.save
+   :no-index:
 
 .. automethod:: conops.targets.plan.Plan.load
+   :no-index:
 
 .. autoclass:: conops.targets.plan_schema.PlanEntrySchema
    :members:
    :undoc-members:
    :show-inheritance:
+   :no-index:
 
 .. autoclass:: conops.targets.plan_schema.PlanSchema
    :members:
    :undoc-members:
    :show-inheritance:
+   :no-index:
 
 .. autoclass:: conops.targets.plan_schema.AttitudeTimeseriesSchema
    :members:
    :undoc-members:
    :show-inheritance:
+   :no-index:
 
 .. autoclass:: conops.targets.plan_schema.AttitudeSampleSchema
    :members:
    :undoc-members:
    :show-inheritance:
+   :no-index:
 
 .. autoclass:: conops.targets.plan_schema.OrbitStateTimeseriesSchema
   :members:
   :undoc-members:
   :show-inheritance:
+  :no-index:
 
 .. autoclass:: conops.targets.plan_schema.OrbitStateSampleSchema
   :members:
   :undoc-members:
   :show-inheritance:
+  :no-index:
 
 .. _Pydantic v2: https://docs.pydantic.dev/latest/

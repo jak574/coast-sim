@@ -176,6 +176,13 @@ The settings below are under ``spacecraft_bus.attitude_control.stored_momentum``
 * ``initial_momentum_body_n_m_s`` (three floats) is the wheels' momentum at the
   start.
 * ``max_attitude_step_deg`` (default 5) is the attitude step along slews.
+* ``max_sample_interval_s`` (default 10, at most 10) applies where
+  ``enforce_capacity`` is on. It is the longest interval, in seconds, that the
+  enforcement forecast integrates over. The interval is shortened further to
+  ``max_attitude_step_deg`` of motion at the fastest configured slew rate. With a
+  torque source enabled, the ephemeris must be sampled at least this finely, and
+  an error is raised otherwise. The run's own tracker samples at the ephemeris
+  resolution whatever this setting is.
 * ``capacity_n_m_s`` (float or None) is the wheels' capacity, taken as the same
   about every axis. None sets no capacity.
 * ``planning_level`` (default 0.8) is the fraction of the capacity at which a
@@ -183,8 +190,17 @@ The settings below are under ``spacecraft_bus.attitude_control.stored_momentum``
 * ``thruster_dump`` (:class:`~conops.config.ThrusterDumpConfig` or None) describes
   the thruster dumps. ``duration_seconds`` (default 120) is how long the dump
   holds the spacecraft, and ``residual_fraction`` (default 0) is the fraction it
-  leaves in the wheels. A dump needs a capacity. None means the spacecraft has no
-  thrusters, so the wheels fill until a run reports it.
+  leaves in the wheels. ``attitude``
+  (:class:`~conops.config.activity_attitude.ActivityAttitude`) is the attitude the
+  dump is fired at. Its ``kind`` is ``inherited`` (the default), which holds the
+  attitude the spacecraft already has, or ``fixed``, which takes ``ra_deg``,
+  ``dec_deg`` and ``roll_deg`` (see `Dumps`_). The ``power_positive`` kind is
+  rejected for a dump. A dump needs a capacity. None means the spacecraft has no
+  thrusters, and nothing empties the wheels. The telemetry shows the stored
+  momentum as it grows, a planner logs where its forecast passes the capacity,
+  and a planned simulation records a ``momentum_capacity`` event at the capacity
+  (see `At the capacity`_). A queue simulation records no such event without
+  thrusters.
 * ``enforce_capacity`` (bool, default ``False``) enforces the capacity on the
   executed motion as well. Every slew and hold is certified against the capacity
   before it is flown, and an observation is admitted only where it fits. The run
@@ -200,6 +216,11 @@ The settings below are under ``spacecraft_bus.attitude_control.stored_momentum``
   the fractions of the configured slew rates at which a slew may be flown where
   its momentum does not fit. The list descends from 1, and the first fraction
   that fits is taken.
+* ``roll_step_deg`` (integer, default 30) applies where ``enforce_capacity`` is
+  on. It is the step, in degrees, of the rolls that are tried when an observation
+  is admitted. The observation's preferred roll is tried first, and then every
+  multiple of the step from 0° to below 360°. An observation that commands its
+  own roll is tried at that roll only. The step must divide 360.
 
 The following rules apply to the configuration as a whole:
 
@@ -233,9 +254,10 @@ Magnetorquers unload continuously. They are a torque source in the integrator an
 need no block of time in the schedule.
 
 A thruster dump is a hold during which no science is observed. It is a
-desaturation activity (``ScheduledActivity.desaturation``) that holds the attitude
-the spacecraft already has for the dump's length, in the ``DESAT`` ACS mode, and
-unloads the wheels when it ends. While the dump holds:
+desaturation activity (``ScheduledActivity.desaturation``) that holds an attitude
+for the dump's length, in the ``DESAT`` ACS mode, and unloads the wheels when it
+ends. By default it holds the attitude the spacecraft already has. While the dump
+holds:
 
 * the telemetry reports ``DESAT``;
 * an instrument that defines a mode named ``DESAT`` is in that mode;
@@ -244,8 +266,20 @@ unloads the wheels when it ends. While the dump holds:
 * the bus power table takes an entry for ``DESAT``, which is the nominal power
   unless set.
 
-Dumps are never timer-based and never change the attitude: the firing attitude is
-not modelled.
+Dumps are never timer-based. By default a dump does not change the attitude.
+
+A firing attitude can be fixed instead, by setting ``thruster_dump.attitude`` to
+the ``fixed`` kind with an RA, a Dec and a roll. The spacecraft then slews to that
+attitude before every dump, and the dump's hold begins when the slew has ended.
+The attitude is used as it is given. COAST does not work one out from the
+thrusters' mounting or from the direction of the Sun.
+
+Dispatch does not start the slew to a fixed firing attitude while a visit of an
+observation sequence is under way. The dump waits for the visit to end. If the
+slew or the hold at the fixed attitude would violate the attitude constraints,
+the run stops with an activity scheduling error. The planners plan the slew from
+the attitude of whatever precedes the dump, and the dump begins when that slew
+ends.
 
 The rest of this section describes when a thruster dump happens. Dispatch, which
 selects observations as a queue simulation runs, calls for dumps from the momentum
@@ -273,7 +307,12 @@ What dispatch does next depends on what the forecast reaches.
 * Where the forecast would reach the capacity during a plain observation, the
   observation is bounded to end where the planning level is reached, and the dump
   follows. If the observation's minimum snapshot is collected later than that and
-  still fits, the observation ends there instead.
+  still fits, the observation ends there instead. If the minimum snapshot does
+  not fit within the capacity from the wheels as they are, the wheels are emptied
+  first and the observation is left for a later selection. If it does not fit
+  even from empty wheels, the observation is held out of this selection and the
+  reason is logged. It is not marked done, because the torque varies round the
+  orbit and the minimum snapshot may fit later.
 * Where the forecast would reach the capacity during a visit, the visit is not
   cut. The wheels are emptied first if the visit fits from empty wheels. If it
   does not fit even then, the visit is rejected and marked done, and the reason
@@ -285,7 +324,8 @@ At the capacity
 The capacity is a red line. Where the stored momentum reaches it, fault
 management records a ``momentum_capacity`` event against the ``stored_momentum``
 state. The event names the observation under way, if there is one. No safe mode
-is requested.
+is requested. A queue simulation records the event only where thruster dumps are
+configured.
 
 The dump is then an emergency and does not wait for the observation to end. It
 begins once the observation's cleanup and handoff budget is paid, and the
@@ -309,26 +349,35 @@ the wheels as it ends.
 
 Where the forecast reaches the planning level and the spacecraft has thrusters,
 the planner reserves a dump. The dump is a desaturation activity that holds the
-attitude of whatever precedes it. The planner keeps the science placed before the
-dump as it is, and plans on from there with the dumps reserved so far.
+attitude of whatever precedes it, or the fixed firing attitude where one is
+configured. The planner keeps the science placed before the dump as it is, and
+plans on from there with the dumps reserved so far.
 
 As in dispatch, the dump goes between observations. Its place depends on the
 observation inside which the planning level is reached:
 
-* The dump goes after that observation where the capacity is not reached through
-  the dump's own length.
-* Otherwise the dump goes before the observation, where the observation fits from
-  empty wheels.
-* Where the observation does not fit from empty wheels, a visit is left out and a
-  plain observation is cut at the planning level.
+* The dump goes after that observation where the capacity is not reached before
+  the dump would end.
+* Where the capacity would be reached by then, and the observation fits from
+  empty wheels, the dump goes before the observation.
+* Where the capacity would be reached by then, and the observation does not fit
+  from empty wheels, a visit is left out and a plain observation is cut at the
+  planning level.
+
+Where the planning level is reached outside any observation, the dump goes at
+that time. If that time falls inside a scheduled activity or a tracked ground
+station pass, the dump goes after it where the capacity is not reached before the
+dump would end, and before it otherwise.
 
 A dump found earlier than one already reserved replaces that dump and those after
 it.
 
-The planner works in passes. A pass reserves a dump for every crossing of the
-planning level that the forecast reaches, with the wheels unloaded at each dump
-before it, and then builds the plan again once. The next pass checks those dumps
-against the plan as built. The passes of one plan share the spans integrated so
+The planner works in passes. A pass reserves a dump for each crossing of the
+planning level that the forecast reaches in turn, with the wheels unloaded at
+each dump before it, and then builds the plan again once. A dump that overlaps
+planned work, or that has a fixed firing attitude, is the last one its pass
+reserves, because the plan after it has to be built again before later dumps can
+be placed. The next pass checks those dumps against the plan as built. The passes of one plan share the spans integrated so
 far. Each span is keyed on its times, its attitude or slew, and the momentum it
 starts from, so a pass integrates only from its new dump onwards.
 
@@ -443,7 +492,9 @@ What is left out
   ``max_attitude_step_deg`` of motion, so a peak between samples is read a sample
   late. The attitude step is the convergence control.
 * Self-shadowing between plates, for sunlight and drag alike.
-* A thruster firing attitude. A dump holds the attitude the spacecraft has.
+* A thruster firing attitude worked out from the thrusters' mounting or from the
+  Sun. A dump holds the attitude the spacecraft has, or the fixed attitude set in
+  ``thruster_dump.attitude``.
 * Propellant accounting for dumps.
 * The accuracy of the environment. The built-in atmosphere table and the dipole
   field are order-of-magnitude models. The optional ``msis`` and ``igrf`` models

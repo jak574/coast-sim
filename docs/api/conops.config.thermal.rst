@@ -2,7 +2,6 @@ conops.config.thermal
 =====================
 
 .. automodule:: conops.config.thermal
-   :members: Heater
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

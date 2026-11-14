@@ -187,7 +187,7 @@ The shadow fraction is computed and applied for each radiator whose
        print(f"{r['name']}: sun_exposure={r['sun_exposure']:.3f}, "
              f"heat={r['heat_dissipation_w']:.1f} W")
 
-The simulation ACS (``:class:`~conops.simulation.acs.ACS```) performs this
+The simulation ACS (:class:`~conops.simulation.ACS`) performs this
 look-up automatically on every timestep.  No extra wiring is needed when both
 ``geometry`` and ``shadowed_by`` are configured.
 
@@ -286,7 +286,7 @@ facing the sun for extended periods.
    import rust_ephem
 
    constraint = Constraint(
-       constraint=rust_ephem.SunConstraint(min_angle=45.0)
+       sun_constraint=rust_ephem.SunConstraint(min_angle=45.0)
    )
    rad = Radiator(
        name="Sensitive Radiator",

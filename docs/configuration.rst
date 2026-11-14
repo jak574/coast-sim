@@ -129,7 +129,7 @@ Example:
 
 .. code-block:: python
 
-   config = MissionConfig(name="STROBE-X Observatory")
+   config = MissionConfig(name="Example Observatory")
 
 random_seed
 ~~~~~~~~~~~
@@ -167,7 +167,7 @@ post-run plan validation.
 
 **Background**
 
-At the end of every :meth:`~conops.ditl.queue_ditl.QueueDITL.run`, COASTSim compares
+At the end of every :meth:`~conops.ditl.queue_ditl.QueueDITL.calc`, COASTSim compares
 the exported plan against the ACS telemetry the run actually produced.  This step is
 called *plan execution validation*.  One part of it scans every attitude sample in the
 telemetry and checks whether the spacecraft was pointing somewhere it should not have
@@ -182,7 +182,7 @@ attitude constraint the scheduler is expected to enforce in that mode.
 
 If any sample fails the scope check configured for its mode, a
 :class:`~conops.ditl.plan_validator.PlanExecutionMismatch` is recorded and
-:meth:`~conops.ditl.queue_ditl.QueueDITL.run` raises
+:meth:`~conops.ditl.queue_ditl.QueueDITL.calc` raises
 :exc:`~conops.ditl.plan_validator.PlanExecutionMismatchError` before returning.  To help
 with debugging, the error message lists the first few violations and gives the mode,
 obsid, RA/Dec/roll and constraint name of each.
@@ -322,6 +322,43 @@ The :class:`~conops.config.SpacecraftBus` defines the spacecraft bus subsystems.
 * ``radiators`` (:class:`~conops.config.RadiatorConfiguration`): Optional body-mounted radiator configuration
 * ``surfaces`` (:class:`~conops.config.SurfaceModel` | None): The spacecraft's surfaces, modelled as flat plates placed about its centre of mass. They are used to compute the torques of sunlight and drag (see `Stored momentum`_ below). If this is None and those torques are tracked, a placeholder model is built from the bus, panels and telescopes
 
+.. code-block:: python
+
+   from conops.config import SpacecraftBus, PowerDraw, AttitudeControlSystem, Heater
+   from conops.common.enums import SlewAlgorithm
+   import rust_ephem
+
+   spacecraft_bus = SpacecraftBus(
+       name="Observatory Bus",
+       power_draw=PowerDraw(
+           nominal_power=50.0,      # Watts - normal operations
+           peak_power=300.0,        # Watts - maximum draw
+           power_mode={0: 70.0, 1: 100.0},  # Mode-specific power
+           eclipse_power=75.0,      # Power draw during eclipse
+       ),
+       attitude_control=AttitudeControlSystem(
+           slew_acceleration=0.01,  # deg/s² - angular acceleration
+           max_slew_rate=0.3,       # deg/s - maximum slew rate
+           # Optional ellipsoidal (+X, +Y, +Z) body-axis envelopes:
+           slew_acceleration_body=(0.02, 0.02, 0.2),  # deg/s²
+           max_slew_rate_body=(0.2, 0.2, 2.0),        # deg/s
+           slew_accuracy=0.01,      # deg - pointing accuracy
+           settle_time=10.0,        # seconds - time to settle after slew
+           slew_algorithm=SlewAlgorithm.CONSTRAINT_AVOIDING,  # Avoid all constraints
+           slew_constraint=(  # Optional: separate constraint for slewing
+               rust_ephem.SunConstraint(min_angle=30.0)  # Relaxed Sun angle during slews
+               | rust_ephem.EarthLimbConstraint(min_angle=20.0)  # Relaxed Earth limb during slews
+           ),
+       ),
+       heater=Heater(
+           name="Bus Heaters",
+           power_draw=PowerDraw(
+               nominal_power=25.0,
+               eclipse_power=75.0,  # Higher power in eclipse
+           ),
+       ),
+   )
+
 .. _Spacecraft frame:
 
 **Spacecraft frame**
@@ -386,6 +423,7 @@ The :class:`~conops.config.AttitudeControlSystem` defines slew performance and p
 * ``slew_acceleration_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z acceleration limits in deg/s²
 * ``max_slew_rate_body`` (tuple[float, float, float] | None): Optional body +X/+Y/+Z slew-rate limits in deg/s
 * ``slew_accuracy`` (float): Pointing accuracy after slew completion in degrees
+* ``safe_mode_attitude`` (:class:`~conops.config.activity_attitude.ActivityAttitude` | None): Optional fixed or power-positive attitude the spacecraft holds after fault management puts it in safe mode. An inherited attitude is rejected. None keeps the existing charging guidance; see :ref:`power-positive-fault-safe-mode`
 * ``settle_time`` (float): Time to settle after slew completion in seconds
 * ``slew_requirements`` (list of :class:`~conops.config.SlewRequirement`, optional): The
   mission's slew requirement classes. Each class has a ``name`` and two limits:
@@ -434,6 +472,7 @@ The :class:`~conops.config.AttitudeControlSystem` defines slew performance and p
   at any time when that roll is beyond the limit. None allows any roll the constraints
   allow.
 * ``slew_before_visible`` (bool, default False): Whether a slew to a science target that is not visible yet may start before the target becomes visible, timed so that the spacecraft arrives as it does. If False, the ACS waits until the target is visible before starting the slew, so the time spent slewing after the target rises is lost. When True, a slew to a target that is not visible yet is not flown if it would arrive no earlier than the end of the target's plan entry.
+* ``idle_min_hold_s`` (float, default 300): The shortest time, in seconds, an idle attitude must remain safe after the spacecraft arrives at it. It is required in addition to the reserve kept for the slew away from that attitude
 * ``stored_momentum`` (:class:`~conops.config.momentum.StoredMomentumConfig`): Optional planning-level momentum tracking
 * ``slew_algorithm`` (:class:`~conops.common.enums.SlewAlgorithm`): Algorithm for computing slew paths:
 
@@ -441,6 +480,7 @@ The :class:`~conops.config.AttitudeControlSystem` defines slew performance and p
   - ``CONSTRAINT_AVOIDING``: Routes around any configured constraints (Sun, Earth, Moon, etc.)
 
 * ``slew_constraint`` (ConstraintConfig | None): Optional rust-ephem constraint for slew path planning. When it is set and ``slew_algorithm`` is ``CONSTRAINT_AVOIDING``, this constraint is used in place of the spacecraft's general pointing constraint, so that slewing and science pointing can have different safety margins.
+* ``gsp_tracking_phase_step_deg`` (float, default 5): The increment, in degrees, of the search over roll phase for a ground-station pass's tracking attitude. A smaller value tries more candidate tracking attitudes and takes more computing time.
 
 The two body-axis tuples, ``slew_acceleration_body`` and ``max_slew_rate_body``, give
 a separate limit about each body axis. When either tuple is present, COAST applies it
@@ -486,27 +526,35 @@ flag at the start of every run. Configuration changes between runs therefore
 take effect without reconstructing the simulation.
 
 The tracker integrates torque at discrete samples and does not interpolate the
-attitude trajectory between them. To guard against missing torque between samples,
-a run with tracking enabled requires both the executed-attitude interval and the
-ephemeris interval to be no greater than the smaller of:
+attitude trajectory between them. A held attitude is sampled at the ephemeris
+resolution. A slew is sampled every ``stored_momentum.max_attitude_step_deg`` (default
+5 degrees) of motion at the fastest configured body-axis slew rate (or scalar
+``max_slew_rate`` when body-axis limits are absent). Tracking alone places no limit on
+the ephemeris interval, so a tracked run works at whatever resolution the ephemeris
+has.
 
-* ``stored_momentum.max_sample_interval_s`` (default 10 seconds, configurable downward);
-* ``stored_momentum.max_attitude_step_deg`` (default 5 degrees, configurable
-  downward) divided by the fastest configured body-axis slew rate (or scalar
-  ``max_slew_rate`` when body-axis limits are absent).
+A sampling guard applies only where the capacity is enforced (see
+`Momentum-constrained queue scheduling`_). Enforcement integrates over intervals no
+longer than the smaller of:
+
+* ``stored_momentum.max_sample_interval_s`` (default 10 seconds);
+* ``stored_momentum.max_attitude_step_deg`` divided by the fastest configured slew
+  rate.
 
 For example, with the default angular limit, a fastest rate of 2 degrees/second
-requires intervals of at most 2.5 seconds, and lowering ``max_attitude_step_deg`` to
-2 degrees requires intervals of at most 1 second. Both settings can tighten the
-default sampling guards but cannot relax them.
+gives intervals of at most 2.5 seconds, and lowering ``max_attitude_step_deg`` to
+2 degrees gives intervals of at most 1 second. ``max_sample_interval_s`` can be
+lowered but cannot be set above 10 seconds. ``max_attitude_step_deg`` has no upper
+limit, so it can be either lowered or raised.
 
-Set ``DITL.step_size`` and generate an ephemeris at a resolution that meets these
-limits. ``QueueDITL`` uses the ephemeris step as its execution step. A run that is too
-coarse fails before any ACS execution or power update, and a fine execution step
-cannot compensate for a coarse ephemeris. When tracking is disabled, existing runs
-are unchanged.
+Where the capacity is enforced and any torque source is enabled, the ephemeris
+interval must also be no greater than ``max_sample_interval_s``, so generate the
+ephemeris at a resolution that meets this limit. ``QueueDITL`` uses the ephemeris
+step as its execution step. An enforced run with a coarser ephemeris fails with an
+error, and enforcement's finer internal sampling of the motion cannot compensate for
+a coarse ephemeris. When tracking is disabled, existing runs are unchanged.
 
-The sampling guards are conservative, but they do not guarantee an integration-error
+These sampling limits are conservative, but they do not guarantee an integration-error
 tolerance, so verify convergence at a finer cadence for final studies. The guard does
 not change the scheduling cadence automatically, and it does not call the ACS state
 machine at synthetic intermediate times. To compare numerical cadences without
@@ -686,43 +734,6 @@ search and the return-to-departure fallback are conservative. Rejecting a candid
 does not prove it physically impossible, and the resulting yield is not maximum
 capacity.
 
-.. code-block:: python
-
-   from conops.config import SpacecraftBus, PowerDraw, AttitudeControlSystem, Heater
-   from conops.common.enums import SlewAlgorithm
-   import rust_ephem
-
-   spacecraft_bus = SpacecraftBus(
-       name="Observatory Bus",
-       power_draw=PowerDraw(
-           nominal_power=50.0,      # Watts - normal operations
-           peak_power=300.0,        # Watts - maximum draw
-           power_mode={0: 70.0, 1: 100.0},  # Mode-specific power
-           eclipse_power=75.0,      # Power draw during eclipse
-       ),
-       attitude_control=AttitudeControlSystem(
-           slew_acceleration=0.01,  # deg/s² - angular acceleration
-           max_slew_rate=0.3,       # deg/s - maximum slew rate
-           # Optional ellipsoidal (+X, +Y, +Z) body-axis envelopes:
-           slew_acceleration_body=(0.02, 0.02, 0.2),  # deg/s²
-           max_slew_rate_body=(0.2, 0.2, 2.0),        # deg/s
-           slew_accuracy=0.01,      # deg - pointing accuracy
-           settle_time=10.0,        # seconds - time to settle after slew
-           slew_algorithm=SlewAlgorithm.CONSTRAINT_AVOIDING,  # Avoid all constraints
-           slew_constraint=(  # Optional: separate constraint for slewing
-               rust_ephem.SunConstraint(min_angle=30.0)  # Relaxed Sun angle during slews
-               | rust_ephem.EarthLimbConstraint(min_angle=20.0)  # Relaxed Earth limb during slews
-           ),
-       ),
-       heater=Heater(
-           name="Bus Heaters",
-           power_draw=PowerDraw(
-               nominal_power=25.0,
-               eclipse_power=75.0,  # Higher power in eclipse
-           ),
-       ),
-   )
-
 .. _Stored momentum:
 
 Stored-momentum tracking is disabled by default. :doc:`momentum` describes the
@@ -780,7 +791,10 @@ The :class:`~conops.config.SolarPanelSet` defines the solar array configuration.
 * ``gimbled`` (bool): Whether the panel uses the legacy ideal Sun-tracking
   model, which has no travel or rate limits. It cannot be combined with
   ``single_axis_drive``
-* ``normal`` (tuple[float, float, float]): Panel normal vector in spacecraft body frame
+* ``normal`` (tuple[float, float, float]): Panel normal vector in spacecraft body frame.
+  The axis meanings below are those of the default `Spacecraft frame`_. A bus that
+  declares another frame has its boresight and Sun's side along the axes that frame
+  names
 
   - +x is the spacecraft pointing direction (boresight)
   - +y is the spacecraft "up" direction
@@ -1002,7 +1016,8 @@ to avoidance constraints (e.g., never look within N° of the Sun).
 
 **StarTrackerOrientation Attributes:**
 
-* ``boresight`` (tuple[float, float, float]): Boresight direction as a unit vector in spacecraft body frame
+* ``boresight`` (tuple[float, float, float]): Boresight direction as a unit vector in spacecraft body frame.
+  The axis meanings below are those of the default `Spacecraft frame`_
 
   - +x is the spacecraft pointing direction (forward/boresight)
   - +y is the spacecraft "up" direction
@@ -1145,7 +1160,8 @@ this field when radiators are configured.
 
 **RadiatorOrientation Attributes:**
 
-* ``normal`` (tuple[float, float, float]): Unit vector in spacecraft body frame
+* ``normal`` (tuple[float, float, float]): Unit vector in spacecraft body frame.
+  The axis meanings below are those of the default `Spacecraft frame`_
 
   - +x is spacecraft forward/boresight
   - +y is spacecraft "up"
@@ -1196,15 +1212,48 @@ this field when radiators are configured.
        radiators=[bus_radiator, payload_radiator]
    )
 
+Radiator Net Heat Model
+^^^^^^^^^^^^^^^^^^^^^^^
+
+COASTSim uses a first-order net-radiative model for each radiator:
+
+.. math::
+
+    Q_{net} = A\,\eta\,[\min(\epsilon\sigma(T_r^4 - T_s^4), C_d) - \alpha(S_0 f_{sun}E_{sun} + F_{earth} f_{earth}E_{earth})]
+
+Where:
+
+* :math:`S_0` is ``solar_constant_w_per_m2``
+* :math:`F_{earth}` is ``earth_ir_flux_w_per_m2``
+* :math:`E_{sun}, E_{earth}` are geometric exposure factors in [0, 1]
+* :math:`f_{sun}, f_{earth}` are loading weights
+* :math:`\alpha` is ``absorptivity`` and :math:`\epsilon` is ``emissivity``
+* :math:`C_d` is ``dissipation_coefficient_w_per_m2`` (emission cap)
+* :math:`\sigma` is the Stefan-Boltzmann constant
+* :math:`A` is radiator area and :math:`\eta` is ``efficiency``
+
+Positive :math:`Q_{net}` means net heat rejection (dumping heat).
+Negative :math:`Q_{net}` means net absorbed external radiative load.
+
+targets
+~~~~~~~
+
+The :class:`~conops.config.TargetConfig` holds the weights that queue scheduling
+uses to score candidate targets. The two subsections below describe them.
+
 Scheduler Optimization Weights
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Queue scheduling can combine target merit with configurable optimization weights.
-All weights default to ``0.0``. When every weight is zero, the queue sorts the
-targets by merit and selects the first visible one. This is a fast path that
-skips the scoring pass described below.
+All weights default to ``0.0``. The queue sorts the targets by merit and selects
+the first visible one when all of the following hold: every weight in this
+section is zero, every dynamic merit weight is zero (see
+`Dynamic Merit: Urgency, Cadence and Program Balance`_),
+``group_contiguity_weight`` is zero, and no long-range allocation with a
+positive ``bonus`` is in use. This is a fast path that skips
+the scoring pass described below.
 
-When any weight is non-zero, every visible candidate is scored as:
+Otherwise, every visible candidate is scored as:
 
 .. code-block:: text
 
@@ -1237,8 +1286,9 @@ The available weights are:
 * ``config.targets.data_volume_weight`` - Merit penalty per gigabit of science
   data that a snapshot would put on the recorder. The volume is worked out for
   the collection time the candidate would get, at the target's own data rates.
-  The weight acts as a price on data, so that science producing a lot of data
-  ranks below science producing little as the recorder fills.
+  The weight acts as a fixed price on data, so that science producing a lot of
+  data ranks below science producing little. The price does not change with how
+  full the recorder is.
 
   A separate limit applies whatever the weights are. ``QueueDITL`` lets a
   candidate collect no more than the recorder can take, under the recorder's
@@ -1330,29 +1380,6 @@ target's ``merit`` is then frozen at its value at that selection. The frozen
 value is exported on the plan entry, and it is what a Target of Opportunity
 must beat to interrupt the observation (see :doc:`target_of_opportunity`).
 
-Radiator Net Heat Model
-^^^^^^^^^^^^^^^^^^^^^^^
-
-COASTSim uses a first-order net-radiative model for each radiator:
-
-.. math::
-
-    Q_{net} = A\,\eta\,[\min(\epsilon\sigma(T_r^4 - T_s^4), C_d) - \alpha(S_0 f_{sun}E_{sun} + F_{earth} f_{earth}E_{earth})]
-
-Where:
-
-* :math:`S_0` is ``solar_constant_w_per_m2``
-* :math:`F_{earth}` is ``earth_ir_flux_w_per_m2``
-* :math:`E_{sun}, E_{earth}` are geometric exposure factors in [0, 1]
-* :math:`f_{sun}, f_{earth}` are loading weights
-* :math:`\alpha` is ``absorptivity`` and :math:`\epsilon` is ``emissivity``
-* :math:`C_d` is ``dissipation_coefficient_w_per_m2`` (emission cap)
-* :math:`\sigma` is the Stefan-Boltzmann constant
-* :math:`A` is radiator area and :math:`\eta` is ``efficiency``
-
-Positive :math:`Q_{net}` means net heat rejection (dumping heat).
-Negative :math:`Q_{net}` means net absorbed external radiative load.
-
 payload
 ~~~~~~~
 
@@ -1427,8 +1454,9 @@ The mode an instrument is in depends on the observation in progress:
 * During an observation that uses the instrument, it is in the mode the request
   names for it in ``instrument_modes`` on the target. When the request uses the
   instrument without naming a mode, it is in ``SCIENCE``.
-* A request that names no modes uses the instrument it names, or every
-  instrument with modes, in ``SCIENCE``.
+* A request that names no modes uses every instrument with modes, in
+  ``SCIENCE``. The instrument a request names for its pointing does not
+  restrict which instruments it uses.
 * Outside an observation, and during an observation that does not use it, the
   instrument is in ``IDLE``. There is one exception. If the instrument defines a
   mode with the same name as the current ACS mode (``SAFE``, ``SLEWING``,
@@ -1779,8 +1807,8 @@ on the spacecraft constraint configuration, where spacecraft roll is defined.
        ),
    )
 
-   print(primary.optics.f_number)                     # 10.0
-   print(primary.optics.plate_scale_arcsec_per_um)    # ~3.44e-5 arcsec/µm
+   print(primary.optics.f_number)                     # 7.0
+   print(primary.optics.plate_scale_arcsec_per_um)    # ~0.0589 arcsec/µm
 
    # Mix Telescope and plain Instrument in the same payload
    payload = Payload(
@@ -1914,8 +1942,9 @@ places no restriction on observing in eclipse.
 The resolved policy for an observation is available through
 ``config.science_in_eclipse_for(obsid)``. The same policy is shared by request
 visibility, dispatch, all three planners and rolling replanning, and it covers
-Targets of Opportunity and moving targets. A protected sequence must fit
-wholly inside a permitted window. Setup and cleanup hold times must also fit
+Targets of Opportunity and moving targets. A protected sequence is a target's
+observation sequence, whose steps are observed in order as one visit that is
+not cut short. A protected sequence must fit wholly inside a permitted window. Setup and cleanup hold times must also fit
 inside that window. The slew into the window may start earlier if the slew
 rules permit it.
 
@@ -2287,7 +2316,9 @@ without this section uses the default, which is queue dispatch.
 
   - ``bin_seconds`` (default one day).
   - ``efficiency`` (default 0.75).
-  - ``reserve`` (default 0.1), the fraction of each day kept free for ToOs.
+  - ``reserve`` (default 0.1), the fraction of each bin's capacity held back
+    for unplanned work such as ToOs. A bin's capacity is its length times
+    ``efficiency``.
   - ``solver``, which is ``milp`` or ``greedy``. ``milp`` is the default and
     needs ``coast-sim[cpsat]``.
   - ``time_limit_seconds`` (default 10), for the MILP solver, HiGHS.
@@ -2300,7 +2331,9 @@ without this section uses the default, which is queue dispatch.
 
 A scheduler setting that is left unset takes the scheduler's default. Setting
 one that does not apply to the chosen scheduler is an error. ``dispatch`` mode
-uses none of them. See :doc:`planning` for what each mode and scheduler does.
+uses only ``allocation``. It ignores ``kind``, ``include_passes``,
+``successor_retries``, the local-search and CP-SAT settings and ``replanning``.
+See :doc:`planning` for what each mode and scheduler does.
 
 .. code-block:: yaml
 

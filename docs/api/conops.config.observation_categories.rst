@@ -1,8 +1,7 @@
-conops.config.observation\_categories
-=====================================
+conops.config.observation_categories
+====================================
 
 .. automodule:: conops.config.observation_categories
-   :members: ObservationCategories, ObservationCategory
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

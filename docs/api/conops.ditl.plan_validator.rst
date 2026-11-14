@@ -1,9 +1,7 @@
-conops.ditl.plan\_validator
-===========================
+conops.ditl.plan_validator
+==========================
 
 .. automodule:: conops.ditl.plan_validator
-   :members: PlanExecutionValidator, PlanExecutionMismatch, PlanExecutionMismatchError
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

@@ -1,5 +1,5 @@
-conops.ditl.telemetry module
-==============================
+conops.ditl.telemetry
+=====================
 
 .. automodule:: conops.ditl.telemetry
    :members:

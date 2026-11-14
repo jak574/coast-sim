@@ -140,7 +140,7 @@ Each scheduler treats the windows in its own way:
   placement can meet.
 * Local search and CP-SAT keep every visit in its window.
 * Dispatch selects the target only while an unvisited window is open. Dispatch also
-  looks ahead to timed requests, as described later on this page. For that
+  looks ahead to timed requests (see `Timed requests in dispatch`_). For that
   look-ahead, a window that is still to open counts as a request opening.
 
 A plan entry's ``visit`` says which window the entry observes in. The target records
@@ -214,9 +214,9 @@ translates asteroid NAIF IDs into the `Horizons designation-search syntax
 <https://ssd-api.jpl.nasa.gov/doc/horizons.html>`_, so programs do not need to carry
 that service-specific syntax.
 
-An older adapter may return no ephemeris for an ID that is otherwise valid. The
-dependency release must include the fix before live small-body lookup is used in
-distributed notebooks. To retain a track for offline execution, fetch it once using
+The translation is included in ``rust_ephem`` 0.16.1, which is the oldest release
+COASTSim installs with, so live small-body lookup needs no further setup. To retain a
+track for offline execution, fetch it once using
 ``Program.bind(refresh_tracks=True)`` and save the program.
 
 Visibility over part of the ephemeris
@@ -439,7 +439,8 @@ instead of returning a plan that omits it. The error names the mandatory activit
 its start window and the failed reservation. An activity reserved at or beyond an
 internal horizon's end is still deferred to a later plan.
 
-Safe mode is never scheduled. It is entered through fault management alone.
+Fault safe mode is never scheduled. It is entered through fault management alone.
+An engineering safe hold uses ``SAFE`` only for its own length and does not latch it.
 
 The attitude a scheduled activity holds
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -480,7 +481,8 @@ sliding hold (see `Sliding and fixed activities`_) retains its full duration aft
 arrival, and its settled time and changed predecessor are rechecked.
 
 Planned entries mark ``activity_requires_stationary``. Validation then rejects
-slewing or ``SAFE`` during the full hold. Entries without the mark, which come from
+slewing during the full hold. It also rejects ``SAFE`` there, unless the activity is
+an engineering safe hold. Entries without the mark, which come from
 older plans and from flexible dispatch holds, are not checked this way and retain
 their existing recovery semantics.
 
@@ -598,7 +600,8 @@ Scheduled activities in dispatch
 
 Dispatch takes the same list of activities as the planners. When an activity
 begins, dispatch ends the observation under way and marks it interrupted so that it
-is revisited. It holds the attitude it has in ``IDLE`` until the activity ends.
+is revisited. It holds the attitude it has until the activity ends, in ``IDLE``, or
+in ``DESAT`` for a dump and ``SAFE`` for an engineering safe hold.
 Dispatch also starts no observation whose slew or collection would run into the next
 activity.
 
@@ -729,8 +732,11 @@ start in the gap is tried in turn, each with a full search for the slew onward.
 
 ``successor_retries`` limits how many later starts are tried after that happens
 before the gap is given up (3 by default). This plans much faster in a crowded
-horizon, but can miss a fit late in a gap. Set it to None to try every start.
-Rolling replans use the default.
+horizon, but can miss a fit late in a gap. Set the scheduler argument to None to try
+every start. In a mission configuration's ``scheduler`` section the same setting is
+written ``successor_retries: unlimited``, because a null value there means the
+default. Rolling replans use the default unless the configuration or
+``scheduler_options`` sets it.
 
 What the gap search reuses
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -774,7 +780,7 @@ The battery ledger:
 The local search decodes a trial plan for every change it tries, so these savings
 decide how many changes a search of a given length tries. The CP-SAT scheduler
 computes the slew table of a chunk's tasks for every pair at once. It decodes the
-rest of the priority-first plan once per chunk, and carries the decoding to the next
+rest of the plan it started from once per chunk, and carries the decoding to the next
 chunk while chunks keep that plan.
 
 Starting a rolling run from a plan
@@ -1063,7 +1069,7 @@ low-data science before the recorder is full, and not only once it is full (see
 :doc:`configuration`).
 
 Planning within the wheels
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+--------------------------
 
 Where the configuration tracks stored momentum (see the stored momentum under
 :doc:`configuration`), every plan is forecast for it, and a planner whose spacecraft
@@ -1071,7 +1077,7 @@ has thrusters reserves momentum dumps where the forecast calls for them. The
 priority-first, local-search and CP-SAT planners all plan within the wheels this way.
 
 The momentum forecast
-~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^
 
 :class:`~conops.schedulers.momentum.MomentumForecast` integrates the configured
 torque sources along the plan's timeline with the tracker the simulations use. It
@@ -1089,7 +1095,7 @@ horizon starts, with the committed entries and their dumps included, so the repl
 forecast starts where the wheels will be.
 
 Where a dump is placed
-~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^
 
 Where the forecast reaches the planning level of the capacity and the spacecraft has
 thrusters, the planner reserves a dump. A dump is a fixed desaturation activity that
@@ -1115,14 +1121,18 @@ Fixed firing starts and the latest starts of bounded windows constrain whole-vis
 admission, alongside calibration and maintenance deadlines.
 
 Building the plan in passes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A dump changes the plan that follows it, so the planner builds the plan in passes.
 Each pass forecasts the plan, reserves dumps and builds the plan again:
 
-* A pass reserves a dump for every crossing the forecast reaches. Each crossing is
-  found with the wheels unloaded at the dump before it. The plan is then built again
-  once, from the first of these dumps.
+* A pass reserves a dump at the first crossing the forecast reaches. Where that dump
+  overlaps nothing already on the timeline and has no fixed firing attitude, the pass
+  goes on to the next crossing, found with the wheels unloaded at the dump before it,
+  and reserves a dump there as well. A dump that overlaps an entry on the timeline, or
+  that fires at a fixed attitude, is the last the pass reserves, because the work it
+  displaces is placed again before later crossings are forecast. The plan is then
+  built again once, from the first of these dumps.
 * When the plan is built again, the planner keeps the science placed before the dump
   as it is and plans on from there with the dumps reserved so far. The next pass
   places from the first slew start that the pass before it let go, since nothing
@@ -1143,7 +1153,7 @@ capacity. With thrusters, the log says where the forecast still reaches the capa
 if it does.
 
 Momentum carried during slews
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``slew_momentum_enabled`` counts the momentum the body carries while it slews. Where
 it is set, the forecast checks what the wheels hold along each slew against the
@@ -1153,7 +1163,7 @@ fraction, a dump goes before the observation where its slew fits from empty whee
 and the observation is left out where it does not (see :doc:`momentum`, Slews).
 
 Observation sequences
-^^^^^^^^^^^^^^^^^^^^^
+---------------------
 
 Some observations are a fixed series of steps instead of one pointing held for a
 time. An example is a reference star, then the target, then the reference again,
@@ -1176,7 +1186,7 @@ is one visit's science, no more and no less, and its exposure is its visits' sci
 unless given.
 
 Sequences in dispatch
-~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^
 
 Dispatch observes a visit step by step:
 
@@ -1205,7 +1215,7 @@ steps generate housekeeping data but no science data, including no fixed science
 readout amount.
 
 Sequences in the planners
-~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The planners place a visit as one block of steps.
 
@@ -1240,7 +1250,7 @@ once the visit is committed. An urgent ToO waits for that visit to finish before
 can begin.
 
 Timed requests in dispatch
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+--------------------------
 
 Dispatch looks ahead to requests with a deadline, so that it does not start an
 observation that makes one of them miss its deadline. A request with an
@@ -1380,12 +1390,12 @@ Limitations
 -----------
 
 * Urgency is evaluated once, at the start of the horizon, when the plan is built.
-  Deadlines are kept as constraints and, in local search and CP-SAT, by the earliness
-  discount.
+  Deadlines are kept as constraints. Local search and CP-SAT also prefer earlier
+  deadline science between equal-valued plans, and discount a late start only with an
+  explicit positive ``earliness_weight``.
 * Cadence is a minimum spacing. A visit before its cadence is due is never planned,
-  though dispatch may take one when nothing else is worth more. Spreading many visits
-  through the day also leaves the scheduler more, smaller gaps to search, which
-  lengthens planning.
+  and dispatch does not select one either. Spreading many visits through the day
+  also leaves the scheduler more, smaller gaps to search, which lengthens planning.
 * The priority-first scheduler is greedy. Apart from moving a snapshot later to make
   room before it, placements are never revisited. If a flexible, high-merit request
   is placed first, it can take the only slot a lower-merit request with a short
@@ -1459,7 +1469,7 @@ priority-first scheduler.
   decoded as one. An entry that cannot be placed at its start is left out. The search
   then improves on the better of the two starts, so the plan returned scores at least
   as well as either. CP-SAT takes ``start_plan`` the same way, with each chunk's hint
-  coming from it.
+  coming from it where it is the better start.
 * ``additional_start_plans``: other plans to decode as independent starting
   contenders before searching. Each is checked against the current state with
   separate activity, recorder and battery reservations. ``seed_score`` continues
@@ -1488,8 +1498,10 @@ time or zero requested changes). The scalar ``iterations`` reports only the
 last pass, so it cannot establish that all earlier passes completed their budgets.
 These diagnostics also cover CP-SAT's optional local-search polishing.
 
-Local search has two limitations. Only requests with a deadline are rewarded for
-starting early. Each change is decoded from the point it touches, so a search of a
+Local search has two limitations. By default nothing is rewarded for starting early
+beyond the preference between equal-valued plans, and the optional ``earliness_weight``
+discount applies only to requests with a deadline. Each change is decoded from the
+point it touches, so a search of a
 few thousand changes takes tens of seconds for a day with a few hundred targets.
 
 The notebook ``examples/Local_Search_Scheduler_Example.ipynb`` compares the two schedulers
@@ -1515,7 +1527,9 @@ Chunks and candidates
 ^^^^^^^^^^^^^^^^^^^^^
 
 The horizon advances in consecutive ``chunk`` lengths (three hours by default). The plan
-the scheduler holds at any moment is called the incumbent here. While one chunk is
+the scheduler holds at any moment is called the incumbent here. It starts as the
+priority-first plan, or as a decoded seed that scores higher (see `Starting from other
+plans`_). While one chunk is
 solved, the part of the incumbent that comes after the chunk, its continuation, is left
 unchanged.
 
@@ -1524,8 +1538,8 @@ before the unchanged incumbent continuation. This look-ahead lets a flexible
 observation move to after an observation whose visibility window is closing, so that
 the plan fits both visits instead of keeping the flexible one first. The look-ahead
 adds no solver budget, and the exact whole-horizon comparison described under
-`Decoding and accepting a chunk`_ must still improve before the proposal replaces the
-incumbent. The model limits how late a snapshot may start, so a snapshot may finish
+`Decoding and accepting a chunk`_ must still accept the proposal before it replaces
+the incumbent. The model limits how late a snapshot may start, so a snapshot may finish
 after the model's latest permitted start.
 
 For each chunk the scheduler builds a list of candidates. A candidate is one snapshot
@@ -1617,18 +1631,18 @@ the limit.
 In an eclipse run everything draws, so the run's end is its peak. In a sunlit run the
 deficit can rise and fall within the run, and the model, being linear, cannot follow
 that. The decoder walks the plan exactly and so has the last word: a chunk whose
-solution does not hold up keeps the priority-first plan. The priority-first plan is
-hinted into the run and carry-over variables, so the solver starts from a feasible
+solution does not hold up keeps the incumbent's snapshots. The incumbent is hinted
+into the run and carry-over variables, so the solver starts from a feasible
 solution.
 
 Decoding and accepting a chunk
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The priority-first plan's snapshots in each chunk are the solver's starting hint. They
+The incumbent's snapshots in each chunk are the solver's starting hint. They
 are adjusted where the model's approximate slews need it, so the solver starts from a
-feasible solution. Each chunk finishes before the priority-first plan's next slew and
-leaves to that plan the exposure it collects later, so the rest of the priority-first
-plan can always follow whatever the solver chooses.
+feasible solution. Each chunk finishes before the incumbent's next slew and
+leaves to the incumbent the exposure it collects later, so the rest of the incumbent
+can always follow whatever the solver chooses.
 
 The model approximates slews in two ways. Each target's roll is chosen before solving.
 With a thermal settling table, each slew settles for the change it makes to the Sun's
@@ -1636,12 +1650,14 @@ direction in the body frame, with the Sun where it is at the chunk's origin. Bec
 these approximations, each chunk's order is decoded with the scheduler's exact checks,
 as in local search.
 
-The decoded order is kept if, followed by the rest of the priority-first plan, it
-scores at least as well as that plan does from the same point. Otherwise, or if the
-solver found no solution in its time, the priority-first plan's snapshots for the chunk
-are kept. The next chunk is solved from where the kept snapshots leave the spacecraft.
-Every plan therefore executes as planned and is never worse than the priority-first
-plan. ``solver_chunks_used`` shows which chunks the solver improved.
+The decoded order is kept if, followed by the rest of the incumbent, it scores higher
+than the incumbent does from the same point. It is also kept where the two score the
+same and its science is no later, comparing deadline science first and then all
+science. Otherwise, or if the solver found no solution in its time, the incumbent's
+snapshots for the chunk are kept. The next chunk is solved from where the kept
+snapshots leave the spacecraft. Every plan therefore executes as planned and is never
+worse than the priority-first plan. ``solver_chunks_used`` shows which chunks kept the
+solver's snapshots.
 
 The exact decoding also applies the rules the model leaves out:
 
@@ -1702,7 +1718,7 @@ Using the CP-SAT scheduler
 * ``chunk``: length of each chunk (default three hours);
 * ``workers``: CP-SAT search workers (default 8);
 * ``max_candidates``: candidates per chunk at most (default 120), those of the
-  priority-first plan first, then in priority order.
+  incumbent first, then in priority order.
 
 ``time_limit`` defaults to 0 here; set it to spend that many seconds improving the
 solver's plan by local search afterwards. The plan's metadata records
@@ -1716,12 +1732,14 @@ After ``schedule()``, three lists describe the chunks, with one value per chunk:
 
 * ``solver_statuses`` is CP-SAT's status for each chunk.
 * ``solver_chunks_used`` says whether the solver's snapshots were kept over the
-  priority-first plan's.
-* ``solver_limits`` says what ended each chunk's search: ``optimal``, the
-  ``deterministic budget``, the ``wall clock`` or the ``solver`` itself.
+  incumbent's.
+* ``solver_limits`` says what ended each chunk's search: ``"optimal"``,
+  ``"deterministic budget"``, ``"wall clock"``, or ``"solver"`` where the solver ended
+  the search itself. A chunk answered from a cached response is ``"reused"`` (see
+  `Replan records`_).
 
 Limit endings are inferred from the solver's counters. An unfinished search near
-both limits is reported conservatively as ``wall clock``, so a possible
+both limits is reported conservatively as ``"wall clock"``, so a possible
 load-dependent stop is not labelled deterministic. A completed optimality or
 infeasibility proof keeps its solver-proven ending even near the limits.
 
@@ -1734,18 +1752,18 @@ search record.
 
 A chunk model that CP-SAT finds invalid is one the scheduler built wrong. It is a
 different case from a search that ran out of time, and the scheduler does not fall
-back to the priority-first plan for it: it raises a ``ValueError`` naming the model's
+back to the incumbent for it: it raises a ``ValueError`` naming the model's
 fault.
 
 Limitations of the CP-SAT scheduler
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Chunks are solved one after another. A chunk cannot borrow time or
-exposure the priority-first plan uses later, so improvements that would need to
+exposure the incumbent uses later, so improvements that would need to
 rearrange several chunks at once are left to local search. The model's slews are
 approximate; the exact decoding corrects them but can drop or shorten a snapshot the
 solver chose. With very short limits (well under a second per chunk) the solver may
-find nothing, and the plan is the priority-first one.
+find nothing, and the plan is the one the scheduler started from.
 
 The notebook ``examples/CP_SAT_Scheduler_Example.ipynb`` compares CP-SAT with local
 search on a one-day plan, chunk by chunk, as the planning time grows, and in

@@ -1,8 +1,7 @@
-conops.simulation.acs\_command
-==============================
+conops.simulation.acs_command
+=============================
 
 .. automodule:: conops.simulation.acs_command
-   :members: ACSCommand
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

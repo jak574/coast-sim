@@ -1,9 +1,7 @@
-conops.schedulers.cpsat\_scheduler
-==================================
+conops.schedulers.cpsat_scheduler
+=================================
 
 .. automodule:: conops.schedulers.cpsat_scheduler
-   :members: CpSatScheduler
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

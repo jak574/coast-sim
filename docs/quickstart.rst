@@ -84,7 +84,7 @@ SQLite file as they are logged and lets you query them later by run:
    # Later, query events by run
    events = store.fetch_events("my-run-001", event_type="PASS")
 
-     store.close()
+   store.close()
 
 Configuration-Based Approach
 ----------------------------
@@ -134,7 +134,7 @@ a JSON configuration file that defines spacecraft parameters:
            ]
        },
        "payload": {
-           "payload": [
+           "instruments": [
                {
                    "name": "Telescope Camera",
                    "power_draw": {
@@ -259,7 +259,7 @@ These can then be added to MissionConfig:
    from conops.config import MissionConfig, Constraint
 
    config = MissionConfig()
-   config.constraints = Constraint(
+   config.constraint = Constraint(
        sun_constraint=sun_constraint,
        moon_constraint=moon_constraint
    )
@@ -274,7 +274,7 @@ Sun only when it is daytime:
    from rust_ephem import SunConstraint, MoonConstraint, EclipseConstraint
 
    config = MissionConfig()
-   config.constraints = Constraint(
+   config.constraint = Constraint(
        sun_constraint=SunConstraint(min_angle=45.0) & ~EclipseConstraint(),
        moon_constraint=MoonConstraint(min_angle=30.0)
    )
@@ -291,7 +291,7 @@ COASTSim is organized into several key modules:
 * `conops.config`: Configuration classes for spacecraft components (battery, solar panels, instruments, etc.)
 * `conops.targets`: Target management classes (Pointing, Queue, Plan, PlanEntry)
 * `conops.schedulers`: Schedulers (PriorityScheduler, SequentialScheduler, QueueScheduler)
-* `conops.simulation`: Core simulation components (ACS, DITL classes, constraints, etc.)
+* `conops.simulation`: Core simulation components (ACS, slews, ground station passes, SAA, emergency charging, etc.)
 * `conops.ditl`: Day-In-The-Life simulation classes (DITL, DITLMixin, QueueDITL, RollingHorizonDITL) and ``create_ditl``
 * `conops.visualization`: Visualization utilities for plotting results (sky pointing, timelines, etc.)
 

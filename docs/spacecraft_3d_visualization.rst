@@ -246,9 +246,11 @@ placement:
    between the face and the component is component-specific; for example, it
    is 20 mm for solar panels and 5 mm for radiators.
 
-Solar panel size is estimated from ``max_power`` assuming 150 W/m² (solar
-constant × typical conversion efficiency).  Radiator size comes directly from
-``width_m`` and ``height_m``.
+Solar panel area is estimated as ``max_power / (150 × conversion_efficiency)``
+in square metres, where ``conversion_efficiency`` is the value set on the
+``solar_panel`` set (0.95 by default).  The panel is drawn with a
+width-to-height ratio of 1.6 and is at least 0.8 m wide and 0.5 m high.
+Radiator size comes directly from ``width_m`` and ``height_m``.
 
 API reference
 -------------

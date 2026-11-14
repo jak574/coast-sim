@@ -68,10 +68,16 @@ category. Each summary gives:
 - the science hours and the slew hours;
 - the degrees slewed into the category's visits;
 - the category's share of the run's science time;
-- the fraction that the category's ``time_share`` allocates, where the category sets one.
+- the fraction that the category's ``time_share`` allocates, where the category sets one;
+- the category's time budget in hours and the fraction of it the run used, where the
+  category sets a budget.
 
 There is one row per configured category, in the order they are configured. A category
-that collected nothing is included, with zeros. The printed ``SCIENCE BY CATEGORY`` table
+that collected nothing is included, with zeros. Science on a target whose observation ID
+falls outside every configured category is counted under the default category, whose name
+is the ``default_name`` of the observation categories (``Other`` in the default
+configuration). That category gets a row after the configured ones, and only when it
+collected science. The printed ``SCIENCE BY CATEGORY`` table
 shows the share against the allocation.
 
 ``summary_by_group()``
@@ -161,8 +167,7 @@ two plots, one using each route:
    end = begin + timedelta(days=1)
    ephem = TLEEphemeris(tle="examples/example.tle", begin=begin, end=end)
 
-   ditl = QueueDITL(config=cfg)
-   ditl.ephem = ephem
+   ditl = QueueDITL(config=cfg, ephem=ephem)
    ditl.calc()
 
    fig, axes = plot_ditl_telemetry(ditl)
@@ -179,7 +184,7 @@ The telemetry data is recorded automatically during a DITL simulation and stored
    from conops.ditl import QueueDITL
    from conops.visualization import plot_ditl_telemetry
 
-   ditl = QueueDITL(config=config)
+   ditl = QueueDITL(config=config, ephem=ephemeris)
    ditl.calc()
 
    # Access structured telemetry data

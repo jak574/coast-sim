@@ -1,9 +1,7 @@
-conops.ditl.rolling\_ditl
-=========================
+conops.ditl.rolling_ditl
+========================
 
 .. automodule:: conops.ditl.rolling_ditl
-   :members: RollingHorizonDITL, ReplanRecord, ReplanReason
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

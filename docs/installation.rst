@@ -59,20 +59,22 @@ The ``test`` extra also includes both packages.
 Development Installation
 ------------------------
 
-For development, install with the optional development dependencies and set up
-the pre-commit hooks:
+For development, install with the ``dev`` and ``test`` extras and set up the
+pre-commit hooks:
 
 .. code-block:: bash
 
-   pip install -e ".[dev]"
+   pip install -e ".[dev,test]"
    pre-commit install
 
-This will install additional tools for development:
+The ``dev`` extra installs these tools:
 
 * ruff, for linting and code formatting
-* mypy, for static type checking
-* pytest, the testing framework
+* mypy, for static type checking, with the type stubs it needs
 * pre-commit, which runs Git hooks for code quality
+
+The ``test`` extra installs pytest, the testing framework, with ``pytest-cov``
+and ``pytest-xdist``.
 
 Verifying Installation
 ----------------------
@@ -82,10 +84,12 @@ version:
 
 .. code-block:: python
 
-   import conops
-   print(conops.__version__)
+   from importlib.metadata import version
 
-You can also run the test suite:
+   import conops
+   print(version("coast-sim"))
+
+You can also run the test suite, which needs the ``test`` extra:
 
 .. code-block:: bash
 

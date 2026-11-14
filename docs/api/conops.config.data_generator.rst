@@ -1,8 +1,7 @@
-conops.config.data\_generator
-=============================
+conops.config.data_generator
+============================
 
 .. automodule:: conops.config.data_generator
-   :members: DataGeneration, ScienceData, HousekeepingData
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

@@ -310,14 +310,14 @@ Downlink Operations
 -------------------
 
 Data is downlinked automatically during ground station passes. The downlink rate
-is configured in the ground station's antenna parameters.
+is configured in the ground station's band capabilities.
 
 Ground Station Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
-   from conops.config import GroundStation, Antenna, GroundStationRegistry
+   from conops.config import BandCapability, GroundStation, GroundStationRegistry
 
    # Configure station with X-band downlink at 100 Mbps
    station = GroundStation(
@@ -325,10 +325,9 @@ Ground Station Configuration
        name="Ground Station",
        latitude_deg=35.0,
        longitude_deg=-106.0,
-       antenna=Antenna(
-           bands=["X"],
-           max_data_rate_mbps=100.0  # 100 Mbps = 0.1 Gbps
-       )
+       bands=[
+           BandCapability(band="X", downlink_rate_mbps=100.0)  # 100 Mbps = 0.1 Gbps
+       ]
    )
 
    registry = GroundStationRegistry(stations=[station])
@@ -370,7 +369,7 @@ same whatever the step size.
 Ground Station Pass Plan Entries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Starting with version 0.2.0, :class:`~conops.ditl.queue_ditl.QueueDITL` automatically
+Starting with version 0.6.0, :class:`~conops.ditl.queue_ditl.QueueDITL` automatically
 creates ``GSP`` (Ground Station Pass) entries for passes that require spacecraft
 tracking. These activities appear alongside science observations in the exported
 plan. Booked passes that require no spacecraft tracking are not given entries. They are
@@ -410,6 +409,7 @@ Example
 .. code-block:: python
 
    from conops import QueueDITL
+   from conops.common import ObsType
 
    ditl = QueueDITL(config=config, ephem=ephem, queue=queue)
    ditl.calc()
@@ -419,6 +419,8 @@ Example
        if entry.obstype == ObsType.GSP:
            downlink_time = entry.contact_end - entry.contact_begin
            rate = config.ground_stations.get(entry.station).get_overall_max_downlink()
+           if rate is None:
+               continue  # The station has no bands configured
            volume = rate * downlink_time / 1000.0  # Convert to Gb
            print(f"{entry.station}: {downlink_time}s at {rate} Mbps = {volume:.1f} Gb")
 
@@ -458,11 +460,19 @@ object:
 
 .. code-block:: python
 
-   from conops.ditl import QueueDITL
-   from conops import MissionConfig
+   from datetime import datetime, timezone
+
+   from rust_ephem import TLEEphemeris
+
+   from conops import MissionConfig, QueueDITL
+
+   # A simulation needs an ephemeris, passed in or set on config.constraint.ephem
+   begin = datetime(2025, 12, 1, tzinfo=timezone.utc)
+   end = datetime(2025, 12, 2, tzinfo=timezone.utc)
+   ephem = TLEEphemeris(tle="examples/example.tle", begin=begin, end=end, step_size=60)
 
    config = MissionConfig()
-   ditl = QueueDITL(config=config)
+   ditl = QueueDITL(config=config, ephem=ephem)
    ditl.calc()
 
    # Access data management telemetry through structured telemetry system
@@ -486,8 +496,8 @@ form of access is still supported:
    recorder_volume = ditl.recorder_volume_gb
    fill_fraction = ditl.recorder_fill_fraction
    alert_level = ditl.recorder_alert
-   data_generated = ditl.data_generated_gb
-   data_downlinked = ditl.data_downlinked_gb
+   data_generated = ditl.data_generated_gb    # Running total at each timestep
+   data_downlinked = ditl.data_downlinked_gb  # Running total at each timestep
 
 Visualization Example
 ~~~~~~~~~~~~~~~~~~~~~
@@ -607,7 +617,8 @@ Determine the minimum recorder capacity needed for your mission:
        recorder = OnboardRecorder(capacity_gb=capacity)
        config.recorder = recorder
 
-       ditl = DITL(config=config)
+       # `ephem` is the ephemeris and `plan` is the plan to execute
+       ditl = DITL(config=config, ephem=ephem, plan=plan)
        ditl.calc()
 
        max_fill = max(ditl.recorder_fill_fraction)
@@ -624,13 +635,9 @@ Determine how many ground station passes are needed:
 
 .. code-block:: python
 
-   # Track cumulative data
-   cumulative_generated = 0
-   cumulative_downlinked = 0
-
-   for i in range(len(ditl.utime)):
-       cumulative_generated += ditl.data_generated_gb[i]
-       cumulative_downlinked += ditl.data_downlinked_gb[i]
+   # The arrays hold running totals, so the last value is the total for the run
+   cumulative_generated = ditl.data_generated_gb[-1]
+   cumulative_downlinked = ditl.data_downlinked_gb[-1]
 
    print(f"Total data generated: {cumulative_generated:.1f} Gb")
    print(f"Total data downlinked: {cumulative_downlinked:.1f} Gb")
@@ -744,7 +751,8 @@ For detailed API documentation, see:
 * :class:`~conops.config.instrument.DataGeneration`
 * :class:`~conops.config.instrument.Instrument`
 * :class:`~conops.config.instrument.Payload`
-* :class:`~conops.config.groundstation.Antenna`
+* :class:`~conops.config.groundstation.GroundStation`
+* :class:`~conops.config.communications.BandCapability`
 * :class:`~conops.ditl.ditl.DITL`
 * :class:`~conops.ditl.queue_ditl.QueueDITL`
 

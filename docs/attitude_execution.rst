@@ -53,7 +53,10 @@ SAFE mode and solar guidance
 
 Entering SAFE changes the mode immediately, but the repointing that follows
 uses the same handoff policy as any other motion. Charging and SAFE solar
-guidance also request bounded turns. A target that cannot be reached is
+guidance also request bounded turns. Each turn is a rest-to-rest motion
+within the rate and acceleration limits, and a new correction is requested
+only after the previous turn has finished. The guidance target moves with the
+Sun direction, so a target that moves faster than these turns can follow is
 tracked with lag; the attitude is never corrected instantaneously. Queued
 commands take priority over these discretionary guidance corrections.
 
@@ -223,6 +226,12 @@ installed trajectory does not change it.
 
 Conservative searches
 ~~~~~~~~~~~~~~~~~~~~~
+
+Pointing an antenna at a ground station leaves the rotation about the line
+of sight to the station free. The phase search chooses that rotation angle,
+the phase, for a contact from a fixed set of candidates spaced
+``gsp_tracking_phase_step_deg`` apart, keeping those whose attitudes satisfy
+the constraints and the motion limits.
 
 The phase search and interval certificates are conservative and are not
 globally optimal. Failure to find or certify a feasible curve does not prove

@@ -1,8 +1,7 @@
-conops.config.spacecraft\_bus
-=============================
+conops.config.spacecraft_bus
+============================
 
 .. automodule:: conops.config.spacecraft_bus
-   :members: SpacecraftBus
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:
