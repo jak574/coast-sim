@@ -1,7 +1,9 @@
 Contributing
 ============
 
-Contributions to COASTSim are welcome! This guide will help you get started.
+Contributions to COASTSim are welcome. This page explains how to set up a
+development environment, what checks a change has to pass, and how to submit
+it.
 
 Development Setup
 -----------------
@@ -29,12 +31,13 @@ Development Setup
 Code Quality Standards
 ----------------------
 
-This project uses several tools to maintain code quality:
+This project uses the following tools to maintain code quality. The
+pre-commit hooks run most of them for you, and each can also be run by hand.
 
 Ruff
 ~~~~
 
-For linting and code formatting:
+Ruff does the linting and code formatting:
 
 .. code-block:: bash
 
@@ -44,7 +47,7 @@ For linting and code formatting:
 Mypy
 ~~~~
 
-For static type checking:
+Mypy does the static type checking:
 
 .. code-block:: bash
 
@@ -53,7 +56,7 @@ For static type checking:
 Pytest
 ~~~~~~
 
-For running tests:
+Pytest runs the tests:
 
 .. code-block:: bash
 
@@ -69,7 +72,8 @@ For running tests:
 Pre-commit
 ~~~~~~~~~~
 
-Pre-commit hooks automatically run before each commit:
+The pre-commit hooks run automatically before each commit. They do the
+following:
 
 * Code formatting with ruff
 * Linting checks
@@ -201,7 +205,7 @@ When reporting issues:
 Feature Requests
 ----------------
 
-Feature requests are welcome! Please:
+Feature requests are welcome. When you make one:
 
 * Check if the feature already exists or is planned
 * Clearly describe the use case
@@ -235,5 +239,4 @@ licensed under the same license as the project.
 Thank You!
 ----------
 
-Thank you for contributing to COASTSim! Your contributions help make
-this project better for everyone.
+Thank you for contributing to COASTSim.

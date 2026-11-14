@@ -1,8 +1,9 @@
 Examples
 ========
 
-COASTSim includes comprehensive example Jupyter notebooks in the ``examples/`` directory
-that demonstrate various features and workflows.
+COASTSim includes example Jupyter notebooks in the ``examples/`` directory. Each notebook
+works through one feature or workflow from start to finish. This page lists the notebooks,
+explains how to run them, and then describes common uses of the package.
 
 Example Notebooks
 -----------------
@@ -12,7 +13,8 @@ Example Spacecraft DITL
 
 **Location**: ``examples/Example_Spacecraft_DITL.ipynb``
 
-This notebook demonstrates a complete spacecraft DITL simulation with:
+This notebook builds a spacecraft configuration in Python and runs a complete DITL
+simulation with it. It covers:
 
 * Custom spacecraft configuration
 * Power modeling (battery and solar panels)
@@ -22,7 +24,7 @@ This notebook demonstrates a complete spacecraft DITL simulation with:
 * South Atlantic Anomaly (SAA) avoidance
 * Timeline visualization and analysis
 
-Key features demonstrated:
+The notebook follows this outline:
 
 .. code-block:: python
 
@@ -51,13 +53,15 @@ Example DITL from JSON
 
 **Location**: ``examples/Example_DITL_from_JSON.ipynb``
 
-This notebook shows a simplified workflow using JSON configuration files:
+This notebook shows a shorter workflow in which the spacecraft is described in a JSON
+configuration file:
 
 * Loading spacecraft configuration from JSON
 * Quick DITL setup and execution
 * Basic analysis and visualization
 
-This approach is ideal for rapid prototyping and testing different configurations:
+Because the configuration lives in a file, this approach suits rapid prototyping and
+testing different configurations:
 
 .. code-block:: python
 
@@ -95,11 +99,12 @@ Dynamic Merit and Targets of Opportunity
 This notebook demonstrates how the queue scheduler chooses its next target, turning on
 each dynamic merit term in turn:
 
-* Urgency, which observes a short-window request that priority order would lose
+* Urgency, which lets the scheduler observe a request with a short window that it
+  would miss if it followed priority order alone
 * Cadence, which revisits monitoring targets on schedule
 * Completion deficit, which keeps programs near their allocated share of time
-* Targets of Opportunity as ordinary short-window requests, including when they
-  interrupt and when they wait
+* Targets of Opportunity, which are submitted as ordinary short-window requests. The
+  notebook shows when one interrupts the current observation and when it waits
 
 See :doc:`configuration` (Dynamic Merit) and :doc:`target_of_opportunity` for reference.
 
@@ -126,8 +131,10 @@ Local Search Planning
 This notebook compares ``LocalSearchScheduler`` with ``PriorityScheduler`` on 100 random
 targets:
 
-* One-day plans from each, executed to check that they run exactly as planned
-* Where the time goes: science, slewing and idle time, and the two timelines
+* A one-day plan from each scheduler. Each plan is executed to check that it runs
+  exactly as planned
+* How each plan divides the day between science, slewing and idle time, with the two
+  timelines side by side
 * Merit-weighted science through the day, and which targets gained or lost time
 * How the result and the planning time grow with the number of changes tried
 * A benchmark of ``RollingHorizonDITL`` runs with each scheduler over several target sets
@@ -139,12 +146,12 @@ CP-SAT Planning
 
 **Location**: ``examples/CP_SAT_Scheduler_Example.ipynb``
 
-This notebook compares ``CpSatScheduler`` with ``LocalSearchScheduler``, with
-``PriorityScheduler`` as the baseline, on 100 random targets (it needs the ``cpsat``
-extra):
+This notebook compares ``CpSatScheduler`` with ``LocalSearchScheduler`` on 100 random
+targets, using ``PriorityScheduler`` as the baseline. It needs the ``cpsat`` extra to
+be installed.
 
-* One-day plans from each, with the same planning time, executed to check that they
-  run exactly as planned
+* A one-day plan from each scheduler, with the same planning time allowed for each.
+  Each plan is executed to check that it runs exactly as planned
 * Science, merit-weighted science, idle time and targets completed
 * The gain in each of CP-SAT's chunks, and through the day
 * Which targets gained or lost time
@@ -158,20 +165,23 @@ Planning Within the Recorder
 
 **Location**: ``examples/Recorder_Constraint_Example.ipynb``
 
-This notebook plans a day for a spacecraft with a 32 Gb recorder, housekeeping data,
-fifty-two faint targets and eight bright ones whose single 20-minute visit is 5 Gb
-each:
+This notebook plans a day for a spacecraft whose recorder is too small for everything
+the scheduler would like to observe. The spacecraft has a 32 Gb recorder and generates
+housekeeping data. Its target list holds fifty-two faint targets and eight bright ones.
+Each bright target has a single 20-minute visit that produces 5 Gb.
 
-* One-day plans with and without the recorder's planning limit, executed to show the
-  recorder staying within the limit in one, with the bright visits rationed around
-  the contacts, and filling, losing data and safing the spacecraft in the other
-* The scheduler's ledger: what each contact downlinks and the recorder's peak before
-  the next one
-* Which targets are observed under the limit, how local search fills the time the
-  recorder left idle, trading on merit-weighted science within the limit, and how
-  CP-SAT does the same with the recorder in its model
-* Keeping margin with a lower ``planning_limit``, and rolling-horizon replans that
-  start from the recorder's actual volume
+* Two one-day plans, one made with the recorder's planning limit and one without it.
+  Both are executed. With the limit, the recorder stays within it and the bright
+  visits are rationed around the ground contacts. Without the limit, the recorder
+  fills, data is lost and the spacecraft enters safe mode
+* The scheduler's ledger, which lists what each contact downlinks and the recorder's
+  peak volume before the next contact
+* Which targets are observed under the limit
+* How local search fills the time the recorder left idle. It trades observations on
+  merit-weighted science while staying within the limit
+* How CP-SAT does the same with the recorder included in its model
+* How a lower ``planning_limit`` keeps margin
+* Rolling-horizon replans that start from the recorder's actual volume
 
 See :doc:`planning` (Planning within the recorder) and :doc:`data_management` for
 reference.
@@ -181,19 +191,23 @@ Planning Within the Battery
 
 **Location**: ``examples/Battery_Constraint_Example.ipynb``
 
-This notebook plans a day for a space telescope with a side-mounted array, which
-generates while observing in sunlight, and a battery that cannot carry a whole
-eclipse of observing:
+This notebook plans a day for a space telescope whose battery limits how much it can
+observe in eclipse. The telescope has a side-mounted solar array, which generates
+power while the telescope observes in sunlight. Its battery cannot supply a whole
+eclipse of observing.
 
-* One-day plans with and without the battery's planning level, executed to show the
-  battery dipping to the level through each eclipse and no further in one, and run
-  past its discharge limit in every eclipse in the other
-* The scheduler's ledger: the lowest level in each orbit, what the charges in the
-  idle sunlit time put back, and which science waited for charge
-* Local search trading snapshots on merit within the same level, and CP-SAT with
-  the battery in its model, trading eclipse science on energy directly
-* Keeping margin with a higher ``planning_level``, and rolling-horizon replans that
-  start from the battery's actual charge
+* Two one-day plans, one made with the battery's planning level and one without it.
+  Both are executed. With the planning level, the battery dips to that level through
+  each eclipse and no further. Without it, the battery is run past its discharge
+  limit in every eclipse
+* The scheduler's ledger, which lists the lowest battery level in each orbit, the
+  energy that charging in the idle sunlit time puts back, and the science that
+  waited for charge
+* Local search trading snapshots on merit while keeping to the same level
+* CP-SAT with the battery included in its model, which trades eclipse science on
+  energy directly
+* How a higher ``planning_level`` keeps margin
+* Rolling-horizon replans that start from the battery's actual charge
 
 See :doc:`planning` (Planning within the battery) for reference.
 
@@ -202,17 +216,20 @@ Stored Momentum from the Environment
 
 **Location**: ``examples/Momentum_Tracking_Example.ipynb``
 
-This notebook tracks the momentum a spacecraft's wheels store from the torques the
-environment applies, gravity gradient and solar radiation pressure, over a day:
+The environment applies small torques to a spacecraft, and the reaction wheels store
+the momentum those torques build up. This notebook tracks that stored momentum over
+a day for two torque sources, gravity gradient and solar radiation pressure:
 
-* The surfaces sunlight acts on: the placeholder model built from the bus, the
-  array and the aperture, and how a mission's mass properties replace it
-* A day of dispatch, with the stored momentum and each source's share of it from
-  the telemetry, and the eclipses where sunlight contributes nothing
-* The same day holding one attitude, where both torques are secular, against the
-  varied schedule that averages them
-* The tracker run on its own with sunlight alone, showing how the centre of mass
-  sets sunlight's share
+* The surfaces that sunlight acts on. The notebook starts from the placeholder model,
+  which is built from the bus, the array and the aperture, and shows how a mission's
+  mass properties replace it
+* A day of dispatch. The telemetry gives the stored momentum and each source's share
+  of it, and shows the eclipses, where sunlight contributes nothing
+* The same day spent holding one attitude, compared with the varied schedule. At a
+  fixed attitude both torques are secular, so the momentum keeps growing, while the
+  varied schedule averages the torques
+* The tracker run on its own with sunlight as the only source, which shows how the
+  centre of mass sets sunlight's share
 
 See :doc:`configuration` (Stored momentum) and :doc:`telemetry` for reference.
 
@@ -221,7 +238,7 @@ Example Configuration
 
 **Location**: ``examples/example_config.json``
 
-A complete JSON configuration file showing all available parameters:
+This is a complete JSON configuration file that shows all available parameters:
 
 * Spacecraft bus configuration
 * Solar panel specifications
@@ -236,7 +253,7 @@ Example TLE File
 
 **Location**: ``examples/example.tle``
 
-Sample Two-Line Element (TLE) file for orbit propagation testing.
+This is a sample Two-Line Element (TLE) file for testing orbit propagation.
 
 Running the Examples
 --------------------
@@ -253,6 +270,9 @@ Then open any of the ``.ipynb`` files in your browser.
 Common Use Cases
 ----------------
 
+The sections below describe the kinds of study COASTSim is typically used for and
+list what you can examine in each.
+
 Mission Planning
 ~~~~~~~~~~~~~~~~
 
@@ -266,7 +286,7 @@ Use COASTSim to evaluate operational scenarios before launch:
 Performance Analysis
 ~~~~~~~~~~~~~~~~~~~~
 
-Assess spacecraft performance:
+Assess how the spacecraft performs over a simulated period:
 
 * Power generation vs. consumption analysis
 * Thermal constraints during different operational modes
@@ -276,7 +296,7 @@ Assess spacecraft performance:
 Constraint Validation
 ~~~~~~~~~~~~~~~~~~~~~
 
-Verify observational constraints are satisfied:
+Verify that the observing constraints are satisfied:
 
 * Sun angle avoidance
 * Moon exclusion zones
@@ -384,18 +404,21 @@ Configure and simulate onboard data storage, generation, and downlink:
    plt.tight_layout()
    plt.show()
 
-Key features:
+The example uses the following data management behaviour:
 
-* **Rate-based generation**: Instruments generate data continuously at specified Gbps
-* **Per-observation generation**: Instruments generate fixed data amount per observation
-* **Recorder management**: Automatic capacity limiting and alert thresholds
-* **Downlink simulation**: Data automatically downlinked during ground station passes
-* **Alert integration**: Recorder fill level monitored by fault management system
+* An instrument with rate-based generation produces data continuously at the specified
+  rate in Gbps.
+* An instrument with per-observation generation produces a fixed amount of data for
+  each observation.
+* The recorder limits the stored volume to its capacity automatically and applies its
+  alert thresholds.
+* Data is downlinked automatically during ground station passes.
+* The fault management system monitors the recorder fill level.
 
 Creating Your Own Examples
 ---------------------------
 
-When creating your own simulations:
+To build your own simulation, follow these steps:
 
 1. Start with the example configuration as a template
 2. Modify spacecraft parameters to match your mission

@@ -2,16 +2,17 @@ Visualization
 =============
 
 COASTSim includes plotting utilities for DITL simulation outputs and telemetry data.
-The visualization system works with COASTSim's structured telemetry system, providing
-comprehensive plotting capabilities for analyzing simulation results.
-These plotting functions are implemented under `conops.visualization` and accept
-an optional `config` parameter. When omitted, the functions use `ditl.config.visualization`
-if available, or sensible defaults from the `VisualizationConfig` model.
+They read the structured telemetry that a simulation records as it runs.
+
+The plotting functions are implemented under `conops.visualization`. Each one accepts
+an optional `config` parameter. When it is omitted, the function uses
+`ditl.config.visualization` if that is available, and otherwise the defaults of the
+`VisualizationConfig` model.
 
 VisualizationConfig
 -------------------
 
-The `VisualizationConfig` model lives in `conops.config.visualization` and exposes the
+The `VisualizationConfig` model lives in `conops.config.visualization`. It holds the
 configuration for fonts, colors, and timeline options.
 
 Important fields:
@@ -28,34 +29,118 @@ Key plotting utilities
 
 The following plotting functions are available under `conops.visualization`:
 
-- `plot_ditl_telemetry()` — basic multi-panel timeline showing RA/Dec, ACS mode, battery,
+- `plot_ditl_telemetry()` draws a basic multi-panel timeline of RA/Dec, ACS mode, battery,
   power, and observation IDs from telemetry data.
-- `plot_data_management_telemetry()` — recorder volume, fill fraction, generated/downlinked data, and alerts from telemetry data.
-- `plot_acs_mode_distribution()` — pie chart showing the distribution of time spent in each ACS mode from telemetry data.
-- `plot_ditl_timeline()` — timeline with orbit numbers, observations, slews, scheduled activities (thruster momentum dumps on their own, as ``Momentum Dump``), SAA, and eclipses; a sequence visit's steps are hatched over their observation and an antenna repoint during an observation is marked where it happens.
-- `plot_sky_pointing()` — an interactive Mollweide sky projection with current pointing and constraints.
-- `save_sky_pointing_movie()` — export the entire DITL sky pointing visualization as a movie (MP4, AVI, or GIF).
-- `plot_spacecraft_3d()` — rotatable 3-D spacecraft model built directly from a ``MissionConfig`` (no simulation required).
+- `plot_data_management_telemetry()` plots recorder volume, fill fraction, generated and
+  downlinked data, and alerts from telemetry data.
+- `plot_acs_mode_distribution()` draws a pie chart of the time spent in each ACS mode,
+  from telemetry data.
+- `plot_ditl_timeline()` draws a timeline with orbit numbers, observations, slews, scheduled
+  activities, SAA, and eclipses. Thruster momentum dumps are drawn separately from the
+  other scheduled activities and labelled ``Momentum Dump``. The steps of a sequence visit
+  are hatched over their observation. An antenna repoint during an observation is marked
+  at the time it happens.
+- `plot_sky_pointing()` draws an interactive Mollweide sky projection with the current
+  pointing and constraints.
+- `save_sky_pointing_movie()` exports the entire DITL sky pointing visualization as a movie
+  (MP4, AVI, or GIF).
+- `plot_spacecraft_3d()` draws a rotatable 3-D spacecraft model built directly from a
+  ``MissionConfig``. It does not need a simulation.
   See :doc:`spacecraft_3d_visualization` for full details.
 
 Reporting
 ---------
 
-A finished simulation reports on itself through its statistics, printed by ``print_statistics()`` and available as data:
+A finished simulation can also report on itself in numbers. ``print_statistics()`` prints
+its statistics as a set of tables, and the methods below return the same statistics as
+data. Each method corresponds to one of the printed tables.
 
-- ``summary_by_category()`` — one :class:`~conops.ditl.ditl_stats.CategorySummary` per observation category that collected science: the program, the targets observed, the visits taken (a snapshot, or one visit of a sequence, each), the science and slew hours, the degrees slewed into its visits, its share of the run's science time, and the fraction the category's ``time_share`` allocates where it sets one. There is one row per configured category, in their order, a category that collected nothing included with zeros. The printed ``SCIENCE BY CATEGORY`` table shows the share against the allocation.
-- ``summary_by_group()`` — one :class:`~conops.ditl.ditl_stats.GroupSummary` per observation group (see :doc:`configuration`, Observation groups), in the configuration's order: its targets, those observed, its visits and science hours, and its time budget with the fraction the run used and its window where it sets them. Empty without groups. The printed ``SCIENCE BY GROUP`` table follows the category table.
-- ``slew_class_summary()`` — one :class:`~conops.simulation.slew_requirements.SlewClassSummary` per slew requirement class of the ACS (see :doc:`configuration`), in the table's order: the slews that fall in it by great-circle angle, the longest of them settled, and how many took longer than the class allows; a last row for slews wider than the widest class. Empty without a table. The printed ``SLEWS BY REQUIREMENT CLASS`` table follows the group table.
-- ``visit_table()`` — one :class:`~conops.ditl.ditl_stats.VisitRecord` per visit: the target, its category, the visit window where the target has windows and when the visit collected within it, the science collected, the slew into it and its roll, and a status of ``complete``, ``cut`` where the visit collected less than planned (less a step), or ``missed`` for a window with no visit. Every attempt is a row, so a visit cut short and taken again within its window is two; ``per_window=True`` gives one row per window, its verdict, with the attempts the visit took. The run's own requests give the windows; pass ``targets`` to use another set. The printed ``VISITS IN WINDOWS`` table lists the verdict per window for targets with windows.
-- ``instrument_mode_hours()`` — hours each instrument with modes spent in each mode, printed as ``INSTRUMENT MODE HOURS``.
+``summary_by_category()``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This method returns one :class:`~conops.ditl.ditl_stats.CategorySummary` per observation
+category. Each summary gives:
+
+- the category's program;
+- the number of targets observed;
+- the number of visits taken, where a snapshot counts as one visit and each visit of a
+  sequence counts as one;
+- the science hours and the slew hours;
+- the degrees slewed into the category's visits;
+- the category's share of the run's science time;
+- the fraction that the category's ``time_share`` allocates, where the category sets one.
+
+There is one row per configured category, in the order they are configured. A category
+that collected nothing is included, with zeros. The printed ``SCIENCE BY CATEGORY`` table
+shows the share against the allocation.
+
+``summary_by_group()``
+~~~~~~~~~~~~~~~~~~~~~~
+
+This method returns one :class:`~conops.ditl.ditl_stats.GroupSummary` per observation
+group, in the configuration's order (see :doc:`configuration`, Observation groups). Each
+summary gives:
+
+- the number of targets in the group, and how many of those were observed;
+- the group's visits and science hours;
+- the group's time budget and the fraction of it the run used, where the group sets a
+  budget;
+- the group's window, where the group sets one.
+
+The list is empty when no groups are configured. The printed ``SCIENCE BY GROUP`` table
+follows the category table.
+
+``slew_class_summary()``
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ACS configuration can hold a table of slew requirement classes (see
+:doc:`configuration`). This method returns one
+:class:`~conops.simulation.slew_requirements.SlewClassSummary` per class, in the table's
+order. Each summary gives:
+
+- the number of slews that fall in the class, judged by great-circle angle;
+- the duration of the longest of those slews, including its settling;
+- how many of them took longer than the class allows.
+
+A last row covers slews wider than the widest class. The list is empty when no table is
+configured. The printed ``SLEWS BY REQUIREMENT CLASS`` table follows the group table.
+
+``visit_table()``
+~~~~~~~~~~~~~~~~~
+
+This method returns one :class:`~conops.ditl.ditl_stats.VisitRecord` per visit. Each
+record gives:
+
+- the target and its category;
+- the visit window, where the target has windows, and when the visit collected within it;
+- the science collected;
+- the slew into the visit and its roll;
+- a status.
+
+The status is ``complete``, ``cut`` or ``missed``. A visit is ``cut`` when it collected
+less than planned, after allowing one step. A ``missed`` row stands for a window with no
+visit.
+
+Every attempt is a row. A visit that was cut short and taken again within its window
+therefore appears as two rows. Pass ``per_window=True`` to get one row per window instead.
+That row carries the verdict for the window and the number of attempts the visit took.
+
+The windows come from the run's own requests. Pass ``targets`` to use another set. The
+printed ``VISITS IN WINDOWS`` table lists the verdict per window for targets with windows.
+
+``instrument_mode_hours()``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This method returns the hours that each instrument with modes spent in each mode. The
+same figures are printed as ``INSTRUMENT MODE HOURS``.
 
 Examples and advanced usage
 ---------------------------
 
-The visualization functions accept an optional `config` parameter or get the
-configuration from `ditl.config.visualization` if available.
-
-Example:
+As described above, the visualization functions take their configuration from the
+optional `config` parameter, or from `ditl.config.visualization` if that is available.
+The example below sets a few style options on the mission configuration and then draws
+two plots, one using each route:
 
 .. code-block:: python
 
@@ -86,8 +171,8 @@ Example:
 Working with Telemetry Data
 ----------------------------
 
-All timeline and telemetry visualizations work with COASTSim's structured telemetry system.
-The telemetry data is automatically recorded during DITL simulation and stored in ``ditl.telemetry``.
+All timeline and telemetry visualizations read COASTSim's structured telemetry.
+The telemetry data is recorded automatically during a DITL simulation and stored in ``ditl.telemetry``.
 
 .. code-block:: python
 
@@ -118,9 +203,9 @@ For batch processing across many runs, persist logs with ``DITLLogStore`` and lo
 Fonts and fallbacks
 -------------------
 
-Matplotlib will fall back if a requested font family is not installed on the system.
-To guarantee a specific font across platforms, provide a `FontProperties` object
-with a path to the font file. Alternatively, ensure the font is installed on your system.
+If a requested font family is not installed on the system, Matplotlib falls back to
+another font. To guarantee a specific font across platforms, provide a `FontProperties`
+object with a path to the font file. Alternatively, ensure the font is installed on your system.
 
 .. code-block:: python
 

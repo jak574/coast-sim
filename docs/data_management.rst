@@ -1,8 +1,8 @@
 Data Management
 ===============
 
-COASTSim provides comprehensive data management capabilities for simulating onboard data storage,
-generation, and downlink operations. This system allows mission planners to evaluate:
+COASTSim simulates how a spacecraft generates data, stores it on board, and downlinks it to
+the ground. Mission planners can use this to evaluate:
 
 * Data recorder sizing requirements
 * Downlink pass frequency and duration needs
@@ -13,15 +13,17 @@ generation, and downlink operations. This system allows mission planners to eval
 Overview
 --------
 
-The data management system consists of three main components:
+The data management system has three parts, each described in its own section below:
 
-1. **OnboardRecorder**: Simulates the spacecraft's solid-state recorder (SSR) or data storage device
-2. **DataGeneration**: Models how the bus and each instrument produce data, and how targets change it
-3. **Downlink Operations**: Simulates data transfer during scheduled ground-station
-   passes (see :doc:`communications`)
+1. `OnboardRecorder`_ simulates the spacecraft's solid-state recorder (SSR) or other data
+   storage device.
+2. `DataGeneration`_ models how the bus and each instrument produce data, and how the
+   observed target changes the amount.
+3. `Downlink Operations`_ simulates the transfer of data to the ground during scheduled
+   ground-station passes (see :doc:`communications`).
 
-These components work together seamlessly in DITL simulations to track data flow throughout
-the spacecraft's operations.
+A DITL simulation uses all three together to track the flow of data throughout the
+spacecraft's operations.
 
 OnboardRecorder
 ---------------
@@ -48,10 +50,11 @@ Configuration
 Key Features
 ~~~~~~~~~~~~
 
-**Capacity Management**
+Capacity Management
+^^^^^^^^^^^^^^^^^^^
 
-The recorder automatically caps data storage at the configured capacity. When the recorder
-is full, additional data generation is lost (simulating data that cannot be stored).
+The recorder never holds more than its configured capacity. Data generated while the
+recorder is full is lost, which simulates data that cannot be stored.
 
 .. code-block:: python
 
@@ -63,13 +66,31 @@ is full, additional data generation is lost (simulating data that cannot be stor
    print(f"Fill fraction: {recorder.get_fill_fraction()}")
    print(f"Available space: {recorder.available_capacity()} Gb")
 
-**Alert System**
+Alert System
+^^^^^^^^^^^^
 
-The recorder provides three alert levels based on fill fraction:
+The recorder reports one of three alert levels, based on its fill fraction:
 
-* **0 (Green)**: Below yellow threshold - normal operations
-* **1 (Yellow)**: At or above yellow threshold - warning state
-* **2 (Red)**: At or above red threshold - critical state
+.. list-table::
+   :header-rows: 1
+   :widths: 15 15 40 30
+
+   * - Level
+     - Color
+     - Fill fraction
+     - Meaning
+   * - 0
+     - Green
+     - Below the yellow threshold
+     - Normal operations
+   * - 1
+     - Yellow
+     - At or above the yellow threshold
+     - Warning state
+   * - 2
+     - Red
+     - At or above the red threshold
+     - Critical state
 
 .. code-block:: python
 
@@ -79,7 +100,8 @@ The recorder provides three alert levels based on fill fraction:
    elif alert_level == 1:
        print("WARNING: Recorder filling up")
 
-**Data Removal**
+Data Removal
+^^^^^^^^^^^^
 
 During scheduled ground-station passes, data is removed from the recorder to
 simulate downlink:
@@ -93,27 +115,47 @@ simulate downlink:
 DataGeneration
 --------------
 
-Data comes in two kinds, and what drives each is different:
+COASTSim models two kinds of data. They are configured separately because different things
+determine how much of each is generated.
 
-* **Science data** depends on *what is observed*, and is generated only while
-  observing it: :class:`~conops.config.ScienceData` is ``rate_gbps`` for every
-  second collected, and ``per_observation_gb``, a fixed amount each observation
-  generates whatever its length, such as a frame readout or headers. An instrument
-  sets what it generates by default, and a target can set its own for each
-  instrument (below).
-* **Housekeeping data** depends on *what the spacecraft is doing*, and never stops:
-  :class:`~conops.config.HousekeepingData` is ``rate_gbps`` at all times, the
-  engineering telemetry (temperatures, voltages, attitude, status) generated
-  whatever is observed. ``rate_mode`` sets a different rate in particular ACS modes,
-  given by name or number, the way :class:`~conops.config.PowerDraw` sets power by
-  mode. Dispatch reserves the time it waits between observations at the highest of
-  the nominal, ``IDLE``, ``CHARGING`` and ``SAA`` rates
-  (:meth:`~conops.config.MissionConfig.housekeeping_while_waiting`), since it can
-  spend that time in any of those modes; see :doc:`planning`.
+Science data
+~~~~~~~~~~~~
+
+Science data depends on *what is observed*, and it is generated only while the spacecraft
+is observing. It is described by :class:`~conops.config.ScienceData`, which has two fields:
+
+* ``rate_gbps`` is the rate at which data is generated for every second of collection.
+* ``per_observation_gb`` is a fixed amount that each observation generates whatever its
+  length, such as a frame readout or headers.
+
+Each instrument sets the science data it generates by default. A target can set its own
+values for each instrument (see `Target Science Data`_ below).
+
+Housekeeping data
+~~~~~~~~~~~~~~~~~
+
+Housekeeping data is the engineering telemetry: temperatures, voltages, attitude and
+status. It depends on *what the spacecraft is doing*. It is generated at all times,
+whatever is being observed. It is described by :class:`~conops.config.HousekeepingData`,
+which has two fields:
+
+* ``rate_gbps`` is the rate that applies at all times.
+* ``rate_mode`` sets a different rate in particular ACS modes. A mode can be given by name
+  or by number. This works in the same way that :class:`~conops.config.PowerDraw` sets
+  power by mode.
+
+The dispatch scheduler also has to allow for the housekeeping data generated while the
+spacecraft waits between observations. The spacecraft can spend that time in any of
+several modes, so dispatch reserves for it at the highest of the nominal, ``IDLE``,
+``CHARGING`` and ``SAA`` rates. This value is given by
+:meth:`~conops.config.MissionConfig.housekeeping_while_waiting`. See :doc:`planning`.
+
+Configuring the bus and the instruments
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The spacecraft bus generates housekeeping data only, so its ``data_generation`` is a
-``HousekeepingData``. An instrument generates both, so its ``data_generation`` is a
-:class:`~conops.config.DataGeneration` with a ``science`` and a ``housekeeping`` part.
+``HousekeepingData``. An instrument generates both kinds, so its ``data_generation`` is a
+:class:`~conops.config.DataGeneration` with a ``science`` part and a ``housekeeping`` part.
 
 .. code-block:: python
 
@@ -158,11 +200,17 @@ The spacecraft bus generates housekeeping data only, so its ``data_generation`` 
        ),
    )
 
-Each part computes its own data with ``data_generated``. Science data is what an
-observation generates having collected for some seconds: its rate for those seconds
-plus its fixed amount. Housekeeping data is the rate for the length of the interval,
-in its ACS mode. An instrument's ``DataGeneration`` adds the two; with only a
-duration, the observation collects for all of it.
+Computing the data generated
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each part computes its own data with a ``data_generated`` method:
+
+* ``ScienceData.data_generated`` takes the number of seconds an observation has collected.
+  It returns the rate multiplied by those seconds, plus the fixed amount.
+* ``HousekeepingData.data_generated`` takes the length of an interval and, optionally, the
+  ACS mode during it. It returns the rate in that mode multiplied by the length.
+* An instrument's ``DataGeneration.data_generated`` adds the two. If it is given only a
+  duration, it assumes the observation collects for the whole of it.
 
 .. code-block:: python
 
@@ -175,11 +223,13 @@ duration, the observation collects for all of it.
    spectrometer.data_generation.science.data_generated(60)   # 5 Gb, whatever the length
    spectrometer.data_generation.data_generated(60)           # 5 + 0.0001 * 60 = 5.006 Gb
 
+The same calculation is available at higher levels.
 :meth:`Payload.data_generated <conops.config.Payload.data_generated>`,
 :meth:`SpacecraftBus.data_generated <conops.config.SpacecraftBus.data_generated>` and
-:meth:`MissionConfig.data_generated <conops.config.MissionConfig.data_generated>` sum
-what their generators produce over an interval, given the ACS mode and the seconds
-collected. ``housekeeping_generated`` and ``science_generated`` give the two parts:
+:meth:`MissionConfig.data_generated <conops.config.MissionConfig.data_generated>` each
+add up what their generators produce over an interval, given the ACS mode and the seconds
+collected. The ``housekeeping_generated`` and ``science_generated`` methods give the two
+parts separately:
 
 .. code-block:: python
 
@@ -192,27 +242,30 @@ collected. ``housekeeping_generated`` and ``science_generated`` give the two par
    # Both: an observation collecting for 45 s of a 60 s interval
    config.data_generated(60, mode=ACSMode.SCIENCE, collection_seconds=45)
 
-For many simulations only the science rate matters, so as a shorthand an instrument's
-science fields may be given directly: ``DataGeneration(rate_gbps=0.5)``, or
-``data_generation: {rate_gbps: 0.5}`` in a file, is its ``science`` part.
+For many simulations only the science rate matters. As a shorthand, an instrument's
+science fields may be given directly to ``DataGeneration``, and they become its ``science``
+part. For example, write ``DataGeneration(rate_gbps=0.5)`` in code, or
+``data_generation: {rate_gbps: 0.5}`` in a configuration file.
 
 Planning within the recorder
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The schedulers plan within ``recorder.planning_limit``, a fraction of the capacity
-that defaults to the red threshold. A plan's science is placed only where the
-recorder, filling with this data and emptying during the reserved contacts, stays
-within the limit at every peak. See :doc:`planning`.
+The schedulers keep the recorder within ``recorder.planning_limit``. This is a fraction
+of the capacity, and it defaults to the red threshold. As a scheduler builds a plan, it
+works out how the recorder fills with the data described above and empties during the
+reserved contacts. It places a science observation only where the recorder stays within the
+limit at every peak. See :doc:`planning`.
 
 Target Science Data
 ~~~~~~~~~~~~~~~~~~~
 
-What an observation generates depends on what is observed: a bright source fills a
-photon-counting detector faster than a faint one. A target's ``science_data`` sets,
-for each instrument by name, the :class:`~conops.config.ScienceData` that instrument
-generates while observing it, replacing the instrument's ``rate_gbps`` and
-``per_observation_gb``. Instruments it does not name generate their own, and
-housekeeping data is unchanged.
+The amount of data an observation generates depends on the target. A bright source, for
+example, fills a photon-counting detector faster than a faint one. To model this, give the
+target a ``science_data`` field. It maps instrument names to the
+:class:`~conops.config.ScienceData` that each instrument generates while observing that
+target. For a named instrument, the target's values replace the instrument's own
+``rate_gbps`` and ``per_observation_gb``. An instrument that the target does not name
+generates its own default science data. Housekeeping data is unchanged.
 
 .. code-block:: python
 
@@ -236,19 +289,27 @@ housekeeping data is unchanged.
    )
 
 Schedulers copy a target's ``science_data`` onto its plan entries, and it is saved
-with the plan. A name that matches no configured instrument is an error when the
-target is created with a configuration.
+with the plan. If a target is created with a configuration and its ``science_data`` uses a
+name that matches no configured instrument, an error is raised.
 
-In a DITL simulation, each step generates housekeeping data for the whole step, in the
-step's ACS mode. For science data it keeps what the observation in progress has
-generated so far, its rate for the seconds it has collected plus its fixed amount, and
-adds the step's increase, so the fixed amount is counted once. A later visit to the
-same target is a new observation.
+Data generation during a simulation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A DITL simulation advances in time steps, and each step adds data to the recorder.
+
+Housekeeping data is generated for the whole step, at the rate for the step's ACS mode.
+
+Science data is handled per observation. The simulation keeps a running total of what the
+observation in progress has generated so far, which is its rate for the seconds it has
+collected plus its fixed amount. Each step adds only the increase in that total. The fixed
+amount is therefore counted once per observation, however many steps the observation
+spans. A later visit to the same target is a new observation and generates the fixed amount
+again.
 
 Downlink Operations
 -------------------
 
-Data downlink occurs automatically during ground station passes. The downlink rate
+Data is downlinked automatically during ground station passes. The downlink rate
 is configured in the ground station's antenna parameters.
 
 Ground Station Configuration
@@ -275,13 +336,15 @@ Ground Station Configuration
 Downlink Calculation
 ~~~~~~~~~~~~~~~~~~~~
 
-During a ground station pass in DITL simulation:
+During a ground station pass, each step of a DITL simulation does the following:
 
-1. The simulation identifies the active pass
-2. Takes the rate the spacecraft gets from the station (:func:`~conops.config.groundstation.effective_downlink_rate_mbps`)
-3. Converts rate to Gbps (divide by 1000)
-4. Calculates data volume: ``rate × seconds in contact`` this step
-5. Removes that amount from the recorder, alongside what the step generates
+1. It identifies the active pass.
+2. It takes the rate the spacecraft gets from the station, which is given by
+   :func:`~conops.config.groundstation.effective_downlink_rate_mbps`.
+3. It converts the rate to Gbps by dividing by 1000.
+4. It calculates the data volume for the step as ``rate × seconds in contact``.
+5. It removes that amount from the recorder, at the same time as it adds what the step
+   generates.
 
 .. code-block:: python
 
@@ -290,15 +353,19 @@ During a ground station pass in DITL simulation:
    time_step = 60  # seconds
    data_downlinked = downlink_rate_gbps * time_step  # 6.0 Gb
 
-Housekeeping data goes on being generated through a contact, and the link carries it
-along with what is already stored, so within a step the two are applied together
-rather than one after the other (:meth:`~conops.config.OnboardRecorder.transfer`):
-the recorder's volume moves at the net rate, it cannot overflow while the link removes
-data faster than it arrives, and data generated while the recorder is empty goes
-straight down the link. A contact that begins or ends partway through a step is
-credited for the seconds in contact only: what is generated before it is stored
-first, and what is generated after it stays on the recorder. The result is the same
-whatever the step size.
+Housekeeping data continues to be generated during a contact, and the link carries it
+along with the data that is already stored. Within a step, the simulation therefore applies
+generation and downlink together, using :meth:`~conops.config.OnboardRecorder.transfer`,
+instead of adding one and then removing the other. This has three consequences:
+
+* The recorder's volume changes at the net rate of generation minus downlink.
+* The recorder cannot overflow while the link removes data faster than it arrives.
+* Data generated while the recorder is empty goes straight down the link.
+
+A contact may begin or end partway through a step. In that case the downlink is credited
+only for the seconds in contact. Data generated before the contact begins is stored first,
+and data generated after it ends stays on the recorder. Because of this, the result is the
+same whatever the step size.
 
 Ground Station Pass Plan Entries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -306,9 +373,11 @@ Ground Station Pass Plan Entries
 Starting with version 0.2.0, :class:`~conops.ditl.queue_ditl.QueueDITL` automatically
 creates ``GSP`` (Ground Station Pass) entries for passes that require spacecraft
 tracking. These activities appear alongside science observations in the exported
-plan. Bookings that require no spacecraft tracking are stored in ``ground_contacts``.
+plan. Booked passes that require no spacecraft tracking are not given entries. They are
+stored in the plan's ``ground_contacts`` field.
 
-**Pass Deconfliction**
+Pass Deconfliction
+^^^^^^^^^^^^^^^^^^
 
 When multiple ground stations are visible simultaneously (overlapping pass windows),
 COASTSim automatically selects the pass with the highest expected data volume:
@@ -318,10 +387,11 @@ COASTSim automatically selects the pass with the highest expected data volume:
    # Selection metric: downlink_rate × pass_duration
    # Prefers: higher data volume > longer pass > earlier start time
 
-Overlapping opportunities that are not selected are logged but not executed, preventing
-accidental "tail contacts" where a second pass starts during an ongoing pass.
+Overlapping opportunities that are not selected are logged but not executed. This
+prevents accidental "tail contacts", where a second pass starts during an ongoing pass.
 
-**Pass Metadata**
+Pass Metadata
+^^^^^^^^^^^^^
 
 Each GSP entry includes:
 
@@ -330,11 +400,12 @@ Each GSP entry includes:
 * ``contact_end``: Actual pass end time
 * ``slewtime``: Time spent slewing to point at the station
 
-The GSP entry's ``begin`` time marks when the spacecraft reserves the pass window
-(potentially including slew preparation), while ``contact_begin`` marks when data
-downlink actually starts.
+The GSP entry's ``begin`` time marks when the spacecraft reserves the pass window, which
+may include slew preparation. The ``contact_begin`` time marks when data downlink actually
+starts.
 
-**Example:**
+Example
+^^^^^^^
 
 .. code-block:: python
 
@@ -382,7 +453,8 @@ Add the recorder to your spacecraft configuration:
 Telemetry Output
 ~~~~~~~~~~~~~~~~
 
-During simulation, DITL automatically records data management telemetry in structured format:
+During a simulation, DITL records data management telemetry in its structured telemetry
+object:
 
 .. code-block:: python
 
@@ -405,7 +477,8 @@ During simulation, DITL automatically records data management telemetry in struc
    data_events = telemetry.data  # List of PayloadData records
    data_sizes = [pd.data_size_gb for pd in data_events]
 
-For backward compatibility, the legacy array access is still available:
+The same quantities are also available as arrays directly on the DITL object. This older
+form of access is still supported:
 
 .. code-block:: python
 
@@ -678,14 +751,27 @@ For detailed API documentation, see:
 Independent computer storage
 ----------------------------
 
-Use ``MissionConfig.data_storage`` when the payload computer and spacecraft
-computer have independent storage. Keep ``recorder`` for existing missions with
-one shared recorder; supplying both models in a configuration is rejected.
-All storage quantities ending in ``_gb`` are **decimal gigabits**, not gigabytes:
-8 TB installed is 64,000 Gbit. Installed hardware capacity and usable recorder
-capacity are separate quantities.
+Some spacecraft keep data on two computers, a payload computer and a spacecraft computer,
+each with its own storage. Use ``MissionConfig.data_storage`` to model this. Each named
+store has its own recorder, its own data sources and its own share of the downlink.
 
-An inventory may contain unresolved hardware inputs::
+Keep using ``recorder`` for existing missions with one shared recorder. A configuration
+that supplies both ``recorder`` and ``data_storage`` is rejected.
+
+Units and capacities
+~~~~~~~~~~~~~~~~~~~~
+
+All storage quantities ending in ``_gb`` are **decimal gigabits**, not gigabytes. For
+example, 8 TB installed is 64,000 Gbit.
+
+Installed hardware capacity and usable recorder capacity are separate quantities. A store's
+``installed_capacity_gb`` is the first, and its recorder's ``capacity_gb`` is the second.
+
+Unresolved inputs
+~~~~~~~~~~~~~~~~~
+
+Hardware details are often not known when a configuration is first written. An inventory
+may therefore leave some inputs unresolved by setting them to ``null``::
 
     data_storage:
       stores:
@@ -705,22 +791,36 @@ An inventory may contain unresolved hardware inputs::
 
 This configuration can be loaded and inspected. Planning and simulation raise
 an error listing the missing inputs. A null recorder never means unlimited
-storage and never inherits the legacy 32-Gbit default. Inspect
-``config.data_storage.unresolved(config)`` before running a campaign.
+storage, and it never takes the 32-Gbit default capacity of the single-recorder
+model. Inspect ``config.data_storage.unresolved(config)`` before running a campaign.
+
 Recorder views are cached during planning and simulation. Constructors revalidate
-the configuration and rebuild those views for a new run. If using
+the configuration and rebuild those views for a new run. If you use
 ``config.recorder_views()`` directly after editing nested configuration, call
 ``config.recorder_views(refresh=True)`` first.
 
-For every store, replace ``recorder: null`` with an ``OnboardRecorder`` definition
-containing explicit, confirmed usable ``capacity_gb`` and initial
-``current_volume_gb``. A named recorder rejects omitted values for these fields.
-Set ``planning_limit`` to the fraction available for planning (for example,
-``0.8`` reserves 20 percent). Usable capacity cannot exceed installed capacity.
-An explicit ``planning_limit: null`` disables that store's planning constraint,
-just as in the single-recorder model; physical simulation still caps its storage.
-Route every instrument's science and housekeeping to a named store. Target-level
-science-rate and fixed-per-observation overrides retain their existing meaning.
+Defining each store
+~~~~~~~~~~~~~~~~~~~
+
+To resolve the storage inputs, do the following:
+
+* For every store, replace ``recorder: null`` with an ``OnboardRecorder`` definition. It
+  must contain an explicit, confirmed usable ``capacity_gb`` and an initial
+  ``current_volume_gb``. A recorder defined in a store is rejected if either field is
+  omitted.
+* Keep the usable capacity within the installed capacity. A usable capacity that exceeds
+  the installed capacity is rejected.
+* Set ``planning_limit`` to the fraction of the capacity available for planning. For
+  example, ``0.8`` reserves 20 percent. An explicit ``planning_limit: null`` disables that
+  store's planning constraint, just as in the single-recorder model. Physical simulation
+  still caps the store's storage.
+* Route every instrument's science and housekeeping to a named store.
+
+Target-level science-rate and fixed-per-observation overrides retain their existing
+meaning (see `Target Science Data`_).
+
+Downlink reservations
+~~~~~~~~~~~~~~~~~~~~~
 
 Configure direct downlink reservations only after confirming the hardware path.
 For example, if a station and the spacecraft both support Ka::
@@ -732,32 +832,60 @@ For example, if a station and the spacecraft both support Ka::
           payload_computer: 0.95
           spacecraft_computer: 0.05
 
-The physical link rate is the smaller of the station and spacecraft rates in
-that band. Shares are positive fractions totaling at most one. They divide
-that rate between stores; each store does not receive a whole link. Reservations
-are fixed, so an empty store's unused bandwidth remains unused. A station has
-one active downlink in this model. ``downlinks: []`` explicitly means no downlink;
-``null`` means the path is unresolved. Stations absent from the list provide no
-data removal, though they may still provide uplink contacts.
+The following rules apply to downlink reservations:
 
-Calibration and activity frame sizes are fixed amounts. Their named instruments
-route them through ``instrument_science``; a calibration step without its own
-modes inherits the observation's instruments. The instruments must identify one
-store for each fixed amount. Use separate entries or budget steps when frames
-belong to different stores. An activity naming no instrument uses the bus store.
+* The physical link rate is the smaller of the station and spacecraft rates in that band.
+* Shares are positive fractions totaling at most one. They divide the physical link rate
+  between the stores. A store does not receive a whole link of its own.
+* Reservations are fixed, so the bandwidth reserved for an empty store remains unused.
+* A station has one active downlink in this model.
+* ``downlinks: []`` explicitly means no downlink, whereas ``null`` means the path is
+  unresolved.
+* Stations absent from the list remove no data, though they may still provide uplink
+  contacts.
 
-Dispatch, priority, local-search and CP-SAT scheduling check every store's own
-planning limit. Rolling replanning carries a mapping of store names to projected
-volumes. The long-range allocator budgets each store's data within its own
-planning limit and its own reserved downlink, starting from the volume on each
-store, and reports each store's budget in ``Allocation.recorders[name]``.
-Spare capacity and contact credit never move between stores. Execution
-uses the same source routing and downlink reservations. Per-store telemetry is
-in ``Housekeeping.recorders[name]``, including ``volume_gb``, ``capacity_gb``,
-``fill_fraction``, ``alert`` and cumulative ``generated_gb``, ``downlinked_gb`` and
-``lost_gb``. Default fault thresholds use ``recorders.<name>.fill_fraction``.
-The legacy scalar volume is a total; scalar fill and alert are the worst store.
-Data-management plots show the independent stores and their limits.
+Calibration and activity frames
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Calibration and activity frame sizes are fixed amounts of data. The store that receives a
+fixed amount is found from the instruments named for it, through ``instrument_science``:
+
+* A calibration step without its own modes inherits the observation's instruments.
+* The instruments must identify one store for each fixed amount. Use separate entries or
+  budget steps when frames belong to different stores.
+* An activity naming no instrument uses the bus store.
+
+Scheduling
+~~~~~~~~~~
+
+The schedulers plan each store separately. Spare capacity and contact credit never
+move between stores.
+
+* Dispatch, priority, local-search and CP-SAT scheduling check every store's own planning
+  limit.
+* Rolling replanning carries a mapping of store names to projected volumes.
+* The long-range allocator budgets each store's data within its own planning limit and its
+  own reserved downlink, starting from the volume on each store. It reports each store's
+  budget in ``Allocation.recorders[name]``.
+
+Execution uses the same source routing and downlink reservations as planning.
+
+Telemetry and fault thresholds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Per-store telemetry is in ``Housekeeping.recorders[name]``. It includes ``volume_gb``,
+``capacity_gb``, ``fill_fraction``, ``alert`` and cumulative ``generated_gb``,
+``downlinked_gb`` and ``lost_gb``.
+
+The scalar recorder telemetry of the single-recorder model is still produced. The scalar
+volume is the total over all stores. The scalar fill fraction and alert are those of the
+worst store.
+
+Default fault thresholds use ``recorders.<name>.fill_fraction``. Data-management plots show
+the independent stores and their limits.
+
+Limits of the model
+~~~~~~~~~~~~~~~~~~~
 
 This is a volume model. It does not model inter-computer staging, file delivery
 acknowledgments, retransmission queues or the age of individual products. If

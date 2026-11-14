@@ -4,10 +4,8 @@ Installation
 Requirements
 ------------
 
-* Python >= 3.10
-* See ``pyproject.toml`` for full dependency list
-
-Key dependencies include:
+COASTSim requires Python >= 3.10. The full dependency list is in
+``pyproject.toml``. The key dependencies are:
 
 * ``rust-ephem`` - Efficient ephemeris calculations
 * ``numpy`` - Numerical computations
@@ -18,7 +16,8 @@ Key dependencies include:
 From Source
 -----------
 
-To install COASTSim from source:
+To install COASTSim from source, clone the repository and install it with
+``pip``:
 
 .. code-block:: bash
 
@@ -29,33 +28,39 @@ To install COASTSim from source:
 Optional: CP-SAT scheduler and long-range allocation
 ----------------------------------------------------
 
-:class:`~conops.schedulers.CpSatScheduler` uses Google's OR-Tools CP-SAT solver, and
-:class:`~conops.schedulers.LongRangeAllocator`'s default ``milp`` solver uses the HiGHS
-solver that comes with OR-Tools. OR-Tools is an optional dependency:
+Two features need Google's OR-Tools package.
+:class:`~conops.schedulers.CpSatScheduler` uses the OR-Tools CP-SAT solver, and
+the default ``milp`` solver of :class:`~conops.schedulers.LongRangeAllocator` uses
+the HiGHS solver that comes with OR-Tools. OR-Tools is an optional dependency,
+installed with the ``cpsat`` extra:
 
 .. code-block:: bash
 
    pip install -e ".[cpsat]"
 
-The ``dev`` and ``test`` extras include it.
+The ``dev`` and ``test`` extras also include OR-Tools.
 
 Optional: atmosphere and geomagnetic field models
 -------------------------------------------------
 
-Stored-momentum tracking (see :doc:`momentum`) has a built-in atmosphere table and a
-tilted-dipole geomagnetic field. NRLMSIS 2.1 through ``pymsis`` and the IGRF through
-``ppigrf`` are optional:
+Stored-momentum tracking (see :doc:`momentum`) needs an atmosphere model and a
+geomagnetic field model. It has a built-in atmosphere table and a built-in
+tilted-dipole geomagnetic field, so it works without extra packages. Two other
+models are optional: the NRLMSIS 2.1 atmosphere, through ``pymsis``, and the IGRF
+geomagnetic field, through ``ppigrf``. The ``momentum`` extra installs both
+packages:
 
 .. code-block:: bash
 
    pip install -e ".[momentum]"
 
-The ``test`` extra includes them.
+The ``test`` extra also includes both packages.
 
 Development Installation
 ------------------------
 
-For development, install with the optional development dependencies:
+For development, install with the optional development dependencies and set up
+the pre-commit hooks:
 
 .. code-block:: bash
 
@@ -64,15 +69,16 @@ For development, install with the optional development dependencies:
 
 This will install additional tools for development:
 
-* **ruff**: Linting and code formatting
-* **mypy**: Static type checking
-* **pytest**: Testing framework
-* **pre-commit**: Git hooks for code quality
+* ruff, for linting and code formatting
+* mypy, for static type checking
+* pytest, the testing framework
+* pre-commit, which runs Git hooks for code quality
 
 Verifying Installation
 ----------------------
 
-To verify that COASTSim is installed correctly:
+To verify that COASTSim is installed correctly, import it and print its
+version:
 
 .. code-block:: python
 

@@ -1,11 +1,13 @@
 Quick Start Guide
 =================
 
-This guide will help you get started with COASTSim quickly.
+This guide walks through a first Day-In-The-Life (DITL) simulation and then
+introduces the parts of COASTSim that the simulation uses. A DITL simulation
+steps a spacecraft through a period of operations and records what it does.
 
----------------------
-
-Here's a simple example of running a Day-In-The-Life (DITL) simulation:
+The example below loads a default configuration, computes an orbit from a TLE
+file, fills the observation queue with random targets, runs the simulation and
+plots the results:
 
 .. code-block:: python
 
@@ -60,8 +62,10 @@ Here's a simple example of running a Day-In-The-Life (DITL) simulation:
 Logging DITL Events
 -------------------
 
-DITL simulations now log structured events internally instead of printing.
-Access the log via ``ditl.log``:
+A DITL simulation does not print what happens during a run. It records
+structured events in a log, which you can read through ``ditl.log``. To keep
+the logs of many runs, attach a ``DITLLogStore``, which saves the events to an
+SQLite file as they are logged and lets you query them later by run:
 
 .. code-block:: python
 
@@ -85,7 +89,8 @@ Access the log via ``ditl.log``:
 Configuration-Based Approach
 ----------------------------
 
-Configure your spacecraft parameters using the ``MissionConfig`` class.
+The spacecraft is described by a ``MissionConfig`` object. You can start from
+the default configuration and change individual parameters:
 
 .. code-block:: python
 
@@ -98,11 +103,10 @@ Configure your spacecraft parameters using the ``MissionConfig`` class.
    config.spacecraft_bus.power_draw.nominal_power = 75.0  # in Watts
    config.solar_panel.panels[0].max_power = 600.0  # in Watts
 
-``MissionConfig`` encapsulates all spacecraft parameters for simulations. You can
-save this to a json file using ``config.to_json_file("filename.json")``.
-
-You can use this output to store your configuration or edit it manually. Here
-is an example of a JSON configuration file defining your spacecraft parameters:
+``MissionConfig`` holds all the spacecraft parameters that a simulation uses.
+You can save it to a JSON file with ``config.to_json_file("filename.json")``,
+either to store your configuration or to edit it by hand. Here is an example of
+a JSON configuration file that defines spacecraft parameters:
 
 .. code-block:: json
 
@@ -142,7 +146,7 @@ is an example of a JSON configuration file defining your spacecraft parameters:
        }
    }
 
-Then load and use it:
+Load the file to get a configuration object back:
 
 .. code-block:: python
 
@@ -156,8 +160,8 @@ Key Components
 Ephemeris
 ~~~~~~~~~
 
-COASTSim relies on the `rust-ephem` library to compute spacecraft orbit, it
-will accept any ephemeris supported by that library. For example, to use TLEs:
+COASTSim relies on the `rust-ephem` library to compute the spacecraft orbit,
+and it accepts any ephemeris that library supports. For example, to use TLEs:
 
 .. code-block:: python
 
@@ -172,10 +176,11 @@ will accept any ephemeris supported by that library. For example, to use TLEs:
 Queue Scheduler
 ~~~~~~~~~~~~~~~
 
-The `QueueDITL` class, which is the most commonly used DITL simulator,
-implements a simple queue-based scheduling algorithm. Targets are scheduled
-prioritized by merit. Targets of equal merit have a randomized order, ensuring
-each simulation run can yield different results, aiding in Monte Carlo analyses.
+The `QueueDITL` class is the most commonly used DITL simulator. It implements a
+simple queue-based scheduling algorithm, in which targets are scheduled in order
+of merit. Targets of equal merit are placed in a random order, so each
+simulation run can yield different results. This helps with Monte Carlo
+analyses.
 
 Here is an example of adding targets to the observation queue:
 
@@ -237,8 +242,8 @@ mode and scheduler does.
 Constraints
 ~~~~~~~~~~~
 
-Spacecraft pointing constraints can be defined using constraint classes from
-the `rust-ephem` library. For example, to create Sun and Moon angle constraints
+Spacecraft pointing constraints are defined with constraint classes from the
+`rust-ephem` library. For example, to create Sun and Moon angle constraints:
 
 .. code-block:: python
 
@@ -259,10 +264,9 @@ These can then be added to MissionConfig:
        moon_constraint=moon_constraint
    )
 
-`rust-ephem` provides us the ability to combine multiple constraints using logical
-operations (AND, OR, NOT) to create complex constraint conditions. For example
-if we only want to avoid pointing close to the Sun when it's daytime, we can
-do:
+`rust-ephem` can combine constraints with logical operations (AND, OR, NOT) to
+express more complex conditions. For example, to avoid pointing close to the
+Sun only when it is daytime:
 
 .. code-block:: python
 
@@ -275,8 +279,8 @@ do:
        moon_constraint=MoonConstraint(min_angle=30.0)
    )
 
-The above ``sun_constraint`` only applies when the spacecraft is not in eclipse
-(i.e. in the Earth's shadow).
+This ``sun_constraint`` applies only when the spacecraft is not in eclipse,
+that is, when it is not in the Earth's shadow.
 
 Module Structure
 ----------------
@@ -303,6 +307,6 @@ All classes are available directly from the ``conops`` package:
 Next Steps
 ----------
 
-* Check out the :doc:`examples` for detailed use cases
-* Explore the :doc:`api/modules` for complete API reference
-* See the ``examples/`` directory for Jupyter notebooks with complete workflows
+* The :doc:`examples` page has detailed use cases.
+* The :doc:`api/modules` page is the complete API reference.
+* The ``examples/`` directory has Jupyter notebooks with complete workflows.

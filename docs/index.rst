@@ -1,12 +1,11 @@
 COASTSim: ConOps Astronomical Space Telescope Simulator
 ========================================================
 
-Welcome to COASTSim's documentation!
-
-COASTSim is a comprehensive Python module for simulating Concept of Operations (ConOps)
-for space telescopes and astronomical spacecraft missions. It enables mission planners
-and engineers to simulate Day-In-The-Life (DITL) scenarios, evaluate spacecraft performance,
-optimize observation schedules, and validate operational constraints before launch.
+COASTSim is a Python module for simulating the Concept of Operations (ConOps)
+of space telescopes and astronomical spacecraft missions. Mission planners and
+engineers can use it to simulate Day-In-The-Life (DITL) scenarios, evaluate
+spacecraft performance, optimize observation schedules, and validate operational
+constraints before launch.
 
 .. toctree::
    :maxdepth: 2
@@ -37,24 +36,37 @@ optimize observation schedules, and validate operational constraints before laun
 Features
 --------
 
-* **Spacecraft Bus Simulation**: Model power systems, attitude control, and thermal management
-* **Orbit Propagation**: TLE-based ephemeris computation and orbit tracking
-* **Observation Planning**: Target queue management and scheduling algorithms
-* **Instrument Modeling**: Multi-instrument configurations with power and pointing requirements
-* **Data Management**: Onboard data storage simulation with generation and downlink modeling
-* **Telemetry System**: Structured telemetry data models for simulation analysis and visualization
-* **Constraint Management**: Sun, Moon, Earth limb, and custom geometric constraints
-* **Fault Management**: Extensible parameter monitoring with yellow/red thresholds and automatic safe mode
-* **Power Budget Analysis**: Solar panel modeling, battery management, and emergency charging scenarios
-* **Ground Station Passes**: Communication window calculations and data downlink planning
-* **Attitude Control System**: Slew modeling, pointing accuracy, and settle time simulation
-* **Star Tracker Support**: Multi-tracker attitude determination with configurable hard/soft constraints and functional-count monitoring
-* **Radiator Thermal Modelling**: Body-mounted radiator geometry, hard keep-out constraints, Sun/Earth exposure-driven net heat-flow metrics, and inter-component panel shadowing
-* **South Atlantic Anomaly (SAA) Avoidance**: Radiation belt constraint handling
-* **DITL Generation**: Comprehensive day-in-the-life timeline simulation
-* **Instantaneous Field of Regard**: Optional computation of accessible sky solid angle at each simulation timestep
-* **Plan Serialisation**: Save and reload observation plans as portable, version-stamped JSON files with optional TLE provenance and executed attitude/orbit-state sidecars
-* **3-D Spacecraft Visualizer**: Interactive rotatable 3-D model of the spacecraft from its MissionConfig — bus, telescope, solar panels, radiators, and star trackers with body-frame axes and normal vectors
+The features are listed below by the part of the simulation they belong to.
+
+The spacecraft and its subsystems:
+
+* The spacecraft bus simulation models power systems, attitude control, and thermal management.
+* Power budget analysis covers solar panel modeling, battery management, and emergency charging scenarios.
+* The attitude control system model simulates slews, pointing accuracy, and settle time.
+* Star tracker support provides multi-tracker attitude determination, with configurable hard/soft constraints and functional-count monitoring.
+* Radiator thermal modelling covers body-mounted radiator geometry, hard keep-out constraints, net heat-flow metrics driven by Sun/Earth exposure, and inter-component panel shadowing.
+* Instrument modeling supports multi-instrument configurations with power and pointing requirements.
+* Data management simulates onboard data storage, with generation and downlink modeling.
+* Fault management provides extensible parameter monitoring with yellow/red thresholds and automatic safe mode.
+
+The orbit and the constraints that follow from it:
+
+* Orbit propagation computes a TLE-based ephemeris and tracks the orbit.
+* Constraint management handles Sun, Moon, Earth limb, and custom geometric constraints.
+* South Atlantic Anomaly (SAA) avoidance handles the radiation belt constraint.
+* Ground station pass modeling calculates communication windows and plans data downlink.
+* The instantaneous field of regard, the accessible sky solid angle, can optionally be computed at each simulation timestep.
+
+Planning and running a simulation:
+
+* Observation planning provides target queue management and scheduling algorithms.
+* DITL generation simulates a day-in-the-life timeline.
+* Plan serialisation saves and reloads observation plans as portable, version-stamped JSON files, with optional TLE provenance and executed attitude/orbit-state sidecars.
+
+Outputs:
+
+* The telemetry system provides structured telemetry data models for simulation analysis and visualization.
+* The 3-D spacecraft visualizer draws an interactive, rotatable 3-D model of the spacecraft from its MissionConfig. The model shows the bus, telescope, solar panels, radiators, and star trackers, with body-frame axes and normal vectors.
 
 Quick Example
 -------------
