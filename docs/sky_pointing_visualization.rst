@@ -1,22 +1,25 @@
 Sky Pointing Visualization
 ==========================
 
-An interactive visualization tool for spacecraft pointing visualization on a mollweide sky projection.
+``plot_sky_pointing()`` is an interactive tool that shows where the spacecraft is
+pointing on a mollweide projection of the whole sky. It needs a DITL simulation
+that has already run.
 
 Features
 --------
 
-* **Interactive Mollweide Projection**: Full-sky view with spacecraft pointing and observations
-* **Scheduled Observations**: All planned targets marked on the sky with color-coding by priority
-* **Constraint Regions**: Shaded areas showing Sun, Moon, Earth, Anti-Sun, and Solar Panel constraints
-* **Current Pointing**: Highlighted marker showing where the spacecraft is currently pointing
-* **Time Controls**:
+The plot is a full-sky Mollweide projection with the following drawn on it:
 
-  * Slider to jump to any time
-  * Previous/Next buttons to step through time
-  * Play button to animate through the entire DITL
+* All planned targets, marked on the sky and color-coded by priority.
+* The constraint regions, as shaded areas for the Sun, Moon, Earth, Anti-Sun, and
+  Solar Panel constraints.
+* A highlighted marker at the direction in which the spacecraft is currently pointing.
 
-* **Frame Export**: Save individual frames for creating animations or presentations
+Time controls let you move through the simulation. A slider jumps to any time,
+Previous and Next buttons step through time, and a Play button animates through
+the entire DITL.
+
+Individual frames can be saved, for creating animations or presentations.
 
 Quick Start
 -----------
@@ -49,6 +52,8 @@ Usage
 Basic Visualization
 ^^^^^^^^^^^^^^^^^^^
 
+With ``show_controls=False`` the function draws a static plot of the first time step.
+
 .. code-block:: python
 
    # Simple static plot at the first time step
@@ -59,6 +64,10 @@ Basic Visualization
 
 Interactive Visualization
 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+With ``show_controls=True`` the plot has the time controls described under
+`Interactive Controls`_. In a Jupyter notebook, select the ``widget`` Matplotlib
+backend first.
 
 .. code-block:: python
 
@@ -76,6 +85,9 @@ Interactive Visualization
 Customization
 ^^^^^^^^^^^^^
 
+The figure size, the resolution of the constraint grid, the time step of the
+controls, and the transparency of the constraint regions can all be set.
+
 .. code-block:: python
 
    fig, ax, controller = plot_sky_pointing(
@@ -88,6 +100,10 @@ Customization
 
 Saving Frames
 ^^^^^^^^^^^^^
+
+``save_sky_pointing_frames()`` writes frames to a directory and returns the list
+of files it saved. The frames can then be assembled into an animation with a
+library such as ``imageio``.
 
 .. code-block:: python
 
@@ -112,56 +128,91 @@ Visualization Elements
 Observation Markers
 ^^^^^^^^^^^^^^^^^^^
 
-Scheduled observations are shown as colored circles:
+Scheduled observations are shown as colored circles. The color and size of a
+circle depend on the target's observation ID (obsid):
 
-* **Red (large)**: TOO/GRB targets (obsid >= 1,000,000)
-* **Orange (medium)**: High priority targets (obsid >= 20,000)
-* **Yellow (medium)**: Survey targets (obsid >= 10,000)
-* **Light Blue (small)**: Standard targets
+.. list-table::
+   :header-rows: 1
+
+   * - Color
+     - Size
+     - Targets
+   * - Red
+     - Large
+     - TOO/GRB targets (obsid >= 1,000,000)
+   * - Orange
+     - Medium
+     - High priority targets (obsid >= 20,000)
+   * - Yellow
+     - Medium
+     - Survey targets (obsid >= 10,000)
+   * - Light Blue
+     - Small
+     - Standard targets
 
 Current Pointing
 ^^^^^^^^^^^^^^^^
 
-* **Red Star**: Current spacecraft pointing direction
-* **Red Circle**: Emphasizes the current pointing region
+A red star marks the current spacecraft pointing direction. A red circle around
+it emphasizes the current pointing region.
 
 Constraint Regions
 ^^^^^^^^^^^^^^^^^^
 
-Color-coded shaded areas showing forbidden pointing regions:
+Shaded areas show the regions where the spacecraft is forbidden to point. Each
+constraint has its own color:
 
-* **Yellow**: Sun constraint zone (too close to Sun)
-* **Gray**: Moon constraint zone (too close to Moon)
-* **Blue**: Earth limb constraint (pointing too close to Earth)
-* **Orange**: Anti-Sun constraint (solar panel limitations)
-* **Green**: Solar panel constraint (power generation limitations)
+.. list-table::
+   :header-rows: 1
+
+   * - Color
+     - Constraint
+     - Reason
+   * - Yellow
+     - Sun constraint zone
+     - Too close to the Sun
+   * - Gray
+     - Moon constraint zone
+     - Too close to the Moon
+   * - Blue
+     - Earth limb constraint
+     - Pointing too close to the Earth
+   * - Orange
+     - Anti-Sun constraint
+     - Solar panel limitations
+   * - Green
+     - Solar panel constraint
+     - Power generation limitations
 
 Celestial Bodies
 ^^^^^^^^^^^^^^^^
 
-Large circular markers show the current position of:
-
-* **Sun** (yellow with black edge)
-* **Moon** (gray with black edge)
-* **Earth** (blue with black edge)
+Large circular markers show the current positions of the Sun (yellow with a
+black edge), the Moon (gray with a black edge) and the Earth (blue with a black
+edge).
 
 Interactive Controls
 --------------------
 
-When ``show_controls=True``:
+When ``show_controls=True``, the figure has four controls:
 
-* **Time Slider**: Drag to jump to any point in the simulation
-* **< Prev Button**: Step backward one time step
-* **Next > Button**: Step forward one time step
-* **Play Button**: Automatically advance through time (becomes "Pause" when playing)
+* The time slider can be dragged to jump to any point in the simulation.
+* The "< Prev" button steps backward one time step.
+* The "Next >" button steps forward one time step.
+* The "Play" button advances through time automatically. Its label becomes "Pause"
+  while the animation is playing.
 
 Performance Tips
 ----------------
 
-1. **Lower n_grid_points** (e.g., 30-50) for faster rendering during exploration
-2. **Increase n_grid_points** (e.g., 100-200) for publication-quality figures
-3. **Use frame_interval > 1** when saving many frames to reduce file count
-4. The constraint calculation is the slowest part; consider caching results for animations
+The constraint calculation is the slowest part of drawing a frame, and its cost
+is set by ``n_grid_points``.
+
+1. Lower ``n_grid_points`` (e.g., 30-50) for faster rendering during exploration.
+2. Increase ``n_grid_points`` (e.g., 100-200) for publication-quality figures.
+3. Use ``frame_interval > 1`` when saving many frames, to reduce the file count.
+4. Consider caching results for animations, so that the constraint calculation
+   is not repeated.
 
 Example Workflows
 -----------------
@@ -203,9 +254,9 @@ Publication Figures
 Movie Export
 ^^^^^^^^^^^^
 
-You can export sky pointing visualizations as animated movies showing how the spacecraft
-pointing and constraints evolve throughout the DITL simulation. The ``save_sky_pointing_movie()``
-function supports multiple output formats:
+``save_sky_pointing_movie()`` exports the sky pointing visualization as an animated
+movie, which shows how the spacecraft pointing and the constraints evolve throughout
+the DITL simulation. The function supports multiple output formats:
 
 .. code-block:: python
 
@@ -228,15 +279,36 @@ function supports multiple output formats:
        fps=5,
        frame_interval=10
    )
+
+The function takes these parameters:
+
+* ``fps`` is the number of frames per second in the output movie. It controls the
+  playback speed.
+* ``frame_interval`` uses every Nth time step. A value of 1 uses all frames.
+* ``n_grid_points`` is the grid resolution for the constraint regions. A lower
+  value renders faster.
+* ``dpi`` is the output resolution. A higher value gives better quality and a
+  larger file.
+* ``codec`` is the video codec for MP4/AVI (e.g., 'h264', 'mpeg4').
+* ``bitrate`` is the video bitrate in kbps. A higher value gives better quality
+  and a larger file.
+* ``show_progress`` chooses whether to display a progress bar using tqdm
+  (default: True).
+
+The output formats have these requirements:
+
+* MP4 and AVI formats require ffmpeg to be installed on your system.
+* GIF format requires the pillow library, which is usually bundled with matplotlib.
+* The progress bar requires the tqdm library. This is optional, and the function
+  falls back gracefully if tqdm is not available.
+
 API Reference
 -------------
 
 plot_sky_pointing()
 ^^^^^^^^^^^^^^^^^^^
 
-Main visualization function.
-
-**Parameters:**
+This is the main visualization function. It takes these parameters:
 
 * ``ditl``: DITL or QueueDITL object (must have run ``calc()`` first)
 * ``figsize``: tuple, figure size (width, height) in inches
@@ -245,7 +317,7 @@ Main visualization function.
 * ``time_step_seconds``: float, time step for controls (default: ditl.step_size)
 * ``constraint_alpha``: float, transparency for constraint regions (default: 0.3)
 
-**Returns:**
+It returns three values:
 
 * ``fig``: matplotlib Figure
 * ``ax``: matplotlib Axes (mollweide projection)
@@ -254,9 +326,7 @@ Main visualization function.
 save_sky_pointing_frames()
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Save individual frames to disk.
-
-**Parameters:**
+This function saves individual frames to disk. It takes these parameters:
 
 * ``ditl``: DITL or QueueDITL object
 * ``output_dir``: str, directory to save frames
@@ -264,64 +334,51 @@ Save individual frames to disk.
 * ``n_grid_points``: int, constraint resolution
 * ``frame_interval``: int, save every Nth frame (default: 1)
 
-**Returns:**
-
-* List of saved file paths
+It returns the list of saved file paths.
 
 Implementation Notes
 --------------------
 
-* Requires a completed DITL simulation with ephemeris data
-* Mollweide projection shows the entire sky with minimal distortion
-* RA runs from 0° to 360° (or -180° to 180° in the projection)
-* Dec runs from -90° (south) to +90° (north)
-* Constraint regions are computed at each timestep based on orbital position
-* For very long simulations, consider using ``frame_interval > 1`` to reduce computation time
+* The visualization requires a completed DITL simulation with ephemeris data.
+* The Mollweide projection shows the entire sky with minimal distortion.
+* RA runs from 0° to 360° (or -180° to 180° in the projection).
+* Dec runs from -90° (south) to +90° (north).
+* Constraint regions are computed at each timestep, based on the orbital position.
+* For very long simulations, consider using ``frame_interval > 1`` to reduce
+  computation time.
 
 Troubleshooting
 ---------------
 
-**ValueError: "DITL simulation has no pointings"**
+ValueError: "DITL simulation has no pointings"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Run ``ditl.calc()`` before calling ``plot_sky_pointing()``
+The simulation has not been run. Run ``ditl.calc()`` before calling
+``plot_sky_pointing()``.
 
-**ValueError: "DITL constraint has no ephemeris set"**
+ValueError: "DITL constraint has no ephemeris set"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Ensure your MissionConfig has ephemeris data loaded
+Ensure your MissionConfig has ephemeris data loaded.
 
-**Slow rendering**
+Slow rendering
+^^^^^^^^^^^^^^
 
-* Reduce ``n_grid_points`` (try 30-50 for exploration)
-* The constraint calculation checks many sky positions; this is expected
+Some slowness is expected, because the constraint calculation checks many sky
+positions. Reduce ``n_grid_points`` to speed it up; try 30-50 for exploration.
 
-**Interactive controls not working in Jupyter**
+Interactive controls not working in Jupyter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* Use ``%matplotlib widget`` or ``%matplotlib notebook``
-* May need to install ``ipympl``: ``pip install ipympl``
+Use ``%matplotlib widget`` or ``%matplotlib notebook``. You may need to install
+``ipympl`` with ``pip install ipympl``.
 
 See Also
 --------
 
-* ``plot_ditl_timeline()``: Timeline view of spacecraft operations
-* ``plot_ditl_telemetry()``: Telemetry plots (power, battery, etc.)
-* Example notebook: ``examples/Example_Sky_Pointing.ipynb``
-
-
-**Parameters:**
-
-* ``fps`` — frames per second in output movie (controls playback speed)
-* ``frame_interval`` — use every Nth time step (1 = use all frames)
-* ``n_grid_points`` — grid resolution for constraint regions (lower = faster rendering)
-* ``dpi`` — output resolution (higher = larger file size, better quality)
-* ``codec`` — video codec for MP4/AVI (e.g., 'h264', 'mpeg4')
-* ``bitrate`` — video bitrate in kbps (higher = better quality, larger file)
-* ``show_progress`` — whether to display a progress bar using tqdm (default: True)
-
-**Requirements:**
-
-* MP4 and AVI formats require ffmpeg to be installed on your system
-* GIF format requires the pillow library (usually bundled with matplotlib)
-* Progress bar requires the tqdm library (optional, will fall back gracefully if not available)
+* ``plot_ditl_timeline()`` gives a timeline view of spacecraft operations.
+* ``plot_ditl_telemetry()`` gives telemetry plots (power, battery, etc.).
+* The example notebook is ``examples/Example_Sky_Pointing.ipynb``.
 
 API Documentation
 -----------------

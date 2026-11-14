@@ -4,28 +4,32 @@ Radiator Thermal Modelling and Panel Shadowing
 Overview
 --------
 
+A radiator is a panel on the spacecraft body that rejects heat to space.  How
+much heat it rejects depends on how much sunlight and Earth-emitted infrared
+radiation fall on it, which in turn depends on where the spacecraft points.
 COASTSim models body-mounted radiator panels with physically-based thermal
-calculations that include:
+calculations.  The model computes four things:
 
-* **Sun and Earth exposure** — cosine-law geometric fractions based on the
-  radiator's surface normal and the spacecraft pointing.
-* **Net heat dissipation** — Stefan–Boltzmann emitted flux minus absorbed
-  solar and Earth-IR flux, scaled by area and efficiency.
-* **Hard keep-out constraints** — optional boresight-offset constraints that
-  flag radiator orientations incompatible with thermal or optical limits.
-* **Inter-component panel shadowing** — when a solar panel is mounted adjacent
-  to a radiator, its physical extent can cast a shadow that reduces the
-  radiator's effective solar heat load.  This requires explicit 3-D geometry
-  (position and spanning vectors) for both the panel and the radiator.
+* Sun and Earth exposure.  These are cosine-law geometric fractions based on
+  the radiator's surface normal and the spacecraft pointing.
+* Net heat dissipation.  This is the Stefan–Boltzmann emitted flux minus the
+  absorbed solar and Earth-IR flux, scaled by area and efficiency.
+* Hard keep-out constraints.  These are optional boresight-offset constraints
+  that flag radiator orientations incompatible with thermal or optical limits.
+* Shadowing of a radiator by a solar panel.  When a solar panel is mounted
+  adjacent to a radiator, the panel's physical extent can cast a shadow that
+  reduces the radiator's effective solar heat load.  This calculation requires
+  explicit 3-D geometry (position and spanning vectors) for both the panel and
+  the radiator.
 
 Coordinate Frame
 ----------------
 
 All geometry uses the spacecraft body frame:
 
-* ``+X`` — spacecraft boresight (pointing direction)
-* ``+Y`` — spacecraft "up"
-* ``+Z`` — completes the right-handed system
+* ``+X`` is the spacecraft boresight (pointing direction).
+* ``+Y`` is the spacecraft "up" direction.
+* ``+Z`` completes the right-handed system.
 
 Panel normals and ``PanelGeometry`` spanning vectors are expressed as unit
 vectors in this frame.
@@ -54,8 +58,8 @@ radiating face; heat is rejected in that direction.
 
    config = RadiatorConfiguration(radiators=[rad])
 
-The ``heat_dissipation_w`` method computes net heat flow (W) from sun and
-Earth exposure fractions:
+The ``heat_dissipation_w`` method of a radiator computes its net heat flow (W)
+from the sun and Earth exposure fractions:
 
 .. code-block:: python
 
@@ -63,7 +67,9 @@ Earth exposure fractions:
    net_heat_w = rad.heat_dissipation_w(sun_exposure=0.3, earth_exposure=0.1)
    print(f"Net heat rejection: {net_heat_w:.1f} W")
 
-Aggregate metrics for all radiators at a given simulation instant:
+The ``exposure_metrics`` method of the configuration returns aggregate metrics
+for all radiators at a given simulation instant, together with the values for
+each radiator:
 
 .. code-block:: python
 
@@ -78,33 +84,34 @@ Aggregate metrics for all radiators at a given simulation instant:
 Panel Shadowing
 ---------------
 
-When a solar panel is physically adjacent to a radiator — mounted
-perpendicular to it, for example — the panel's structural extent can cast a
-shadow on the radiator face.  This reduces the solar heat load absorbed by the
-radiator and must be accounted for in accurate thermal analyses.
+A solar panel that is physically adjacent to a radiator can cast a shadow on
+the radiator face.  A panel mounted perpendicular to the radiator is one
+example.  The shadow reduces the solar heat load absorbed by the radiator and
+must be accounted for in accurate thermal analyses.
 
 Geometry Model
 ~~~~~~~~~~~~~~
 
-Both the solar panel and the radiator must be given explicit 3-D geometry via
-:class:`~conops.config.geometry.PanelGeometry`.  This model describes a
-rectangle in body-frame space by its centre position and two orthogonal
-spanning unit vectors:
+To compute a shadow, both the solar panel and the radiator must be given
+explicit 3-D geometry via :class:`~conops.config.geometry.PanelGeometry`.
+This model describes a rectangle in body-frame space by its centre position
+and two orthogonal spanning unit vectors, ``u`` and ``v``:
 
 .. code-block:: text
 
    Panel points:  center_m  ±  u * width_m/2  ±  v * height_m/2
 
-The outward normal is implicitly ``u × v`` (right-hand rule).  Ensure this is
-consistent with the ``orientation.normal`` of the owning ``Radiator``, and
-with the ``normal`` field of the owning ``SolarPanel``.
+The outward normal of the rectangle is implicitly ``u × v`` (right-hand rule).
+Ensure that this normal is consistent with the ``orientation.normal`` of the
+``Radiator`` that owns the geometry, or with the ``normal`` field of the
+``SolarPanel`` that owns it.
 
 Perpendicular-Mount Example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The canonical scenario: a solar panel in the XZ plane (facing ``+Y``) with a
-radiator attached to the ``+X`` edge, extending in the ``−Y`` direction and
-facing outward (``+X``).
+The canonical scenario is a solar panel in the XZ plane (facing ``+Y``) with a
+radiator attached to its ``+X`` edge.  The radiator extends in the ``−Y``
+direction and faces outward (``+X``).
 
 .. code-block:: python
 
@@ -159,8 +166,8 @@ facing outward (``+X``).
 When :meth:`~conops.config.RadiatorConfiguration.exposure_metrics` is called
 (either directly or through the simulation loop), it receives a mapping of
 solar-panel names to their :class:`~conops.config.geometry.PanelGeometry`.
-For each radiator whose ``shadowed_by`` list overlaps that mapping, the shadow
-fraction is computed and applied:
+The shadow fraction is computed and applied for each radiator whose
+``shadowed_by`` list names at least one panel in that mapping:
 
 .. code-block:: python
 
@@ -181,64 +188,74 @@ fraction is computed and applied:
              f"heat={r['heat_dissipation_w']:.1f} W")
 
 The simulation ACS (``:class:`~conops.simulation.acs.ACS```) performs this
-look-up automatically on every timestep; no extra wiring is needed when both
+look-up automatically on every timestep.  No extra wiring is needed when both
 ``geometry`` and ``shadowed_by`` are configured.
 
 Shadow Computation
 ~~~~~~~~~~~~~~~~~~
 
-The shadow fraction is calculated by
-:func:`~conops.config.geometry.compute_shadow_fraction`:
+The shadow fraction is the part of the radiator's area that the solar panel
+shades from the sun.  It is calculated by
+:func:`~conops.config.geometry.compute_shadow_fraction`.  In the steps below
+the solar panel is the occluder, the radiator is the receiver, and ``s`` is
+the direction to the sun.
 
-1. **Project occluder corners** — for each corner of the solar panel, cast a
+1. Project the occluder corners.  For each corner of the solar panel, cast a
    ray in the anti-sun direction (``−s``) to find where it lands on the
    radiator's plane.  Corners on the wrong side of the plane (``t < 0``) are
    discarded.
-2. **Build shadow polygon** — the projected corners form a parallelogram
-   (shadow outline) in the radiator's local 2-D frame ``(u, v)``.
-3. **Intersect with receiver** — clip the shadow polygon against the
-   radiator rectangle using `Shapely`_.  For multiple solar panels the
-   shadows are unioned before clipping.
-4. **Compute fraction** — ``shadow_fraction = intersection_area / radiator_area``.
-5. **Apply to exposure** — ``effective_sun_exposure *= (1 − shadow_fraction)``.
+2. Build the shadow polygon.  The projected corners form a parallelogram
+   (the shadow outline) in the radiator's local 2-D frame ``(u, v)``.
+3. Intersect the shadow with the receiver.  The shadow polygon is clipped
+   against the radiator rectangle using `Shapely`_.  For multiple solar panels
+   the shadows are unioned before clipping.
+4. Compute the fraction:
+   ``shadow_fraction = intersection_area / radiator_area``.
+5. Apply the fraction to the exposure:
+   ``effective_sun_exposure *= (1 − shadow_fraction)``.
 
 .. note::
    When the sun direction is nearly parallel to the radiator face
    (``|s · n_rad| < 10⁻⁹``) no shadow is projected and the fraction is zero.
-   This is correct: the radiator's direct sun exposure is already negligible
-   in that orientation.
+   This result is correct, because the radiator's direct sun exposure is
+   already negligible in that orientation.
 
 .. _Shapely: https://shapely.readthedocs.io
 
 Geometry Consistency Rules
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* **``u × v`` vs ``orientation.normal``** — :class:`~conops.config.geometry.PanelGeometry`
-  computes its internal normal as ``u × v`` for projection maths.  This may
-  differ in sign from the component's ``orientation.normal`` (which governs
-  the exposure dot-product).  The shadow code handles both orientations
-  automatically; however, keeping them consistent avoids confusion.
+The shadow calculation relies on the geometry and the component settings
+agreeing with each other.  The following rules describe what is checked, what
+is not, and what happens when something is missing.
 
-* **Orthogonality** — ``u`` and ``v`` should be orthogonal.  They are each
-  validated as unit vectors.  Non-orthogonal spanning vectors will still
-  produce a valid Shapely polygon but the area calculation will be slightly
-  off.
+* The normal ``u × v`` and ``orientation.normal`` can differ in sign.
+  :class:`~conops.config.geometry.PanelGeometry` computes its internal normal
+  as ``u × v`` for projection maths, while the component's
+  ``orientation.normal`` governs the exposure dot-product.  The shadow code
+  handles both orientations automatically.  Keeping the two consistent still
+  avoids confusion.
 
-* **``shadowed_by`` names** — the strings in ``Radiator.shadowed_by`` must
-  match ``SolarPanel.name`` exactly.  Unrecognised names are silently
-  ignored.
+* The vectors ``u`` and ``v`` should be orthogonal.  Each is validated as a
+  unit vector, but orthogonality is not enforced.  Non-orthogonal spanning
+  vectors will still produce a valid Shapely polygon, but the area calculation
+  will be slightly off.
 
-* **Shadow without geometry** — if either the radiator or the referenced
-  solar panel lacks a ``geometry`` field, no shadow fraction is computed and
-  the radiator's sun exposure is unchanged.  This means adding geometry is
-  always an opt-in refinement; existing configurations are unaffected.
+* The strings in ``Radiator.shadowed_by`` must match ``SolarPanel.name``
+  exactly.  Unrecognised names are silently ignored.
+
+* A shadow needs geometry on both components.  If either the radiator or the
+  referenced solar panel lacks a ``geometry`` field, no shadow fraction is
+  computed and the radiator's sun exposure is unchanged.  Adding geometry is
+  therefore always an opt-in refinement, and existing configurations are
+  unaffected.
 
 Multiple Radiators and Panels
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Any number of radiators can reference any number of panels.  All shadows on
-a single radiator are unioned before computing the fraction, so overlapping
-occluders are handled correctly.
+a single radiator are unioned before computing the fraction, so an area
+shaded by two overlapping occluders is counted only once.
 
 .. code-block:: python
 
@@ -260,8 +277,8 @@ Hard Keep-Out Constraints
 
 A radiator can have an optional
 :class:`~conops.config.constraint.Constraint` that defines orientations where
-pointing is prohibited (e.g. to prevent a heat-pipe radiator from facing the
-sun for extended periods).
+pointing is prohibited.  One use is to prevent a heat-pipe radiator from
+facing the sun for extended periods.
 
 .. code-block:: python
 
@@ -287,7 +304,9 @@ API Reference
 See the following API pages for complete method signatures and parameter
 descriptions:
 
-* :mod:`conops.config.geometry` — :class:`~conops.config.geometry.PanelGeometry`
-  and :func:`~conops.config.geometry.compute_shadow_fraction`
-* :mod:`conops.config.radiator` — :class:`~conops.config.radiator.Radiator`,
-  :class:`~conops.config.radiator.RadiatorConfiguration`
+* :mod:`conops.config.geometry` documents
+  :class:`~conops.config.geometry.PanelGeometry` and
+  :func:`~conops.config.geometry.compute_shadow_fraction`.
+* :mod:`conops.config.radiator` documents
+  :class:`~conops.config.radiator.Radiator` and
+  :class:`~conops.config.radiator.RadiatorConfiguration`.

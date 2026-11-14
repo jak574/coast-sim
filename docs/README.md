@@ -31,7 +31,7 @@ The built documentation will be in `docs/_build/html/`. Open `docs/_build/html/i
 
 ### Other Build Formats
 
-Sphinx supports multiple output formats:
+Sphinx can build other output formats as well:
 
 ```bash
 make latexpdf  # Build PDF documentation
@@ -50,14 +50,14 @@ make clean
 
 ### Auto-rebuild During Development
 
-For live reloading during documentation development, you can use `sphinx-autobuild`:
+While you are writing documentation, `sphinx-autobuild` can rebuild it and reload the browser each time you save:
 
 ```bash
 pip install sphinx-autobuild
 sphinx-autobuild . _build/html
 ```
 
-Then open http://127.0.0.1:8000 in your browser. The documentation will automatically rebuild when you save changes.
+Then open http://127.0.0.1:8000 in your browser.
 
 ## Documentation Structure
 

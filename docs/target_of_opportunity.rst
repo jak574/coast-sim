@@ -4,25 +4,25 @@ Target of Opportunity (TOO)
 Overview
 --------
 
-The Target of Opportunity (TOO) system allows simulating time-critical observations that interrupt normal queue-scheduled operations. This is essential for modeling responses to transient astronomical events such as gamma-ray bursts (GRBs), gravitational wave counterparts, supernovae, or other phenomena requiring immediate observation.
+A Target of Opportunity (TOO) is a time-critical observation that arrives while the spacecraft is working through its normal queue and may interrupt the observation in progress. The TOO system lets a simulation model the response to transient astronomical events such as gamma-ray bursts (GRBs), gravitational wave counterparts, supernovae, or other phenomena that require immediate observation.
 
-A TOO is an ordinary queue request with a short window. When its ``submit_time`` is reached it joins the target queue with its own merit and optional deadline, and is selected like any other target. If it is visible and outranks the observation in progress, that observation is preempted and the queue selects again.
+In COASTSim a TOO is an ordinary queue request with a short window. Each TOO has a ``submit_time``. When the simulation reaches that time, the TOO joins the target queue with its own merit and optional deadline, and the queue selects it in the same way as any other target. If the TOO is visible and outranks the observation in progress, that observation is preempted and the queue selects again.
 
 Key Features
 ------------
 
-* **Ordinary requests**: An active TOO is a queue target; nothing boosts its merit
-* **Merit-based preemption**: A TOO interrupts only when its value, evaluated now, beats the value frozen onto the current observation when it was selected
-* **Deadlines**: An optional deadline drives the urgency merit term and stops the TOO being selected once it passes
-* **Visibility checking**: TOOs only interrupt when the target is actually observable
-* **Interrupt controls**: A TOO can be submitted to wait for the current observation instead of interrupting it, and a category's observations can be protected from interruption
-* **Scheduled submission**: TOOs can be scheduled to become active at a future time
-* **Full event logging**: Queuing, interrupts and the merit breakdown of each selection are logged
+* An active TOO is an ordinary queue target. Nothing boosts its merit automatically.
+* Preemption is decided on merit. Every observation keeps the value it had when it was selected, which this page calls its frozen value. A TOO interrupts only when its own value, evaluated at the current time, beats the frozen value of the current observation.
+* A TOO can have a deadline. The deadline drives the urgency term of the merit, and the TOO can no longer be selected once the deadline has passed.
+* A TOO interrupts only when its target is observable at that moment.
+* Two controls limit interruption. A TOO can be submitted so that it waits for the current observation to end, and the observations of a category can be protected from interruption.
+* A TOO can be scheduled to become active at a future time.
+* The simulation logs when each TOO is queued, each interrupt, and the merit breakdown of each selection.
 
 TOORequest Model
 ----------------
 
-The ``TOORequest`` class is a Pydantic model that represents a pending TOO. It contains all the information needed to observe the target and track its status.
+The ``TOORequest`` class is a Pydantic model that represents a pending TOO. It holds the information needed to observe the target and to track whether the TOO has been observed.
 
 .. code-block:: python
 
@@ -47,12 +47,12 @@ Attributes
 * ``obsid`` (int): Unique observation identifier for this TOO
 * ``ra`` (float): Right ascension in degrees
 * ``dec`` (float): Declination in degrees
-* ``merit`` (float): Base merit. The TOO interrupts only if its value exceeds the current observation's
+* ``merit`` (float): Base merit. The TOO interrupts only if its value exceeds the value of the current observation
 * ``exptime`` (int): Requested exposure time in seconds
 * ``name`` (str): Human-readable name for the TOO target (e.g., "GRB 250101A")
 * ``submit_time`` (float): Unix timestamp when the TOO becomes active. Default is 0.0, meaning active from simulation start
-* ``deadline`` (float or None): Latest Unix time science collection may begin. Drives the urgency term (``config.targets.urgency_weight``); the TOO cannot be selected after it
-* ``interrupt`` (bool): Whether the TOO may cut short the observation in progress. Default is True. If False, it waits in the queue for that observation to end
+* ``deadline`` (float or None): Latest Unix time at which science collection may begin. The deadline drives the urgency term of the merit (``config.targets.urgency_weight``). The TOO cannot be selected after the deadline
+* ``interrupt`` (bool): Whether the TOO may cut short the observation in progress. Default is True. If False, the TOO waits in the queue for that observation to end
 * ``executed`` (bool): Whether this TOO has been dispatched. Set to True once it becomes the current observation
 
 Submitting TOOs
@@ -90,7 +90,7 @@ Use the ``submit_too()`` method on ``QueueDITL`` to register a TOO:
 Scheduled TOOs
 ^^^^^^^^^^^^^^
 
-TOOs can be scheduled to become active at a future time. This is useful for simulating scenarios where a TOO alert arrives mid-observation:
+A TOO can be scheduled to become active at a future time by passing ``submit_time``, either as a Unix timestamp or as a ``datetime``. This is useful for simulating a TOO alert that arrives in the middle of an observation:
 
 .. code-block:: python
 
@@ -120,30 +120,42 @@ TOOs can be scheduled to become active at a future time. This is useful for simu
 How TOO Interrupts Work
 -----------------------
 
-During each simulation step in science or idle modes:
+The simulation checks for TOO interrupts at each step while the spacecraft is in science or idle mode. The check has two stages. The first stage decides whether any TOO is a candidate to interrupt. The second stage confirms that a replacement can be admitted before the current observation is stopped.
 
-1. Every TOO whose ``submit_time`` has passed is **added to the queue** once, with its own merit and deadline.
-2. A TOO that is already the current observation, or has collected science, is marked **executed**.
-3. If an observation is in progress, a pending TOO **interrupts** it when:
+Checking for candidates
+^^^^^^^^^^^^^^^^^^^^^^^
 
-   * the TOO may interrupt (``interrupt``) and the observation's category is ``interruptible``;
-   * its deadline, if any, has not passed;
-   * its target is visible now; and
-   * its value, evaluated now, can beat the current observation's frozen value. With a long-range allocation, the value is taken with the most the allocation can add, since the bonus is for the collection admission settles on, which the recorder or a deadline may cut short of a snapshot.
+At each step the simulation does the following:
 
-When a TOO interrupts:
+1. It adds every TOO whose ``submit_time`` has passed to the queue, with its own merit and deadline. Each TOO is added only once.
+2. It marks a TOO as executed if that TOO is already the current observation or has collected science.
+3. If an observation is in progress, a pending TOO becomes a candidate to interrupt it when all of the following hold:
 
-1. The queue **selects again** without commanding anything, with the interrupted target held out of this one selection so it cannot simply resume. The highest-ranked target is chosen, normally the TOO, and its value as admitted, over the collection admitted, must beat the observation's frozen value; otherwise the observation runs on and the TOO waits for the next selection.
-2. The current observation is **terminated** (preempted, not completed) and the replacement's slew is commanded.
-3. The TOO is marked **executed** if it was selected.
-4. The events and the TOO's merit breakdown are **logged**.
+   * the TOO may interrupt (``interrupt``) and the category of the observation is ``interruptible``;
+   * the deadline of the TOO, if it has one, has not passed;
+   * the target of the TOO is visible now; and
+   * the value of the TOO, evaluated now, can beat the frozen value of the current observation.
 
-With no observation in progress nothing is interrupted: the TOO is already in the queue and is considered at the next selection.
+The last condition needs one qualification when a long-range allocation is in use (see :doc:`planning`). An allocation adds a bonus to the value of a target, and the size of that bonus depends on the collection that admission settles on. The recorder or a deadline may cut that collection shorter than a snapshot, so the bonus is not known at this stage. The check therefore takes the value of the TOO with the most that the allocation can add. The value as admitted is compared in the next stage.
+
+If no observation is in progress, nothing is interrupted. The TOO is already in the queue and is considered at the next selection.
+
+Carrying out the interrupt
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a TOO is a candidate, the simulation proceeds as follows:
+
+1. The queue selects again, without commanding anything yet. The interrupted target is held out of this one selection so that it cannot simply resume. The queue chooses the highest-ranked target, which is normally the TOO. The value of that target as admitted, taken over the collection that was admitted, must beat the frozen value of the current observation. If it does not, the observation runs on and the TOO waits for the next selection.
+2. The current observation is terminated. It is recorded as preempted and does not count as completed. The slew to the replacement is commanded.
+3. The TOO is marked as executed if it was the target selected.
+4. The events and the merit breakdown of the TOO are logged.
 
 Preventing Interrupts
 ^^^^^^^^^^^^^^^^^^^^^
 
-A TOO submitted with ``interrupt=False`` never cuts short the observation in progress. It is queued as usual and competes at the next selection, when that observation ends. Nor does it take the place of an observation another TOO interrupts: in a rolling-horizon replan it is planned in after the interrupting TOO (see :doc:`planning`):
+There are two ways to stop a TOO from interrupting. One is set on the TOO and the other on the observation category.
+
+A TOO submitted with ``interrupt=False`` never cuts short the observation in progress. It is queued as usual and competes at the next selection, which happens when that observation ends. If a different TOO interrupts the observation, the TOO with ``interrupt=False`` does not take the place of the interrupted observation either. In a rolling-horizon replan it is planned in after the interrupting TOO (see :doc:`planning`).
 
 .. code-block:: python
 
@@ -157,7 +169,7 @@ A TOO submitted with ``interrupt=False`` never cuts short the observation in pro
        interrupt=False,  # wait for the current observation to finish
    )
 
-To protect a kind of observation from every TOO, set ``interruptible=False`` on its observation category (see :doc:`configuration`). Its observations run to their end; a TOO waiting for one is selected when it finishes, if it still ranks highest.
+To protect a kind of observation from every TOO, set ``interruptible=False`` on its observation category (see :doc:`configuration`). Observations in that category run to their end. A TOO that is waiting for one of them is selected when the observation finishes, provided the TOO still ranks highest.
 
 .. code-block:: python
 
@@ -170,15 +182,17 @@ To protect a kind of observation from every TOO, set ``interruptible=False`` on 
        interruptible=False,
    )
 
-Both controls also apply to :class:`~conops.ditl.RollingHorizonDITL`: a rapid replan for such a TOO starts it once the observation in progress ends.
+Both controls also apply to :class:`~conops.ditl.RollingHorizonDITL`. There, a TOO triggers a rapid replan. When either control prevents the TOO from interrupting, the replan starts the TOO once the observation in progress ends.
 
 Making TOOs Win
 ---------------
 
-There is no automatic merit boost. A TOO outranks other work through:
+A TOO receives no automatic merit boost. It outranks other work in the queue only when its value is higher, and there are two ways to arrange that:
 
-* **Merit**: Give TOOs a base merit above normal targets (normal targets typically use 1-1000).
-* **Deadline and urgency**: Give the TOO a ``deadline`` and set ``config.targets.urgency_weight``; its value rises as the deadline approaches.
+* Give the TOO a base merit above that of normal targets. Normal targets typically use a merit of 1-1000.
+* Give the TOO a ``deadline`` and set ``config.targets.urgency_weight``. The value of the TOO then rises as the deadline approaches.
+
+The example below uses the second approach:
 
 .. code-block:: python
 
@@ -198,7 +212,7 @@ There is no automatic merit boost. A TOO outranks other work through:
 Accessing TOO Status
 --------------------
 
-The TOO register is accessible as ``ditl.too_register``:
+Every submitted TOO is kept in a register, which is available as ``ditl.too_register``. After the simulation has run, the ``executed`` flag of each entry shows whether that TOO was dispatched:
 
 .. code-block:: python
 
@@ -219,7 +233,7 @@ The TOO register is accessible as ``ditl.too_register``:
 Event Logging
 -------------
 
-TOO events are logged to ``ditl.log`` with event type ``"TOO"``. You can filter for these events:
+TOO events are logged to ``ditl.log`` with the event type ``"TOO"``. You can filter the log for these events:
 
 .. code-block:: python
 
@@ -236,6 +250,8 @@ Example output::
 
 Complete Example
 ----------------
+
+The example below creates a queue of three normal targets, submits a TOO that arrives three hours into the simulation, and then inspects the result.
 
 .. code-block:: python
 

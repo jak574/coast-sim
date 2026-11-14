@@ -9,37 +9,61 @@ any browser or Jupyter notebook without running a full DITL simulation.
 Features
 --------
 
-* **Spacecraft surfaces** — when ``spacecraft_bus.surfaces`` has plates, render
-  their configured centers, normals and areas in the declared body frame. A
-  plate's optional ``geometry`` supplies its rectangular outline; otherwise a
-  square of equal area illustrates it. Area and normal alone cannot recover a
-  facet's aspect ratio or the outline of a scarfed baffle. The configured model
-  replaces the synthetic bus and telescope. Coincident panel front/back plates
-  are represented once by the panel geometry. Plot bounds include all components.
-* **Spacecraft bus fallback** — lit, solid-shaded box with configurable dimensions
-  when no surfaces are configured.
-* **Telescope assembly** — cylindrical baffle tube with aperture ring, mid-tube
-  baffle rings, and secondary mirror housing.  Sized automatically from
-  ``optics.aperture_m`` and ``optics.tube_length_m``.
-* **Solar panels** — deep-blue solar cell faces on a silver frame.  Uses
-  :class:`~conops.config.geometry.PanelGeometry` when configured, otherwise
-  places panels on the bus face whose outward normal best matches the panel
-  normal vector.  Panel area is estimated from ``max_power``.
-* **Radiators** — white/MLI panels placed on the bus face matching
-  ``orientation.normal``, sized by ``width_m`` × ``height_m``.
-* **Star trackers** — small prism bodies with a coloured aperture face, one
-  per configured tracker.  Each gets a distinct boresight-arrow colour.
-* **Body-frame axes** — +X / +Y / +Z triad with labelled arrows (red, green,
-  blue).
-* **Normal / boresight arrows** — outward-normal arrows for solar panels and
-  radiators; boresight arrows for the telescope and each star tracker.
+The figure draws the spacecraft body, the components attached to it, and
+arrows that show the body-frame axes and the direction each component faces.
+
+Spacecraft body
+^^^^^^^^^^^^^^^
+
+How the body is drawn depends on whether ``spacecraft_bus.surfaces`` has
+plates.
+
+When it does, the visualizer renders the plates at their configured centers,
+normals and areas in the declared body frame. This configured model replaces
+the synthetic bus and telescope described below. A plate's optional
+``geometry`` supplies its rectangular outline. A plate without ``geometry`` is
+illustrated as a square of equal area, because area and normal alone cannot
+recover a facet's aspect ratio or the outline of a scarfed baffle. Front and back
+plates that coincide with a panel are represented once, by the panel geometry.
+The plot bounds include all components.
+
+When no surfaces are configured, the visualizer falls back to a synthetic
+model:
+
+* The spacecraft bus is a lit, solid-shaded box with configurable dimensions.
+* The telescope assembly is a cylindrical baffle tube with an aperture ring,
+  mid-tube baffle rings, and a secondary mirror housing.  It is sized
+  automatically from ``optics.aperture_m`` and ``optics.tube_length_m``.
+
+Components
+^^^^^^^^^^
+
+* Solar panels are drawn as deep-blue solar cell faces on a silver frame.  A
+  panel uses its :class:`~conops.config.geometry.PanelGeometry` when one is
+  configured.  Otherwise the panel is placed on the bus face whose outward
+  normal best matches the panel normal vector, and its area is estimated from
+  ``max_power``.
+* Radiators are drawn as white/MLI panels.  Each is placed on the bus face
+  matching ``orientation.normal`` and sized by ``width_m`` × ``height_m``.
+* Star trackers are drawn as small prism bodies with a coloured aperture face,
+  one per configured tracker.  Each tracker gets a distinct boresight-arrow
+  colour.
+
+Axes and arrows
+^^^^^^^^^^^^^^^
+
+* The body-frame axes are drawn as a +X / +Y / +Z triad with labelled arrows
+  (red, green, blue).
+* Solar panels and radiators have outward-normal arrows.  The telescope and
+  each star tracker have boresight arrows.
 
 Coordinate system
 -----------------
 
-All geometry is expressed directly in ``spacecraft_bus.frame``; vectors are not
-rotated a second time. The boresight label follows the declared frame. The
-following axes describe the default frame:
+All geometry is expressed directly in ``spacecraft_bus.frame``, the body frame
+declared in the configuration.  The visualizer does not rotate vectors a
+second time.  The boresight label follows the declared frame.  The following
+axes describe the default frame:
 
 .. list-table::
    :header-rows: 1
@@ -66,8 +90,8 @@ Quick start
    fig = plot_spacecraft_3d(config)
    fig.show()
 
-No simulation run is needed — the visualizer reads geometry directly from
-the configuration.
+No simulation run is needed, because the visualizer reads geometry directly
+from the configuration.
 
 Usage examples
 --------------
@@ -211,13 +235,16 @@ When a :class:`~conops.config.geometry.PanelGeometry` is attached to a solar
 panel or radiator, its ``center_m``, ``u``, ``v``, ``width_m``, and
 ``height_m`` fields are used directly.
 
-When no ``PanelGeometry`` is set the visualizer falls back to automatic face
+When no ``PanelGeometry`` is set, the visualizer falls back to automatic face
 placement:
 
-1. Dot-product the component normal against the six bus face normals.
-2. Select the face with the largest dot product.
-3. Place the component centre just outside that face (gap is component-specific; e.g. 20 mm for solar panels and 5 mm for radiators) and orient the
-   panel spanning directions perpendicular to the face normal.
+1. It takes the dot product of the component normal with each of the six bus
+   face normals.
+2. It selects the face with the largest dot product.
+3. It places the component centre just outside that face and orients the
+   panel spanning directions perpendicular to the face normal.  The gap
+   between the face and the component is component-specific; for example, it
+   is 20 mm for solar panels and 5 mm for radiators.
 
 Solar panel size is estimated from ``max_power`` assuming 150 W/m² (solar
 constant × typical conversion efficiency).  Radiator size comes directly from
@@ -231,8 +258,9 @@ API reference
 See also
 --------
 
-* :doc:`configuration` — all geometric configuration fields in detail.
-* :doc:`visualization` — overview of all COASTSim visualization utilities.
-* :doc:`sky_pointing_visualization` — interactive sky-pointing globe.
-* :py:func:`conops.visualization.plot_sky_pointing_globe` — celestial-sphere
-  globe driven by a completed DITL simulation.
+* :doc:`configuration` describes all geometric configuration fields in detail.
+* :doc:`visualization` gives an overview of all COASTSim visualization
+  utilities.
+* :doc:`sky_pointing_visualization` covers the interactive sky-pointing globe.
+* :py:func:`conops.visualization.plot_sky_pointing_globe` draws a
+  celestial-sphere globe driven by a completed DITL simulation.
