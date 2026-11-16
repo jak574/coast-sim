@@ -260,6 +260,7 @@ class LocalSearchScheduler(PriorityScheduler):
         """Whether the complete incumbent beat the finalized search result."""
         self._initial_volumes: tuple[RecorderAmount, ...] = ()
         self._initial_energy: tuple[Additions, ...] = ()
+        self._by_obsid = {}
         self._window_repaired = False
 
     def schedule(self) -> Plan:
@@ -382,7 +383,8 @@ class LocalSearchScheduler(PriorityScheduler):
         self._delivered = initial.programs
         self.log.add_events(incumbent.log.events)
         self._log(self.ctx.ustart, "Retained the complete feasible incumbent")
-        return self.plan
+        # Fill the winner's gaps too, reserving its selected science and holds.
+        return self._augment_selected_plan(self.plan)
 
     def _independent_trial(self) -> "LocalSearchScheduler":
         """Isolate a contender's reservations and momentum-repair state."""
@@ -832,7 +834,7 @@ class LocalSearchScheduler(PriorityScheduler):
         priority placement checks for its unused exposure. This is a final,
         deterministic construction pass, separate from the search budget.
         """
-        if not plan.entries or not getattr(self, "_by_obsid", None):
+        if not plan.entries or not self._by_obsid:
             return plan
         original = list(self.timeline)
         trial, requests = self._placement_trial(original, keep_poses=True)
@@ -849,7 +851,7 @@ class LocalSearchScheduler(PriorityScheduler):
         become feasible. Keep its settled time and every committed science
         window; inherited holds may follow the newly chosen science as usual.
         """
-        if not plan.entries or not getattr(self, "_by_obsid", None):
+        if not plan.entries or not self._by_obsid:
             return plan
         reserved = {b.entry.obsid: b.ready for b in self._fixed if b.is_activity}
         if not any(
