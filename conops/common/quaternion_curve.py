@@ -1,7 +1,7 @@
 """Rate-continuous quaternion Hermite curves with interval limit checks.
 
-Normalize a cubic quaternion polynomial p(s). For the ECI-to-body convention,
-body rate is -2 vec(p' conjugate(p)) / |p|². Differentiating this rational
+Normalize a cubic quaternion polynomial ``p(s)``. For the ECI-to-body convention,
+body rate is ``-2 vec(p' conjugate(p)) / |p|²``. Differentiating this rational
 expression gives body angular acceleration. Bernstein convex-hull bounds check
 both envelopes over whole intervals, not just a grid of evaluation times.
 """

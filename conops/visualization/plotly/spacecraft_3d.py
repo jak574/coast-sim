@@ -11,12 +11,12 @@ The default frame has +X boresight and +Y Sun-facing side.
 
 Component placement rules
 --------------------------
-  Telescope   – cylinder extending in the boresight direction from the bus surface.
-  Solar panels – use ``PanelGeometry.center_m`` when present; otherwise placed
-                 on the bus face whose outward normal best matches the panel normal.
-  Radiators   – placed on the bus face whose outward normal best matches the
-                radiator normal; sized by ``width_m`` × ``height_m``.
-  Star trackers – small prism on the bus face matching the boresight direction.
+- Telescope: cylinder extending in the boresight direction from the bus surface.
+- Solar panels: use ``PanelGeometry.center_m`` when present; otherwise placed
+  on the bus face whose outward normal best matches the panel normal.
+- Radiators: placed on the bus face whose outward normal best matches the
+  radiator normal; sized by ``width_m`` × ``height_m``.
+- Star trackers: small prism on the bus face matching the boresight direction.
 """
 
 from __future__ import annotations

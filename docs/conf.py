@@ -105,6 +105,7 @@ intersphinx_mapping = {
     "numpy": ("https://numpy.org/doc/stable/", None),
     "matplotlib": ("https://matplotlib.org/stable/", None),
     "astropy": ("https://docs.astropy.org/en/stable/", None),
+    "rust_ephem": ("https://rust-ephem.readthedocs.io/en/latest/", None),
 }
 
 # -- Options for autodoc extension -------------------------------------------

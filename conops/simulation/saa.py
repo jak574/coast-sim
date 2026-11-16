@@ -106,6 +106,7 @@ class SAA:
     def get_next_saa_time(self, utime: float) -> tuple[float, float] | None:
         """
         Get the next SAA time interval after the given utime.
+
         Returns:
             tuple: (start, end) of the next SAA interval, or None if there is no
             upcoming SAA interval.

@@ -1972,9 +1972,9 @@ Roll-dependent stray light
 
 A stray-light patch is a region beside the boresight into which a bright body
 scatters light. It is written as a ``rust_ephem`` field-of-view polygon on
-``science_constraint``. Use a :class:`~rust_ephem.constraints.BodyConstraint`
+``science_constraint``. Use a :external+rust_ephem:py:class:`BodyConstraint`
 for the Sun, Moon or Earth, or a
-:class:`~rust_ephem.constraints.BrightStarConstraint` for a list of stars, and
+:external+rust_ephem:py:class:`BrightStarConstraint` for a list of stars, and
 give each one the patch as its ``fov_polygon``.
 
 The polygon is in the instrument frame, in gnomonic degrees. At zero roll +v
