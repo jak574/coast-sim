@@ -62,7 +62,7 @@ from .local_search_scheduler import (
     _Snapshot,
     _State,
 )
-from .priority_scheduler import _Block, _collection_seconds, _Request, program_shares
+from .priority_scheduler import _Block, _Request, program_shares
 from .recorder import RecorderLedger, combine_amounts
 
 if TYPE_CHECKING:
@@ -1462,89 +1462,6 @@ class CpSatScheduler(LocalSearchScheduler):
         candidate = self._repair_window(candidate)
         best = self._best = self._search(candidate)
         return self._finish_best(best)
-
-    def _normalized_placements(self, decoded: _Decoded) -> _Decoded:
-        """Retain only actual placements, released where exact decoding put them."""
-        snapshots = []
-        for before, after in zip(decoded.states[:-1], decoded.states[1:], strict=True):
-            if after.cursor <= before.cursor:
-                continue
-            block = after.timeline[after.cursor - 1]
-            snapshots.append(
-                _Snapshot(
-                    obsid=int(block.entry.obsid),
-                    seconds=_collection_seconds(block),
-                    release=float(block.entry.begin),
-                    visit=block.entry.visit,
-                )
-            )
-        return self._decode(snapshots)
-
-    def _repair_window(self, decoded: _Decoded) -> _Decoded:
-        """Recover at most one timed visit across native chunk boundaries.
-
-        A long snapshot may fill a chunk while a short visit must precede it
-        to meet its window. Try that insertion, or one position earlier, using
-        the full exact decoder and its resource/commitment checks. Keep only
-        a strict objective gain. The solver budget and original native score
-        remain separate; subsequent momentum passes forecast the changed plan.
-        """
-        if self._window_repaired:
-            return decoded
-        old_score = self._objective(decoded.final)
-        for window in self._pending_windows(decoded):
-            if window.visit is not None and any(
-                int(block.entry.obsid) == window.obsid
-                and block.entry.visit == window.visit
-                for block in decoded.final.timeline
-            ):
-                continue
-            crossing = len(decoded.sequence)
-            for index, (before, after) in enumerate(
-                zip(decoded.states[:-1], decoded.states[1:], strict=True)
-            ):
-                if (
-                    after.cursor > before.cursor
-                    and after.timeline[after.cursor - 1].end > window.deadline
-                ):
-                    crossing = index
-                    break
-            for position in sorted({crossing, max(0, crossing - 1)}):
-                # The window bounds collection, not the ingress slew. Pin the
-                # intended visit while the exact decoder times its slew/setup.
-                added = self._released(window.obsid).model_copy(
-                    update={"visit": window.visit}
-                )
-                sequence = [
-                    *decoded.sequence[:position],
-                    added,
-                    *decoded.sequence[position:],
-                ]
-                candidate = self._redecode(decoded, sequence, position, position, 1)
-                before, after = candidate.states[position : position + 2]
-                if after.cursor <= before.cursor:
-                    continue
-                placed = after.timeline[after.cursor - 1]
-                if placed.entry.visit != window.visit:
-                    continue
-                candidate = self._normalized_placements(candidate)
-                if window.visit is not None and not any(
-                    int(block.entry.obsid) == window.obsid
-                    and block.entry.visit == window.visit
-                    for block in candidate.final.timeline
-                ):
-                    continue
-                score = self._objective(candidate.final)
-                if score > old_score:
-                    self._window_repaired = True
-                    self._log(
-                        float(placed.entry.begin),
-                        f"Recovered request {window.obsid} before its deadline; "
-                        f"exact planned value increases by {score - old_score:.6f}",
-                        window.obsid,
-                    )
-                    return candidate
-        return decoded
 
     # ── Chunks ───────────────────────────────────────────────────────────
 

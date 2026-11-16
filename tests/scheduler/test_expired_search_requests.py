@@ -6,9 +6,17 @@ import pytest
 
 from conops.schedulers import LocalSearchScheduler
 from conops.schedulers.context import SchedulingContext
+from conops.schedulers.local_search_scheduler import _Decoded
 from conops.targets import VisitWindow
 
 from .planning_scenario import BEGIN, HOUR, T0, make_config, make_target
+
+
+class ProposalSearch(LocalSearchScheduler):
+    """Isolate proposal selection from independent deterministic recovery."""
+
+    def _repair_window(self, decoded: _Decoded) -> _Decoded:
+        return decoded
 
 
 def scheduler(expired, deadline_offset):
@@ -42,7 +50,7 @@ def scheduler(expired, deadline_offset):
     ]
     for target in targets:
         target.roll_deg = 0.0
-    return LocalSearchScheduler(
+    return ProposalSearch(
         config,
         targets,
         BEGIN,

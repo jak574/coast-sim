@@ -2154,7 +2154,24 @@ class TestAllocatedTargetsOfOpportunity:
         assert ditl.validate_plan_matches_execution() == []
         if interrupts:
             assert float(toos[0].collection_begin) <= self.GRB["deadline"]
-            assert float(toos[0].merit) == pytest.approx(merit * 1.5)
+            # Recovery can place more science than the allocated snapshot.
+            # Only the covered seconds earn the bonus, counted once across
+            # the executed entries; an unknown ToO has the full bonus.
+            allocation_left = seconds
+            for entry in toos:
+                science = entry.collection_seconds_between(
+                    float(entry.begin), float(entry.end)
+                )
+                covered = (
+                    science
+                    if allocation_left is None
+                    else min(science, allocation_left)
+                )
+                assert float(entry.merit) == pytest.approx(
+                    merit * (1.0 + 0.5 * covered / science)
+                )
+                if allocation_left is not None:
+                    allocation_left -= covered
         else:
             assert (
                 float(first.collection_end) - float(first.collection_begin) == 90 * MIN

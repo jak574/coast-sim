@@ -165,6 +165,11 @@ class LocalSearchScheduler(PriorityScheduler):
     in are worth ``allocation_bonus`` more. The best plan
     found is returned, and never one worse than the priority-first plan.
 
+    Before the random search, exact decoding may recover one profitable
+    timed visit hidden behind a long snapshot. This construction pass uses
+    the same resource and commitment checks and does not consume random
+    proposals or change their configured budget.
+
     Each plan entry's merit is the value its snapshot has where the decoder
     places it, with the program shares the plan delivers before it; a Target
     of Opportunity in a rolling run must beat it to interrupt.
@@ -255,12 +260,14 @@ class LocalSearchScheduler(PriorityScheduler):
         """Whether the complete incumbent beat the finalized search result."""
         self._initial_volumes: tuple[RecorderAmount, ...] = ()
         self._initial_energy: tuple[Additions, ...] = ()
+        self._window_repaired = False
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, then search for a better one, within
         the wheels' momentum where the configuration tracks it."""
         self.search_iterations.clear()
         self.search_limits.clear()
+        self._window_repaired = False
         return self._schedule_with_incumbents()
 
     def _schedule_with_incumbents(self) -> Plan:
@@ -523,7 +530,7 @@ class LocalSearchScheduler(PriorityScheduler):
         return self._timeline_score(science, freeze_merits=freeze_merits)
 
     def _plan_once(self) -> Plan:
-        start = self._start_from_priority_plan()
+        start = self._repair_window(self._start_from_priority_plan())
         best = self._best = self._search(start)
         return self._finish_best(best)
 
@@ -614,7 +621,12 @@ class LocalSearchScheduler(PriorityScheduler):
         self._initial_allocated = {
             (obsid, n): span.seconds
             for obsid, spans in allocated.items()
+            if obsid in self._by_obsid
             for n, span in enumerate(spans)
+            # As in priority placement, an allowance too short for one
+            # admissible snapshot earns no bonus for unallocated science.
+            if min(span.seconds, self._initial_remaining[obsid])
+            >= snapshot_min_seconds(self._by_obsid[obsid].target)
         }
         self._initial_last_visit = dict(self._last_visit)
         self._initial_last_visit_window = dict(self._last_visit_window)
@@ -1665,6 +1677,89 @@ class LocalSearchScheduler(PriorityScheduler):
             windows,
             key=lambda w: (w.deadline, w.obsid, -1 if w.visit is None else w.visit),
         )
+
+    def _normalized_placements(self, decoded: _Decoded) -> _Decoded:
+        """Retain only actual placements, released where exact decoding put them."""
+        snapshots = []
+        for before, after in zip(decoded.states[:-1], decoded.states[1:], strict=True):
+            if after.cursor <= before.cursor:
+                continue
+            block = after.timeline[after.cursor - 1]
+            snapshots.append(
+                _Snapshot(
+                    obsid=int(block.entry.obsid),
+                    seconds=_collection_seconds(block),
+                    release=float(block.entry.begin),
+                    visit=block.entry.visit,
+                )
+            )
+        return self._decode(snapshots)
+
+    def _repair_window(self, decoded: _Decoded) -> _Decoded:
+        """Recover at most one profitable timed visit before its window closes.
+
+        A long snapshot may fill a plan while a short visit must precede it
+        to meet its window. Try that insertion, or one position earlier, using
+        the full exact decoder and its resource/commitment checks. Keep only
+        a strict objective gain. Search budgets and original native scores
+        remain separate; subsequent momentum passes forecast the changed plan.
+        """
+        if self._window_repaired:
+            return decoded
+        old_score = self._objective(decoded.final)
+        for window in self._pending_windows(decoded):
+            if window.visit is not None and any(
+                int(block.entry.obsid) == window.obsid
+                and block.entry.visit == window.visit
+                for block in decoded.final.timeline
+            ):
+                continue
+            crossing = len(decoded.sequence)
+            for index, (before, after) in enumerate(
+                zip(decoded.states[:-1], decoded.states[1:], strict=True)
+            ):
+                if (
+                    after.cursor > before.cursor
+                    and after.timeline[after.cursor - 1].end > window.deadline
+                ):
+                    crossing = index
+                    break
+            for position in sorted({crossing, max(0, crossing - 1)}):
+                # The window bounds collection, not the ingress slew. Pin the
+                # intended visit while the exact decoder times its slew/setup.
+                added = self._released(window.obsid).model_copy(
+                    update={"visit": window.visit}
+                )
+                sequence = [
+                    *decoded.sequence[:position],
+                    added,
+                    *decoded.sequence[position:],
+                ]
+                candidate = self._redecode(decoded, sequence, position, position, 1)
+                before, after = candidate.states[position : position + 2]
+                if after.cursor <= before.cursor:
+                    continue
+                placed = after.timeline[after.cursor - 1]
+                if placed.entry.visit != window.visit:
+                    continue
+                candidate = self._normalized_placements(candidate)
+                if window.visit is not None and not any(
+                    int(block.entry.obsid) == window.obsid
+                    and block.entry.visit == window.visit
+                    for block in candidate.final.timeline
+                ):
+                    continue
+                score = self._objective(candidate.final)
+                if score > old_score:
+                    self._window_repaired = True
+                    self._log(
+                        float(placed.entry.begin),
+                        f"Recovered request {window.obsid} before its deadline; "
+                        f"exact planned value increases by {score - old_score:.6f}",
+                        window.obsid,
+                    )
+                    return candidate
+        return decoded
 
     def _idle_before(self, current: _Decoded) -> list[float]:
         """Return, for each snapshot in the sequence, the idle seconds before it.
