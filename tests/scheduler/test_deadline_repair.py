@@ -2,6 +2,8 @@
 
 from datetime import timedelta
 
+import pytest
+
 from conops.config import ObservationCategory, ObservationTiming
 from conops.schedulers import CpSatScheduler
 from conops.schedulers.local_search_scheduler import _Decoded
@@ -67,18 +69,31 @@ def planner(kind=CpSatScheduler, *, budget=None, activities=()):
     )
 
 
-def test_recovers_timed_visit_before_long_snapshot_with_unchanged_native_budget():
+@pytest.mark.parametrize("native_search", [False, True])
+def test_recovers_timed_visit_before_long_snapshot_with_unchanged_native_budget(
+    monkeypatch, native_search
+):
+    if not native_search:
+        # Exercise exact repair when native optimization retains the weaker
+        # priority incumbent; lookahead can already recover this visit itself.
+        monkeypatch.setattr(CpSatScheduler, "_solve", lambda self, start: start)
     old = planner(WithoutRepair)
     old.schedule()
     new = planner()
     plan = new.schedule()
-    assert old.score == 8 * HOUR * 100
-    assert new.score == 8 * HOUR * 100 + HOUR * 90
+    optimum = 8 * HOUR * 100 + HOUR * 90
+    assert old.score == (optimum if native_search else 8 * HOUR * 100)
+    assert new.score == optimum
     assert [int(e.obsid) for e in plan] == [200, 100]
     assert new.solver_score == old.score
     assert new.solver_search_statuses == old.solver_search_statuses
     assert new.solver_search_limits == old.solver_search_limits
-    assert new.solver_search_statuses and set(new.solver_search_statuses) == {"OPTIMAL"}
+    if native_search:
+        assert new.solver_search_statuses
+        assert set(new.solver_search_statuses) == {"OPTIMAL"}
+    else:
+        assert not new.solver_search_statuses
+    assert new._window_repaired is not native_search
     assert new.solver_deterministic_time == 20 and new.chunk == timedelta(hours=6)
     assert new.workers == 1 and new.seed == 2029
 
@@ -107,8 +122,11 @@ def test_keeps_mandatory_activity_whole_while_reordering_science():
             assert float(e.end) <= hold.begin or float(e.begin) >= hold.end
 
 
-def test_reused_scheduler_clears_repair_flag_and_keeps_input_history():
+def test_reused_scheduler_clears_repair_flag_and_keeps_input_history(monkeypatch):
     scheduler = planner()
+    # Keep this a repair lifecycle test even when native lookahead would
+    # otherwise find the timed visit before the repair is reached.
+    monkeypatch.setattr(scheduler, "_solve", lambda start: start)
     before = [
         (t.exptime, t.collected_seconds, set(t.visits_done)) for t in scheduler.targets
     ]
