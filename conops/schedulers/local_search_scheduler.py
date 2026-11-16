@@ -1612,11 +1612,20 @@ class LocalSearchScheduler(PriorityScheduler):
         return changed, lo, hi, 0
 
     def _open_requests(self, current: _Decoded) -> list[int]:
-        """Return the requests the current plan leaves exposure to place."""
+        """Exposure left whose collection deadline can still be met.
+
+        A request may move before the current plan's end, but never before
+        this horizon starts. Expired requests must not spend insertion or
+        replacement trials that could explore feasible science instead.
+        """
         return [
             obsid
             for obsid, request in self._by_obsid.items()
-            if _wants_more(
+            if (
+                request.target.deadline is None
+                or request.target.deadline >= self.ctx.ustart
+            )
+            and _wants_more(
                 request, current.final.remaining[obsid], self._initial_remaining[obsid]
             )
         ]
