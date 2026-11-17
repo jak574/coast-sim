@@ -33,8 +33,8 @@ from conops.config import (
 )
 from conops.ditl.ditl_mixin import DITLMixin
 from conops.ditl.queue_ditl import _SequenceRun
-from conops.simulation.slew import Slew
 from conops.simulation.momentum import StoredMomentumTracker
+from conops.simulation.slew import Slew
 from conops.targets import DESATURATION_OBSID, Plan, Pointing, ScheduledActivity
 from conops.targets.sequence import ObservationSequence, SequenceStep
 
@@ -635,12 +635,12 @@ def test_capacity_fault_is_recorded_without_an_available_dump(
     config = _config(
         capacity_n_m_s=CAPACITY, initial_momentum_body_n_m_s=(2.0, 0.0, 0.0)
     )
-    ditl = create_ditl(config, [_held(config)], BEGIN, BEGIN + timedelta(minutes=10))
+    activities = []
     if pending_dump:
         config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump = (
             ThrusterDumpConfig()
         )
-        ditl.activities = [
+        activities = [
             ScheduledActivity(
                 name="Pending dump",
                 begin=BEGIN.timestamp() + 500,
@@ -648,6 +648,13 @@ def test_capacity_fault_is_recorded_without_an_available_dump(
                 desaturation=True,
             )
         ]
+    ditl = create_ditl(
+        config,
+        [_held(config)],
+        BEGIN,
+        BEGIN + timedelta(minutes=10),
+        activities=activities,
+    )
     assert ditl.calc()
     faults = [
         e
@@ -697,7 +704,7 @@ class TestOneDumpAnswersACall:
 @pytest.mark.parametrize("changed_frame", [False, True])
 @pytest.mark.parametrize("instrument", ["Camera", "Scope"])
 def test_sequence_momentum_forecast_uses_each_steps_physical_body_attitude(
-    changed_frame: bool, instrument: str
+    monkeypatch: pytest.MonkeyPatch, changed_frame: bool, instrument: str
 ) -> None:
     config = _config()
     if changed_frame:
@@ -744,16 +751,17 @@ def test_sequence_momentum_forecast_uses_each_steps_physical_body_attitude(
         endroll=body[2],
         instrument_roll=instrument_roll,
     )
-    end, forecast = sim._visit_forecast(first, slew)
+    monkeypatch.setattr(sim, "_power_optimal_roll", lambda target, at: 32.0)
+    end, forecast, motions = sim._visit_forecast(first, slew)
     starts = parent.sequence.step_starts(
         config.spacecraft_bus.attitude_control,
         sim._timing_for(parent),
         *parent.visit_base_pointing,
     )
-    for index, start in enumerate(starts):
+    for index, motion in enumerate(motions):
         roll = instrument_roll + (0 if index == 0 else 15)
         expected = parent.step_pointing(index).target_body_attitude(roll)
-        observed = forecast(first.collection_begin + start + 1)
+        observed = forecast(float(motion.slewend) + 1)
         assert quaternion_to_rotation_matrix(
             attitude_to_quat(*observed)
         ) == pytest.approx(

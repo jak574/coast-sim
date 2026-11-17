@@ -26,9 +26,9 @@ from conops.ditl import RollingHorizonDITL
 from conops.schedulers import CpSatScheduler, LocalSearchScheduler, PriorityScheduler
 from conops.schedulers.context import SchedulingContext
 from conops.schedulers.momentum import MomentumForecast
-from conops.targets import Plan, PlanEntry, Pointing, ScheduledActivity
 from conops.simulation.attitude import Attitude
 from conops.simulation.slew import Slew
+from conops.targets import Plan, PlanEntry, Pointing, ScheduledActivity
 from conops.targets.sequence import ObservationSequence, SequenceStep
 
 BEGIN = datetime(2025, 11, 1, tzinfo=timezone.utc)

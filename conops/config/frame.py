@@ -26,8 +26,6 @@ from ..common.vector import (
 )
 from ._base import ConfigModel
 
-IDENTITY_TOLERANCE = 1e-12
-
 if TYPE_CHECKING:
     from rust_ephem.constraints import ConstraintConfig
 
