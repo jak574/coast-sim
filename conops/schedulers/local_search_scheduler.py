@@ -264,6 +264,7 @@ class LocalSearchScheduler(PriorityScheduler):
         self._initial_energy: tuple[Additions, ...] = ()
         self._by_obsid = {}
         self._window_repaired = False
+        self._recovered_window: _PendingWindow | None = None
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, then search for a better one, within
@@ -271,6 +272,7 @@ class LocalSearchScheduler(PriorityScheduler):
         self.search_iterations.clear()
         self.search_limits.clear()
         self._window_repaired = False
+        self._recovered_window = None
         return self._schedule_with_incumbents()
 
     def _schedule_with_incumbents(self) -> Plan:
@@ -1743,17 +1745,32 @@ class LocalSearchScheduler(PriorityScheduler):
         return self._decode(snapshots)
 
     def _repair_window(self, decoded: _Decoded) -> _Decoded:
-        """Recover at most one profitable timed visit in this construction pass.
+        """Recover one timed visit, retrying it if a rebuild loses it.
 
         A long snapshot may fill a plan while a short visit must precede it
         to meet its window. Try that insertion, or one position earlier, using
         the full exact decoder and its resource/commitment checks. Keep only
         a strict objective gain. Search budgets and original native scores
-        remain separate; subsequent momentum passes forecast the changed plan
-        and may need recovery again after rebuilding around new support.
+        remain separate. Later momentum passes may restore the same visit
+        after rebuilding around support, without expanding recovery to other
+        windows after its first success.
         """
+        windows = self._pending_windows(decoded)
+        recovered = self._recovered_window
+        if recovered is not None:
+            if any(
+                int(block.entry.obsid) == recovered.obsid
+                and block.entry.visit == recovered.visit
+                for block in decoded.final.timeline
+            ):
+                return decoded
+            windows = [
+                window
+                for window in windows
+                if (window.obsid, window.visit) == (recovered.obsid, recovered.visit)
+            ]
         old_score = self._objective(decoded.final)
-        for window in self._pending_windows(decoded):
+        for window in windows:
             if window.visit is not None and any(
                 int(block.entry.obsid) == window.obsid
                 and block.entry.visit == window.visit
@@ -1798,6 +1815,7 @@ class LocalSearchScheduler(PriorityScheduler):
                 score = self._objective(candidate.final)
                 if score > old_score:
                     self._window_repaired = True
+                    self._recovered_window = window
                     self._log(
                         float(placed.entry.begin),
                         f"Recovered request {window.obsid} before its deadline; "

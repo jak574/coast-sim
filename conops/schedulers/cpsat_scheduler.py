@@ -520,8 +520,13 @@ class _ChunkModel:
                 model.add(
                     step * self.slew_step[k] < self.chunk_seconds
                 ).only_enforce_if(present[k])
-            if task.copy > 0 and self.tasks[k - 1].key == task.key:
-                # A window's snapshots of a request are used in order.
+            if (
+                task.copy > 0
+                and self.tasks[k - 1].key == task.key
+                and self.tasks[k - 1].visit == task.visit
+            ):
+                # Copies of the same visit are used in order. Distinct visit
+                # windows remain independently optional.
                 model.add_implication(present[k], present[k - 1])
                 model.add(
                     arrival[k] >= arrival[k - 1] + task.overhead + collection[k - 1]
@@ -551,9 +556,10 @@ class _ChunkModel:
         for visits in visits_of.values():
             # Candidates are ranked, with the windows the priority-first plan
             # used first, so a later window can come before an earlier one.
-            # Put the visits in time order: each waits for its cadence after
-            # the collection before it ends.
-            visits.sort(key=lambda k: (self.tasks[k].window[0], self.tasks[k].copy))
+            # Visit-specific pointings can have visibility spans in another
+            # order. Arrival bounds put the visits in time order: each waits
+            # for its cadence after the preceding collection ends.
+            visits.sort(key=lambda k: (self.tasks[k].arrival[0], self.tasks[k].copy))
             for n, i in enumerate(visits):
                 spacing = self.tasks[i].spacing
                 assert spacing is not None
@@ -1302,7 +1308,14 @@ class _ChunkModel:
                 if solver.value(self.span_seconds[(k, n)]) > 0:
                     slew = self.step * solver.value(self.slew_step[k])
                     release = origin_time + max(slew, _ceil(span.arrival[0], self.step))
-            snapshots.append(_Snapshot(obsid=obsid, seconds=seconds, release=release))
+            snapshots.append(
+                _Snapshot(
+                    obsid=obsid,
+                    seconds=seconds,
+                    release=release,
+                    visit=self.tasks[k].visit,
+                )
+            )
         return status_name, ended, snapshots
 
 
@@ -1448,6 +1461,7 @@ class CpSatScheduler(LocalSearchScheduler):
         self.solver_search_statuses.clear()
         self.solver_search_limits.clear()
         self._window_repaired = False
+        self._recovered_window = None
         self._solve_cache = _ChunkSolveCache()
         self._intermediate_solve_cache = _ChunkSolveCache()
         return self._schedule_with_incumbents()
@@ -1988,7 +2002,8 @@ class CpSatScheduler(LocalSearchScheduler):
         """Candidate snapshots of each request in each window open during the chunk.
 
         Candidates in windows the priority-first plan used come first, then the
-        rest, each in priority order, up to ``max_candidates``.
+        rest, each in priority order, up to ``max_candidates``. Resolve each
+        visit's own science pose and visibility before building its tasks.
         """
         ctx = self.ctx
         shares = program_shares(state.programs) if self._deficit_weight else {}
@@ -2040,12 +2055,25 @@ class CpSatScheduler(LocalSearchScheduler):
                         after_visit=state.last_visit_window.get(obsid),
                     )
                 ]
-            for w0, w1 in request.windows:
+            pointings = {visit: target.visit_pointing(visit) for _, _, visit in slots}
+            visible = {
+                visit: (
+                    ctx.visibility_windows(pointing)
+                    if visit is not None
+                    else request.windows
+                )
+                for visit, pointing in pointings.items()
+            }
+            windows = sorted({window for spans in visible.values() for window in spans})
+            for w0, w1 in windows:
                 if w0 >= chunk_end:
                     continue
                 window_key = (obsid, w0)
                 copy = 0
                 for slot_opens, slot_deadline, visit in slots:
+                    if (w0, w1) not in visible[visit]:
+                        continue
+                    pointing = pointings[visit]
                     if w1 <= slot_opens:
                         continue
                     window = (
@@ -2063,18 +2091,20 @@ class CpSatScheduler(LocalSearchScheduler):
                     if latest < earliest or window[0] >= chunk_end - origin_time:
                         continue
                     when = max(w0, origin_time)
-                    attitude = target.target_body_attitude(
-                        ctx.instrument_roll(target, when), at=when
+                    attitude = pointing.target_body_attitude(
+                        ctx.instrument_roll(pointing, when), at=when
                     )
                     attitudes = (attitude, attitude)
                     task_overhead = overhead
-                    if target.sequence is not None:
+                    if pointing.sequence is not None:
                         # A visit runs whole: its calibration, the slews
                         # between its steps and any step setup are part of
                         # its length, and it leaves the spacecraft at its
                         # last step.
-                        first = target.step_pointing(0)
-                        last_step = target.step_pointing(len(target.sequence.steps) - 1)
+                        first = pointing.step_pointing(0)
+                        last_step = pointing.step_pointing(
+                            len(pointing.sequence.steps) - 1
+                        )
                         attitudes = (
                             first.target_body_attitude(
                                 ctx.instrument_roll(first, when), at=when
@@ -2085,7 +2115,7 @@ class CpSatScheduler(LocalSearchScheduler):
                         )
                         task_overhead = overhead + int(
                             np.ceil(
-                                target.sequence_overhead_seconds(
+                                pointing.sequence_overhead_seconds(
                                     self.config.spacecraft_bus.attitude_control,
                                     self.config.payload.observation_timing,
                                 )
@@ -2121,8 +2151,8 @@ class CpSatScheduler(LocalSearchScheduler):
                         (earliest, latest),
                         (self._allocated_factor - 1.0) * rate,
                     )
-                    data = self._candidate_data(target)
-                    power = self._candidate_power(target, when)
+                    data = self._candidate_data(pointing)
+                    power = self._candidate_power(pointing, when)
                     if visit is not None:
                         # One visit per window.
                         copies = 1

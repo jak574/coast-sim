@@ -553,7 +553,7 @@ class PlanEntry(BaseModel):
             if self.safe_hold
             else ACSMode.DESAT
             if self.desaturation
-            else ACSMode.IDLE
+            else ACSMode.ACTIVITY
         )
 
     @property

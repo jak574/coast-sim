@@ -1249,6 +1249,13 @@ class QueueDITL(DITLMixin, DITLStats):
             and utime >= self._activity_hold_begin
         ):
             self.acs.begin_desaturation()
+        elif (
+            active is not None
+            and not active.safe_hold
+            and not active.desaturation
+            and utime >= self._activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
         if self._active_activity is None:
             if self._paused_activity is not None:
                 if (
@@ -2089,6 +2096,12 @@ class QueueDITL(DITLMixin, DITLStats):
             self.acs.begin_safe_hold()
         if activity.desaturation and utime >= self._activity_hold_begin:
             self.acs.begin_desaturation()
+        if (
+            not activity.safe_hold
+            and not activity.desaturation
+            and utime >= self._activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
         if not resumed and not continuation:
             self._add_activity_data(float(activity.data_gb), activity)
         description = f"Scheduled activity {activity.name} {'resumes' if resumed or continuation else 'begins'}"
@@ -2148,6 +2161,7 @@ class QueueDITL(DITLMixin, DITLStats):
             acs_mode=self.acs.acsmode,
         )
         self._active_activity = None
+        self.acs.end_activity_hold()
         if activity.safe_hold:
             self.acs.end_safe_hold()
         if activity.desaturation:
@@ -3448,7 +3462,11 @@ class QueueDITL(DITLMixin, DITLStats):
             self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_enabled
             is True
         ):
-            if self.acs.get_mode(utime) not in (ACSMode.IDLE, ACSMode.SAA):
+            if self.acs.get_mode(utime) not in (
+                ACSMode.IDLE,
+                ACSMode.ACTIVITY,
+                ACSMode.SAA,
+            ):
                 return
             recovery = self._momentum_recovery
             self._momentum_recovery = None
@@ -3466,6 +3484,7 @@ class QueueDITL(DITLMixin, DITLStats):
         planner = self._idle_safety
         if planner is None or self.acs.get_mode(utime) not in (
             ACSMode.IDLE,
+            ACSMode.ACTIVITY,
             ACSMode.SAA,
         ):
             return

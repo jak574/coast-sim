@@ -1,5 +1,6 @@
 from pydantic import Field
 
+from ..common.enums import ACSMode
 from ._base import ConfigModel
 
 
@@ -40,10 +41,16 @@ class PowerDraw(ConfigModel):
         if in_eclipse:
             if mode is not None and mode in self.eclipse_power_mode:
                 return self.eclipse_power_mode[mode]
+            if mode == ACSMode.ACTIVITY and ACSMode.IDLE in self.eclipse_power_mode:
+                return self.eclipse_power_mode[ACSMode.IDLE]
             if self.eclipse_power is not None:
                 return self.eclipse_power
 
         # Otherwise use normal power values
         if mode is None:
             return self.nominal_power
+        if mode == ACSMode.ACTIVITY:
+            return self.power_mode.get(
+                mode, self.power_mode.get(ACSMode.IDLE, self.nominal_power)
+            )
         return self.power_mode.get(mode, self.nominal_power)

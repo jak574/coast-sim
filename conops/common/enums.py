@@ -37,6 +37,8 @@ class ACSMode(int, Enum):
     IDLE = 6
     DESAT = 7
     """Holding for a thruster momentum dump."""
+    ACTIVITY = 8
+    """Holding for an ordinary scheduled non-science activity."""
 
 
 class ChargeState(int, Enum):
@@ -68,7 +70,7 @@ class ObsType(str, Enum):
     CHARGE = "CHARGE"  # Battery-charging / sun-pointing maneuver
     GSP = "GSP"  # Ground Station Pass
     IDLE = "IDLE"  # Constraint-safe idle hold
-    ACTIVITY = "ACTIVITY"  # Scheduled non-science activity held in IDLE
+    ACTIVITY = "ACTIVITY"  # Scheduled non-science activity
 
 
 class AntennaType(str, Enum):

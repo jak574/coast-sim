@@ -8,7 +8,7 @@ from conops import DITL
 from conops.schedulers import CpSatScheduler, LocalSearchScheduler
 from conops.targets import Plan, ScheduledActivity
 
-from .planning_scenario import BEGIN, HOUR, T0
+from .planning_scenario import BEGIN, HOUR, T0, make_target
 from .test_deadline_repair import scenario
 
 
@@ -76,3 +76,44 @@ def test_rebuilt_plan_can_recover_a_visit_after_an_earlier_success(
     )
     assert run.calc()
     assert run.validate_plan_matches_execution() == []
+
+
+@pytest.mark.parametrize("planner", [LocalSearchScheduler, CpSatScheduler])
+def test_retained_recovery_does_not_expand_into_another_timed_visit(
+    monkeypatch, planner
+):
+    config, targets = scenario()
+    targets.append(
+        make_target(
+            config,
+            300,
+            105,
+            10,
+            merit=80,
+            minutes=60,
+            snapshot=60,
+            ss_min=60,
+            earliest_start=T0 + 7 * HOUR,
+            deadline=T0 + 8 * HOUR,
+        )
+    )
+    scheduler = planner(
+        config,
+        targets,
+        BEGIN,
+        BEGIN + timedelta(hours=24),
+        time_limit=0,
+        max_iterations=0,
+        include_passes=False,
+    )
+    if planner is CpSatScheduler:
+        monkeypatch.setattr(scheduler, "_solve", lambda start: start)
+    scheduler.schedule()
+    recovered = scheduler._best
+    assert {int(block.entry.obsid) for block in recovered.final.timeline} == {100, 200}
+
+    # Recovery may restore its lost visit after a rebuild. Merely calling it
+    # again must retain the original one-visit recovery search scope.
+    retained = scheduler._repair_window(recovered)
+    assert retained is recovered
+    assert {int(block.entry.obsid) for block in retained.final.timeline} == {100, 200}

@@ -827,6 +827,15 @@ class DITL(DITLMixin, DITLStats):
         ):
             self.acs.begin_safe_hold()
         if (
+            self._active_entry is not None
+            and entry_obstype(self._active_entry) == ObsType.ACTIVITY
+            and not self._active_entry.safe_hold
+            and not self._active_entry.desaturation
+            and self._active_entry.activity_hold_begin is not None
+            and utime >= self._active_entry.activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
+        if (
             self._active_pass is not None
             and self.acs.current_pass is None
             and self._active_pass.in_pass(utime)
@@ -881,6 +890,7 @@ class DITL(DITLMixin, DITLStats):
             self.acs.cancel_pending_slews(entry.obsid)
             self.acs.request_end_battery_charge(utime)
         elif obstype == ObsType.ACTIVITY:
+            self.acs.end_activity_hold()
             self.acs.cancel_pending_slews(entry.obsid)
             entry.end = min(float(entry.end), utime)
             self.log.log_event(
@@ -940,7 +950,7 @@ class DITL(DITLMixin, DITLStats):
         return True
 
     def _command_activity_entry(self, entry: PlanEntry, utime: float) -> None:
-        """Hold the entry's attitude in IDLE for the activity, slewing to it
+        """Hold the entry's activity mode, slewing to its attitude
         first where the spacecraft is elsewhere."""
         self.acs.end_science_observation(utime)
         if entry.desaturation:
@@ -951,6 +961,12 @@ class DITL(DITLMixin, DITLStats):
             entry.activity_hold_end = float(entry.end)
         if entry.safe_hold and utime >= entry.activity_hold_begin:
             self.acs.begin_safe_hold()
+        if (
+            not entry.safe_hold
+            and not entry.desaturation
+            and utime >= entry.activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
         resumed = entry.activity_resumed or entry.activity_hold_begin < self.ustart
         entry.begin = max(float(entry.begin), self.ustart)
         entry.end = min(float(entry.end), self.uend)

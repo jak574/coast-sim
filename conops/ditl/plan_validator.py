@@ -542,7 +542,7 @@ class PlanExecutionValidator:
     ) -> list[PlanExecutionMismatch]:
         """Check that no science, contact or charge ran during an activity.
 
-        The full stationary interval uses IDLE (SAA allowed), DESAT for dumps,
+        The full stationary interval uses ACTIVITY (SAA allowed), DESAT for dumps,
         or SAFE for recoverable safe holds. SAFE holds also retain their planned
         quaternion. Unexpected safe mode violates other stationary holds; legacy
         and flexible dispatch holds allow idle-safety recovery.
@@ -557,7 +557,7 @@ class PlanExecutionValidator:
         # SAFE engineering holds and DESAT dumps carry their own hold modes.
         expected = entry.activity_mode
         wrong = {ACSMode.SCIENCE, ACSMode.PASS, ACSMode.CHARGING}
-        wrong.update({ACSMode.IDLE, ACSMode.DESAT} - {expected})
+        wrong.update({ACSMode.IDLE, ACSMode.ACTIVITY, ACSMode.DESAT} - {expected})
         if entry.safe_hold:
             wrong.add(ACSMode.SAA)
         if not entry.safe_hold and entry.activity_requires_stationary:

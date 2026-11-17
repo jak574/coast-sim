@@ -3,7 +3,7 @@
 A maintenance window, a calibration that needs the spacecraft still, or a
 block set aside for an engineering test is a :class:`ScheduledActivity`: it
 has a start and a duration, the spacecraft holds the attitude it has in
-``IDLE`` mode for its length, and no science is observed meanwhile. The
+``ACTIVITY`` mode for its length, and no science is observed meanwhile. The
 schedulers reserve activities as fixed blocks, as they reserve ground passes,
 and both simulations execute them: dispatch ends the observation under way at
 the activity's start, starts none whose slew or collection would run into it,
@@ -116,7 +116,7 @@ class ScheduledActivity(BaseModel):
             if self.safe_hold
             else ACSMode.DESAT
             if self.desaturation
-            else ACSMode.IDLE
+            else ACSMode.ACTIVITY
         )
 
     @property

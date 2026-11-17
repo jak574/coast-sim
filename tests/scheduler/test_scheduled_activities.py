@@ -784,7 +784,7 @@ class TestSlewsIntoActivities:
             for hk in ditl.telemetry.housekeeping
             if lamp.begin <= hk.timestamp.timestamp() < lamp.end
         }
-        assert modes == {int(ACSMode.IDLE)}
+        assert modes == {int(ACSMode.ACTIVITY)}
 
     def test_a_slew_under_way_delays_the_activity_which_keeps_its_length(
         self,
@@ -816,7 +816,7 @@ class TestSlewsIntoActivities:
             for hk in ditl.telemetry.housekeeping
             if float(activity.begin) <= hk.timestamp.timestamp() < float(activity.end)
         }
-        assert modes == {int(ACSMode.IDLE)}
+        assert modes == {int(ACSMode.ACTIVITY)}
 
     def test_a_fixed_activity_begins_at_its_start_regardless(self) -> None:
         lamp = _lamp_after_first(fixed=True)

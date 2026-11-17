@@ -120,7 +120,7 @@ def test_six_hour_eclipse_block_finishes_before_emergency_recharge(kind):
     charges = [e for e in run.plan if e.obstype == ObsType.CHARGE]
     assert charges and min(float(e.begin) for e in charges) >= float(entry.end)
     assert any("charging waits for Calibration" in e.description for e in run.log)
-    expected = ACSMode.SAFE if kind == "safe" else ACSMode.IDLE
+    expected = ACSMode.SAFE if kind == "safe" else ACSMode.ACTIVITY
     samples = [
         h
         for h in run.telemetry.housekeeping

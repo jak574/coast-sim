@@ -419,10 +419,12 @@ Scheduled activities
 A scheduled activity is a block of time in which no science is observed. A
 maintenance window, a calibration that needs the spacecraft still and an engineering
 block are all activities. Each is a :class:`~conops.targets.ScheduledActivity` with
-a start and a duration. The spacecraft holds one attitude for the block in ``IDLE``
+a start and a duration. The spacecraft holds one attitude for the block in ``ACTIVITY`` (mode 8)
 mode. The mode is ``DESAT`` for a thruster momentum dump (see `Thruster momentum
 dumps`_) and ``SAFE`` for an engineering safe hold (see `Engineering safe holds and
 power-positive attitudes`_).
+
+Ordinary holds report ``ACTIVITY`` after ingress and return to the applicable ACS mode when they end or are interrupted. Slews, charging and SAFE recovery retain their own modes. Unless explicitly overridden, activity constraint scopes, mode-dependent power (including eclipse power) and housekeeping rates inherit the existing ``IDLE`` settings. Configure ``ACTIVITY`` constraint scopes or mode 8 power/rates to give activities different policies or loads.
 
 The planners take the activities in their ``activities`` argument and reserve each
 one as a fixed block, as they reserve ground passes. ``DITL`` commands the plan's
