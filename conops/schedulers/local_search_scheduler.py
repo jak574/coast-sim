@@ -67,6 +67,8 @@ class _Snapshot(BaseModel):
     it until a move releases it."""
     visit: int | None = None
     """An explicit visit window for an insertion; None selects the next open one."""
+    interrupted_window: tuple[float, float] | None = None
+    """Science interval of an interrupted seed fragment, valid only while pinned."""
 
 
 class _PendingWindow(BaseModel):
@@ -165,10 +167,10 @@ class LocalSearchScheduler(PriorityScheduler):
     in are worth ``allocation_bonus`` more. The best plan
     found is returned, and never one worse than the priority-first plan.
 
-    Before the random search, exact decoding may recover one profitable
-    timed visit hidden behind a long snapshot. This construction pass uses
-    the same resource and commitment checks and does not consume random
-    proposals or change their configured budget.
+    Before the random search in each momentum pass, exact decoding may
+    recover one profitable timed visit hidden behind a long snapshot. This
+    construction pass uses the same resource and commitment checks and does
+    not consume random proposals or change their configured budget.
 
     Each plan entry's merit is the value its snapshot has where the decoder
     places it, with the program shares the plan delivers before it; a Target
@@ -733,6 +735,18 @@ class LocalSearchScheduler(PriorityScheduler):
                         seconds=seconds,
                         release=float(entry.begin),
                         visit=entry.visit,
+                        interrupted_window=(
+                            (entry.collection_begin, entry.collection_end)
+                            if entry.collection_begin is not None
+                            and entry.collection_end is not None
+                            and seconds
+                            < snapshot_min_seconds(request.target, self.ctx.step_size)
+                            and any(
+                                abs(t - float(entry.end)) <= TIME_TOLERANCE_S
+                                for t in entry.interruptions
+                            )
+                            else None
+                        ),
                     )
                 )
         # Each snapshot where the plan had it, before the plan's next one
@@ -1223,6 +1237,22 @@ class LocalSearchScheduler(PriorityScheduler):
         """
         obsid = snapshot.obsid
         request = self._by_obsid[obsid]
+        fragment = (
+            snapshot.interrupted_window is not None
+            and snapshot.release is not None
+            and 0
+            < snapshot.seconds
+            < snapshot_min_seconds(request.target, self.ctx.step_size)
+            and not request.timed
+            and not request.whole
+            and request.target.sequence is None
+            and request.category.interruptible
+        )
+        if fragment:
+            # Dispatch retains useful science cut short by an interruption.
+            # Recheck only that original interval; ordinary proposals retain
+            # the request's minimum and never inherit this local exception.
+            request = request.model_copy()
         remaining = state.remaining[obsid]
         exposure = self._initial_remaining[obsid]
         if not _wants_more(request, remaining, exposure):
@@ -1230,7 +1260,7 @@ class LocalSearchScheduler(PriorityScheduler):
 
         # _fit_in_gap sizes the snapshot from the request's remaining exposure.
         request.remaining = min(remaining, snapshot.seconds)
-        request.placed_before = remaining < exposure
+        request.placed_before = remaining < exposure or fragment
         request.budget_left = self._budget_left_in(
             request, state.categories, state.groups
         )
@@ -1285,6 +1315,18 @@ class LocalSearchScheduler(PriorityScheduler):
             if charged is None:
                 continue
             block, slew, succ_slew = charged
+            if fragment:
+                window = snapshot.interrupted_window
+                assert window is not None
+                begin, end = block.entry.collection_begin, block.entry.collection_end
+                if (
+                    begin is None
+                    or end is None
+                    or abs(begin - window[0]) > TIME_TOLERANCE_S
+                    or abs(end - window[1]) > TIME_TOLERANCE_S
+                ):
+                    continue
+                block.entry.record_interruption(block.end)
             # And only where the recorder has room for it; later gaps may be
             # after a contact that makes room.
             additions = [
@@ -1683,7 +1725,9 @@ class LocalSearchScheduler(PriorityScheduler):
     def _normalized_placements(self, decoded: _Decoded) -> _Decoded:
         """Retain only actual placements, released where exact decoding put them."""
         snapshots = []
-        for before, after in zip(decoded.states[:-1], decoded.states[1:], strict=True):
+        for snapshot, before, after in zip(
+            decoded.sequence, decoded.states[:-1], decoded.states[1:], strict=True
+        ):
             if after.cursor <= before.cursor:
                 continue
             block = after.timeline[after.cursor - 1]
@@ -1693,21 +1737,21 @@ class LocalSearchScheduler(PriorityScheduler):
                     seconds=_collection_seconds(block),
                     release=float(block.entry.begin),
                     visit=block.entry.visit,
+                    interrupted_window=snapshot.interrupted_window,
                 )
             )
         return self._decode(snapshots)
 
     def _repair_window(self, decoded: _Decoded) -> _Decoded:
-        """Recover at most one profitable timed visit before its window closes.
+        """Recover at most one profitable timed visit in this construction pass.
 
         A long snapshot may fill a plan while a short visit must precede it
         to meet its window. Try that insertion, or one position earlier, using
         the full exact decoder and its resource/commitment checks. Keep only
         a strict objective gain. Search budgets and original native scores
-        remain separate; subsequent momentum passes forecast the changed plan.
+        remain separate; subsequent momentum passes forecast the changed plan
+        and may need recovery again after rebuilding around new support.
         """
-        if self._window_repaired:
-            return decoded
         old_score = self._objective(decoded.final)
         for window in self._pending_windows(decoded):
             if window.visit is not None and any(
