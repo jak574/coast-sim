@@ -59,7 +59,11 @@ class TestSolverSearchReporting:
     def _mock_chunk_inputs(monkeypatch, scheduler):
         pose = (0.0, 0.0, 0.0)
         state = SimpleNamespace(
-            remaining={100: 60}, score=0.0, timeline=[], allocated_left={}
+            remaining={100: 60},
+            score=0.0,
+            timeline=[],
+            allocated_left={},
+            owed=frozenset(),
         )
         scheduler._by_obsid = {}
         monkeypatch.setattr(
@@ -151,6 +155,9 @@ class TestSolverSearchReporting:
         calls = []
 
         def counted(self, *args, **kwargs):
+            if self.parameters.fix_variables_to_their_hinted_value:
+                # Completing the hint is not a search.
+                return original(self, *args, **kwargs)
             calls.append(True)
             return original(self, *args, **kwargs)
 
@@ -176,6 +183,9 @@ class TestSolverSearchReporting:
         calls = []
 
         def counted(self, *args, **kwargs):
+            if self.parameters.fix_variables_to_their_hinted_value:
+                # Completing the hint is not a search.
+                return original(self, *args, **kwargs)
             calls.append(True)
             return original(self, *args, **kwargs)
 
@@ -1254,6 +1264,9 @@ class TestDeterministicTime:
         original = cp_model.CpSolver.solve
 
         def solve(self: cp_model.CpSolver, model: cp_model.CpModel) -> int:
+            if self.parameters.fix_variables_to_their_hinted_value:
+                # Completing the hint is not a search.
+                return original(self, model)
             seen.append(
                 (
                     self.parameters.max_deterministic_time,

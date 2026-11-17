@@ -15,6 +15,7 @@ for a better order by inserting, replacing, removing, swapping and moving snapsh
 keeping the best plan it finds within a time or iteration budget.
 """
 
+import math
 import random
 import time
 from collections import Counter, defaultdict
@@ -69,6 +70,12 @@ class _Snapshot(BaseModel):
     """An explicit visit window for an insertion; None selects the next open one."""
     interrupted_window: tuple[float, float] | None = None
     """Science interval of an interrupted seed fragment, valid only while pinned."""
+    remainder: bool = False
+    """Whether the snapshot is the short end of a request's exposure, placed
+    earlier in time than the rest of it. The priority-first scheduler places
+    the rest first and then lets what is left be shorter than ``ss_min``; the
+    decoder meets the remainder first, and takes it on the condition that a
+    full snapshot of the request follows (see :attr:`_State.owed`)."""
 
 
 class _PendingWindow(BaseModel):
@@ -110,6 +117,10 @@ class _State(BaseModel):
     """What the plan draws from the battery, by segment of the battery ledger."""
     allocated_left: dict[tuple[int, int], float]
     """Allocated seconds not yet used, by obsid and span (see ``allocated``)."""
+    owed: frozenset[int] = frozenset()
+    """Requests with only remainders shorter than ``ss_min`` placed so far
+    (see :attr:`_Snapshot.remainder`). A full snapshot of each must follow:
+    a final state that still owes one is not a valid plan."""
 
 
 class _Decoded(BaseModel):
@@ -573,6 +584,9 @@ class LocalSearchScheduler(PriorityScheduler):
                     seconds=_collection_seconds(b),
                     release=float(b.entry.begin),
                     visit=b.entry.visit,
+                    remainder=self._below_minimum(
+                        self._by_obsid[int(b.entry.obsid)], _collection_seconds(b)
+                    ),
                 )
                 for b in science
             ]
@@ -615,6 +629,16 @@ class LocalSearchScheduler(PriorityScheduler):
             self._fixed = best_fixed
             self._initial_volumes, self._initial_energy = best_volumes, best_energy
         return start
+
+    def _below_minimum(self, request: _Request, seconds: float) -> bool:
+        """Whether a plain snapshot of ``seconds`` is shorter than the
+        request's minimum, as only the remainder of its exposure may be."""
+        return (
+            not request.timed
+            and not request.whole
+            and request.target.sequence is None
+            and 0 < seconds < snapshot_min_seconds(request.target, self.ctx.step_size)
+        )
 
     def _initialize_decoder(self) -> list[_Request]:
         """Snapshot the horizon state before placing candidate science."""
@@ -731,31 +755,46 @@ class LocalSearchScheduler(PriorityScheduler):
                 continue
             visit_of = None
             if seconds > 0.0:
+                window = None
+                if (
+                    entry.collection_begin is not None
+                    and entry.collection_end is not None
+                    and seconds
+                    < snapshot_min_seconds(request.target, self.ctx.step_size)
+                    and any(
+                        abs(t - float(entry.end)) <= TIME_TOLERANCE_S
+                        for t in entry.interruptions
+                    )
+                ):
+                    window = (entry.collection_begin, entry.collection_end)
                 snapshots.append(
                     _Snapshot(
                         obsid=obsid,
                         seconds=seconds,
                         release=float(entry.begin),
                         visit=entry.visit,
-                        interrupted_window=(
-                            (entry.collection_begin, entry.collection_end)
-                            if entry.collection_begin is not None
-                            and entry.collection_end is not None
-                            and seconds
-                            < snapshot_min_seconds(request.target, self.ctx.step_size)
-                            and any(
-                                abs(t - float(entry.end)) <= TIME_TOLERANCE_S
-                                for t in entry.interruptions
-                            )
-                            else None
-                        ),
+                        interrupted_window=window,
+                        remainder=window is None
+                        and self._below_minimum(request, seconds),
                     )
                 )
+        decoded = self._decode_where_planned(snapshots)
+        if decoded.final.owed:
+            # A remainder whose full snapshot the timeline no longer takes is
+            # left out, as any other snapshot it cannot take.
+            owed = decoded.final.owed
+            decoded = self._decode_where_planned(
+                [s for s in snapshots if not (s.remainder and s.obsid in owed)]
+            )
+        return decoded
+
+    def _decode_where_planned(self, snapshots: Sequence[_Snapshot]) -> _Decoded:
+        """Decode a plan's snapshots, keeping those the timeline takes where
+        the plan had them."""
         # Each snapshot where the plan had it, before the plan's next one
         # begins: one the timeline cannot take there is left out, where
         # decoding it at its next fit would push everything after it later;
-        # so is one it cannot take at all, such as a remainder shorter than
-        # the request's minimum.
+        # so is one it cannot take at all.
         kept: list[_Snapshot] = []
         states = [self._initial_state()]
         for snapshot, following in pairwise([*snapshots, None]):
@@ -1017,7 +1056,9 @@ class LocalSearchScheduler(PriorityScheduler):
 
     @staticmethod
     def _objective(state: _State) -> float:
-        return state.score
+        """The state's score, or minus infinity for a plan that is not valid
+        because a remainder's full snapshot never followed."""
+        return -math.inf if state.owed else state.score
 
     def _improves(
         self,
@@ -1262,7 +1303,7 @@ class LocalSearchScheduler(PriorityScheduler):
 
         # _fit_in_gap sizes the snapshot from the request's remaining exposure.
         request.remaining = min(remaining, snapshot.seconds)
-        request.placed_before = remaining < exposure or fragment
+        request.placed_before = remaining < exposure or fragment or snapshot.remainder
         request.budget_left = self._budget_left_in(
             request, state.categories, state.groups
         )
@@ -1380,6 +1421,16 @@ class LocalSearchScheduler(PriorityScheduler):
                 last_visit = {**last_visit, obsid: float(block.entry.collection_end)}
                 if block.entry.visit is not None:
                     last_visit_window = {**last_visit_window, obsid: block.entry.visit}
+            owed = state.owed
+            if snapshot.remainder or obsid in owed:
+                full = _collection_seconds(block) >= snapshot_min_seconds(
+                    request.target, self.ctx.step_size
+                )
+                if full:
+                    owed = owed - {obsid}
+                elif remaining >= exposure:
+                    # Nothing of the request is placed before this remainder.
+                    owed = owed | {obsid}
             return _State.model_construct(
                 timeline=placed,
                 cursor=index + 1,
@@ -1393,6 +1444,7 @@ class LocalSearchScheduler(PriorityScheduler):
                 volumes=self._ledger.add_all(state.volumes, additions),
                 energy=self._charged_energy(placed),
                 allocated_left=allocated_left,
+                owed=owed,
             )
         return state
 
@@ -1433,6 +1485,7 @@ class LocalSearchScheduler(PriorityScheduler):
             or a.last_visit != b.last_visit
             or a.last_visit_window != b.last_visit_window
             or a.allocated_left != b.allocated_left
+            or a.owed != b.owed
             or len(a.timeline) - a.cursor != len(b.timeline) - b.cursor
         ):
             return False
@@ -1503,6 +1556,7 @@ class LocalSearchScheduler(PriorityScheduler):
                         [*prefix, *later.timeline[there.cursor :]]
                     ),
                     allocated_left=later.allocated_left,
+                    owed=later.owed,
                 )
             )
         return _Decoded.model_construct(sequence=sequence, states=states)

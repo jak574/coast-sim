@@ -12,6 +12,7 @@ from .planning_scenario import BEGIN, make_config
 class _ScoreState(BaseModel):
     score: float
     timeline: list[object] = Field(default_factory=list)
+    owed: frozenset[int] = frozenset()
 
 
 class _Candidate(BaseModel):

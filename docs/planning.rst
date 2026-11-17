@@ -1729,8 +1729,10 @@ Using the CP-SAT scheduler
   it, with ``workers`` 1 and ``seed``, for runs that repeat exactly;
 * ``chunk``: length of each chunk (default three hours);
 * ``workers``: CP-SAT search workers (default 8);
-* ``max_candidates``: candidates per chunk at most (default 120), those of the
-  incumbent first, then in priority order.
+* ``max_candidates``: candidates per chunk at most (default 40), those of the
+  incumbent first, then in priority order. A chunk's model grows with the square of
+  its candidates, and a search of a few seconds improves a small model more than a
+  large one, so raise it together with ``solver_time_limit``.
 
 ``time_limit`` defaults to 0 here; set it to spend that many seconds improving the
 solver's plan by local search afterwards. The plan's metadata records

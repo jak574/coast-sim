@@ -61,6 +61,9 @@ def native_calls(monkeypatch):
     original = cp_model.CpSolver.solve
 
     def counted(self, *args, **kwargs):
+        if self.parameters.fix_variables_to_their_hinted_value:
+            # Completing the hint is not a search.
+            return original(self, *args, **kwargs)
         calls.append(True)
         return original(self, *args, **kwargs)
 
@@ -145,6 +148,9 @@ def test_wall_limited_result_is_never_cached(monkeypatch):
     original = cp_model.CpSolver.solve
 
     def feasible(self, *args, **kwargs):
+        if self.parameters.fix_variables_to_their_hinted_value:
+            # Completing the hint is not a search.
+            return original(self, *args, **kwargs)
         calls.append(True)
         original(self, *args, **kwargs)
         return cp_model.FEASIBLE
@@ -165,6 +171,9 @@ def test_unknown_at_deterministic_budget_reuses_the_same_fallback(monkeypatch):
     original = cp_model.CpSolver.solve
 
     def unknown(self, *args, **kwargs):
+        if self.parameters.fix_variables_to_their_hinted_value:
+            # Completing the hint is not a search.
+            return original(self, *args, **kwargs)
         calls.append(True)
         original(self, *args, **kwargs)
         return cp_model.UNKNOWN
