@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from ..common import unixtime_from
 from ..config.data_generator import ScienceData
@@ -106,6 +113,12 @@ class TOORequest(BaseModel):
     @classmethod
     def _coerce_deadline(cls, v: float | int | str | datetime | None) -> float | None:
         return None if v is None else unixtime_from(v)
+
+    @field_serializer("submit_time", "deadline", when_used="json")
+    def _serialize_time(self, v: float | None) -> str | None:
+        if v is None:
+            return None
+        return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
 
     @model_validator(mode="after")
     def _deadline_from_request(self) -> TOORequest:

@@ -14,11 +14,18 @@ activity entries.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
-from ..common import ACSMode, ObsType
+from ..common import ACSMode, ObsType, unixtime_from
 from ..config import ActivityAttitude, MissionConfig
 from .plan_entry import PlanEntry
 
@@ -94,10 +101,14 @@ class ScheduledActivity(BaseModel):
 
     @field_validator("begin", mode="before")
     @classmethod
-    def _begin_as_unix(cls, value: float | datetime) -> float:
+    def _begin_as_unix(cls, value: float | int | str | datetime) -> float:
         if isinstance(value, datetime):
             return value.timestamp()
-        return float(value)
+        return unixtime_from(value)
+
+    @field_serializer("begin", when_used="json")
+    def _serialize_begin(self, v: float) -> str:
+        return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
 
     @model_validator(mode="after")
     def _fixed_does_not_slide(self) -> ScheduledActivity:

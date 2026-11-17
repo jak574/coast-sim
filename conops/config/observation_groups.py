@@ -10,9 +10,9 @@ another. Dispatch, the planners and the long-range allocator honour all three.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_serializer, field_validator, model_validator
 
 from ..common.common import unixtime_from
 from ._base import ConfigModel
@@ -64,6 +64,12 @@ class ObservationGroup(ConfigModel):
         if value is None:
             return None
         return unixtime_from(value)
+
+    @field_serializer("window_start", "window_deadline", when_used="json")
+    def _serialize_time(self, value: float | None) -> str | None:
+        if value is None:
+            return None
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
     @model_validator(mode="after")
     def _check(self) -> ObservationGroup:
