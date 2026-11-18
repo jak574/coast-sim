@@ -303,6 +303,52 @@ scope strings as the value.  Omitted modes retain their defaults.
        - power_generation
        - ground_contact
 
+Sun keep-out about a body-fixed direction
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A Sun cone about the boresight does not depend on roll. Some hardware needs the
+Sun kept away from a direction that is fixed in the body but is not the
+boresight, for example the normal of an aperture plane that is tilted from the
+optical axis. Whether such a direction is close to the Sun depends on roll as
+well as on the pointing.
+
+Configure this as a ``safety_constraint`` with a boresight offset. The helper
+:func:`~conops.common.vector.normal_to_boresight_offset_euler_deg` converts a
+body-frame unit vector to the offset angles:
+
+.. code-block:: python
+
+   import rust_ephem
+   from conops.common.vector import normal_to_boresight_offset_euler_deg
+
+   # A direction 39 degrees from the boresight (+X), toward +Y
+   normal = (0.7771, 0.6293, 0.0)
+   roll, pitch, yaw = normal_to_boresight_offset_euler_deg(normal)
+
+   # The Sun must stay at least 90 degrees from the normal, that is, behind
+   # the plane
+   config.constraint.safety_constraint = rust_ephem.SunConstraint(
+       min_angle=90.0
+   ).boresight_offset(roll_deg=roll, pitch_deg=pitch, yaw_deg=yaw)
+
+To keep an existing safety constraint as well, combine the two with ``|``.
+
+The constraint is in the ``hardware_safety`` scope, so it applies in every ACS
+mode, including ``SLEWING``. Dispatch and the planners evaluate it with the
+actual roll at each simulation step of a slew and do not start a slew that
+would enter the keep-out. Two limits apply:
+
+* The slew router (``slew_algorithm="constraint_avoiding"``) does not take roll
+  into account when it looks for a path around a constraint. A slew that
+  crosses a roll-dependent keep-out is therefore rejected, and another target or
+  a later time is chosen, where a detour might have existed.
+* The slew is checked at the simulation steps. A crossing that begins and ends
+  between two steps is not detected, so the step should be short compared with
+  the time a slew takes to cross the keep-out.
+
+The starting attitude of a run must itself satisfy the constraint. If it does
+not, fault management puts the spacecraft in safe mode at the first step.
+
 spacecraft_bus
 ~~~~~~~~~~~~~~
 
