@@ -634,7 +634,7 @@ into the run's own tracker. It can therefore be combined with thruster dumps. Th
 dumps empty the wheels at the planning level, and enforcement continues its forecasts
 from the momentum the wheels then hold.
 
-The executor carries total angular momentum in inertial coordinates. At each
+The executor tracks total angular momentum in inertial coordinates. At each
 sample the required actuator momentum in body coordinates is
 ``R_eci_to_body @ H_total_eci - I_body @ omega_body``. The capacity bounds the norm
 of this vector. It does not bound the sum of the disturbance and maneuver momentum
@@ -769,7 +769,7 @@ planning level, dispatch calls for a dump and the planners reserve one. A dump i
 in the ``DESAT`` ACS mode. The capacity itself is a red line that fault management
 records.
 
-``slew_momentum_enabled`` counts the momentum the body carries while it slews against
+``slew_momentum_enabled`` counts the momentum the body has while it slews against
 the capacity, and the capacity is then the wheels' whole capacity. A slew that does
 not fit in the room the stored momentum leaves is flown slower, at the first of
 ``slew_rate_fractions`` that fits. Dispatch and the planners both apply this rule.
@@ -1580,7 +1580,7 @@ Budgets for a category or a single target
 
 An observation category can set its own budgets in its ``observation_timing``.
 This is meant for instruments whose setup differs. A category without its own
-budgets takes the payload's. A single target can also carry its own timing,
+budgets takes the payload's. A single target can also have its own timing,
 with ``own_timing`` on the :class:`~conops.targets.Pointing`. That timing is
 used in place of its category's (see :doc:`planning`).
 
@@ -2158,7 +2158,7 @@ the dynamic merit model reads (see `Dynamic Merit: Urgency, Cadence and Program 
 * ``default_name`` (str): Default category name
 * ``default_color`` (str): Default visualization color
 
-Each :class:`~conops.config.ObservationCategory` also carries:
+Each :class:`~conops.config.ObservationCategory` also has:
 
 * ``program`` (str, optional): Program the targets count toward; defaults to the
   category name
@@ -2638,7 +2638,7 @@ Two kinds of request are supported:
   does not assume that the boresight is body +X.
 * A fixed request holds the attitude it names. Its full hold and its ingress,
   the slew into the hold, are checked for attitude safety. A fixed request
-  carries no promise of positive power.
+  is not checked for positive power.
 
 The pose chosen for the whole hold is retained, and the step-by-step charging
 guidance does not replace it. If no sampled pose and ingress qualify,

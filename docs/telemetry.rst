@@ -137,7 +137,7 @@ quaternion applies the inverse rotation ``R_x(-roll)``.
    - ``geomagnetic_field_body_t``: Geomagnetic field in body coordinates (T). It is recorded when magnetorquers or a residual dipole are tracked, and is ``None`` otherwise
    - ``stored_momentum_body_n_m_s``: Accumulated stored-momentum vector in spacecraft body coordinates (N m s), or ``None`` when tracking is disabled
    - ``stored_momentum_norm_n_m_s``: Coordinate-invariant norm of accumulated stored momentum (N m s), or ``None`` when tracking is disabled
-   - ``actuator_momentum_body_n_m_s``: Momentum held by the wheels, in body coordinates (N m s), or ``None`` when tracking is disabled. While the spacecraft turns, the body itself carries momentum :math:`I\omega`, and the wheels hold the stored momentum less that amount. When the spacecraft is at rest, the wheels hold all of the stored momentum
+   - ``actuator_momentum_body_n_m_s``: Momentum held by the wheels, in body coordinates (N m s), or ``None`` when tracking is disabled. While the spacecraft turns, the body itself has momentum :math:`I\omega`, and the wheels hold the stored momentum less that amount. When the spacecraft is at rest, the wheels hold all of the stored momentum
    - ``actuator_momentum_norm_n_m_s``: Norm of the momentum held by the wheels (N m s), or ``None`` when tracking is disabled
 
 **Power System**

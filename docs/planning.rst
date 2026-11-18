@@ -79,7 +79,7 @@ Execute the plan with the same configuration, ephemeris, horizon and step size t
 it was built with. The plan can also be saved and loaded (see
 :doc:`plan_serialization`) before execution.
 
-The rest of this section describes the options a target can carry into a plan.
+The rest of this section describes the options a target can have in a plan.
 
 Restricting science to sunlight
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -104,7 +104,8 @@ Keeping a run's inputs in one file
 The requests, the Targets of Opportunity, the scheduled activities and the
 observation groups that a run schedules can be kept together in one file as a
 :class:`~conops.targets.Program`. Give the program to ``create_ditl`` as
-``program=`` (see :doc:`plan_serialization`).
+``program=``. :doc:`science_programs` explains how to write one, with a complete
+example.
 
 Targets observed at set times
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -192,7 +193,7 @@ saved with the program.
 The target's visibility is computed along the track. Dispatch and the planners both
 point the spacecraft at the position where the slew to the target ends. To find it,
 the slew is timed first to the target's position at the start of the slew and then
-to the target's position at that slew's end. A planned entry carries that position,
+to the target's position at that slew's end. A planned entry records that position,
 and the executor takes up the track from there.
 
 While the target is observed, the attitude follows the track at the track's rate, in
@@ -211,7 +212,7 @@ Hektor is ``body="20000624"``. The number ``624`` on its own is Hektor's permane
 asteroid number, but it is also a moon's NAIF ID. COASTSim preserves the identifier
 through lookup and program serialization. The upstream ``rust_ephem`` adapter
 translates asteroid NAIF IDs into the `Horizons designation-search syntax
-<https://ssd-api.jpl.nasa.gov/doc/horizons.html>`_, so programs do not need to carry
+<https://ssd-api.jpl.nasa.gov/doc/horizons.html>`_, so programs do not need to contain
 that service-specific syntax.
 
 The translation is included in ``rust_ephem`` 0.16.1, which is the oldest release
@@ -641,7 +642,7 @@ window is still open, it begins a whole hold at the run's start. If the window h
 closed, the run assumes the latest permitted start and resumes the remaining hold.
 
 These assumptions do not reconstruct earlier attitude, recorder contents or
-momentum. The run's configured initial conditions still apply. A saved plan carries
+momentum. The run's configured initial conditions still apply. A saved plan contains
 the settled hold bounds when an exact earlier reservation is available.
 
 Activities in rolling replans
@@ -667,7 +668,7 @@ Hold metadata on activity entries
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 An activity's plan entry can cover less than the full hold, for example in a partial
-run. The entry therefore carries both sets of bounds, and fields that relate them:
+run. The entry therefore has both sets of bounds, and fields that relate them:
 
 * ``activity_hold_begin`` and ``activity_hold_end`` bound the full hold.
 * ``begin`` and ``end`` bound the portion in this run.
@@ -704,7 +705,7 @@ after the battery alert clears depends on the kind of activity:
 * A dump restarts its full firing duration, so partial firing never resets the
   wheels.
 
-Resumed segments carry ``activity_resumed=True``, retain the original activity ID
+Resumed segments have ``activity_resumed=True``, retain the original activity ID
 and do not generate the once-only data again. ``activity_partial`` identifies the
 fragments. The final fragment can also have ``activity_finishes=True``.
 
@@ -792,7 +793,7 @@ The battery ledger:
 The local search decodes a trial plan for every change it tries, so these savings
 decide how many changes a search of a given length tries. The CP-SAT scheduler
 computes the slew table of a chunk's tasks for every pair at once. It decodes the
-rest of the plan it started from once per chunk, and carries the decoding to the next
+rest of the plan it started from once per chunk, and reuses the decoding in the next
 chunk while chunks keep that plan.
 
 Starting a rolling run from a plan
@@ -844,7 +845,7 @@ snapshot:
   chronological order.
 * Science locked later in the horizon does not count as already delivered. Its
   exposure still reserves its target and the category and group budgets immediately.
-* Each local-search state carries forward the science delivered by the part of the
+* Each local-search state includes the science delivered by the part of the
   plan before it.
 * CP-SAT solves the horizon in chunks (see `Optimizing plans with CP-SAT`_). It uses
   the delivered shares as they stand at the start of each chunk, and it scores the
@@ -959,7 +960,7 @@ peaks are worked out as follows:
   the snapshot's collection time plus the instrument's fixed per-observation amount.
   Where the target sets its own rates, those are used.
 * Each contact removes what its rate and length allow, and no more than is on the
-  recorder. What a contact cannot remove carries over to the segments after it.
+  recorder. What a contact cannot remove stays on the recorder in the segments after it.
 * Housekeeping is counted at the nominal rate throughout, and at the ``PASS`` rate
   during spacecraft tracking. The nominal rate is used elsewhere because the plan does
   not know when the spacecraft will be in other modes. Housekeeping is counted on the
@@ -1037,7 +1038,7 @@ too. When it selects the next target, it works out how much the recorder can tak
 now. This room is the most data that keeps the volume under the planning limit at
 every contact's start and at the run's end.
 
-To find the room, dispatch carries the recorder through the rest of the run. Each
+To find the room, dispatch projects the recorder volume over the rest of the run. Each
 contact removes what its station's rate downlinks for its length, and never takes
 the recorder below empty. A contact too short or too slow to empty the recorder
 leaves the rest to the next contact, and the housekeeping generated between the two
@@ -1164,10 +1165,10 @@ Without thrusters the plan stands, and the log says where the forecast passes th
 capacity. With thrusters, the log says where the forecast still reaches the capacity,
 if it does.
 
-Momentum carried during slews
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Body momentum during slews
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``slew_momentum_enabled`` counts the momentum the body carries while it slews. Where
+``slew_momentum_enabled`` counts the momentum the body has while it slews. Where
 it is set, the forecast checks what the wheels hold along each slew against the
 capacity. A slew in which the wheels would reach the capacity is flown slower, at the
 next of ``slew_rate_fractions``, and the plan is built again. At the slowest
@@ -1257,7 +1258,7 @@ step's attitude and leaves from the last step's.
 
 A rolling run credits each executed step to its target, as science or calibration,
 and ``DITL`` commands the steps as it commands any science entries. Each planned step
-carries the same ``visit_begin`` time, so rolling replans keep every remaining step
+has the same ``visit_begin`` time, so rolling replans keep every remaining step
 once the visit is committed. An urgent ToO waits for that visit to finish before it
 can begin.
 
@@ -1324,7 +1325,7 @@ Every scheduler keeps the battery above its planning level. The level is
 it is the depth-of-discharge floor, ``1 - max_depth_of_discharge``, so no plan takes
 the battery past the discharge it is allowed. Set it higher to keep margin, or to
 ``None`` to plan without regard to the battery. ``DITL`` does not charge on its own
-while executing a plan, so the plan carries its own charging.
+while executing a plan, so the plan includes its own charging.
 
 The battery is the second consumable on :class:`~conops.schedulers.ConsumableLedger`.
 The ledger holds it as the *deficit*: the energy below full, in watt-hours. Data on
@@ -1343,7 +1344,7 @@ Every span is counted at the attitude the spacecraft holds through it:
 * A charge draws ``CHARGING`` power and generates at the charging attitude.
 * Idle time draws the idle power and generates at the attitude the activity before it
   leaves the spacecraft in.
-* A panel on a finite solar-array drive is carried along as the simulation carries
+* A panel on a finite solar-array drive is modelled as the simulation models
   it. It tracks the Sun in the modes its control lists and holds its angle in the
   rest. Each activity is therefore counted at the drive angles the plan reaches it
   with, and a plan's charges take the charging attitude for those angles. A rolling
@@ -1377,7 +1378,7 @@ A snapshot is placed only where the resulting forecast stays within the battery
 limit through the end of the horizon. Where it does not, the scheduler can try the
 snapshot later in the gap, leaving time to charge first. The snapshot is never
 shortened to fit. A schedule that remains infeasible is still rejected. The finished
-plan carries the retained charges as ``CHARGE`` entries, which ``DITL`` executes and
+plan includes the retained charges as ``CHARGE`` entries, which ``DITL`` executes and
 :meth:`~conops.ditl.DITL.validate_plan_matches_execution` checks.
 
 The ledger is the simulation's own arithmetic at the attitudes the simulation flies,
@@ -1388,8 +1389,8 @@ for a plan depends on the spacecraft:
   side-mounted array rolled towards the Sun, needs no discretionary charge when
   passive generation suffices.
 * A spacecraft whose panels only generate when pointing at the Sun reserves the
-  necessary charges in idle sunlit time. It refuses the science the battery cannot
-  carry through the eclipse after it. It is then the lowest-merit science that waits,
+  necessary charges in idle sunlit time. It leaves out science that would take the battery below
+  its planning level in the eclipse after it. It is then the lowest-merit science that waits,
   as with the recorder.
 
 The other schedulers use the same accounting. Local search decodes its sequences
@@ -1586,7 +1587,7 @@ describes:
   that the model never counts less than the ledger does.
 * Each segment's volume is what entered the segment after its contact, plus
   housekeeping and the science already planned there, plus the chunk's candidates.
-* What a contact cannot remove carries over to the next segment.
+* What a contact cannot remove stays on the recorder in the next segment.
 * Every segment from the chunk's own to the end of the horizon is kept within the
   limit. A candidate is therefore traded against the room it takes from everything
   planned after it.
@@ -1635,7 +1636,7 @@ A run's energy is then its idle power for its whole length, plus what the candid
 and the already planned activities change. Idle power charges the battery in sunlight,
 at the charging attitude, and draws from it in eclipse.
 
-The battery's deficit is carried from each run into the next. The deficit carried into
+Each run starts with the battery deficit the run before it ended with. The deficit entering
 a run is bounded below by the previous run's deficit, by zero, and by the smaller of
 the recharge floor and the deficit entering the run. Every run's end must stay within
 the limit.
@@ -1644,7 +1645,7 @@ In an eclipse run everything draws, so the run's end is its peak. In a sunlit ru
 deficit can rise and fall within the run, and the model, being linear, cannot follow
 that. The decoder walks the plan exactly and so has the last word: a chunk whose
 solution does not hold up keeps the incumbent's snapshots. The incumbent is hinted
-into the run and carry-over variables, so the solver starts from a feasible
+into the run variables and the variables for the deficit entering each run, so the solver starts from a feasible
 solution.
 
 Decoding and accepting a chunk
@@ -1924,7 +1925,7 @@ A :class:`~conops.ditl.rolling_ditl.ReplanRecord` holds, for one replan:
   ``solver_chunks_used`` and ``solver_limits``).
 
 A replan can build several candidate plans and keep one, and each candidate can take
-several search passes. The record therefore also carries cumulative lists that cover
+several search passes. The record therefore also has cumulative lists that cover
 all of that work. They are what to check when verifying that a run repeats exactly,
 because a search that ended on the ``"wall clock"`` depends on the machine's speed and
 load.
@@ -2047,7 +2048,7 @@ downlink:
   target's rate for its allocated seconds and its fixed amount per observation, once
   per bin.
 * The bin's contacts, from the same booked ground-station passes the schedulers use,
-  take off what they can. What they cannot is carried on the recorder into the next
+  take off what they can. What they cannot stays on the recorder in the next
   bin, where it must stay within the recorder's planning limit (see `Planning within
   the recorder`_).
 * The allocation starts from what is on the recorder, so a run that begins with a full
@@ -2275,7 +2276,7 @@ Before running it:
 
 * The destination must be new, so that earlier results are preserved.
 * Initialize the cached Earth-orientation provider before capture.
-* Moving targets must already carry saved tracks. This command does not refresh them.
+* Moving targets must already have saved tracks. This command does not refresh them.
 * The default uses analytic planetary models. Supply ``--planetary-kernel`` for an
   explicit SPICE kernel.
 
@@ -2312,7 +2313,7 @@ again for each attempt. The sharing is limited as follows:
 * Each placed step still gets its own plan entry, and its actual slew, roll and hold
   are checked at the attempted time.
 * The shared templates are discarded before the next request-building pass or
-  schedule. They do not carry collected science or completion history between
+  schedule. They do not keep collected science or completion history between
   requests.
 
 ``Pointing.step_pointing`` still returns a fresh pointing for public callers.

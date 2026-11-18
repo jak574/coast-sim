@@ -352,7 +352,7 @@ During a ground station pass, each step of a DITL simulation does the following:
    time_step = 60  # seconds
    data_downlinked = downlink_rate_gbps * time_step  # 6.0 Gb
 
-Housekeeping data continues to be generated during a contact, and the link carries it
+Housekeeping data continues to be generated during a contact, and the link downlinks it
 along with the data that is already stored. Within a step, the simulation therefore applies
 generation and downlink together, using :meth:`~conops.config.OnboardRecorder.transfer`,
 instead of adding one and then removing the other. This has three consequences:
@@ -871,7 +871,7 @@ move between stores.
 
 * Dispatch, priority, local-search and CP-SAT scheduling check every store's own planning
   limit.
-* Rolling replanning carries a mapping of store names to projected volumes.
+* Rolling replanning keeps a mapping of store names to projected volumes.
 * The long-range allocator budgets each store's data within its own planning limit and its
   own reserved downlink, starting from the volume on each store. It reports each store's
   budget in ``Allocation.recorders[name]``.

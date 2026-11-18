@@ -129,7 +129,7 @@ visit.
 
 Every attempt is a row. A visit that was cut short and taken again within its window
 therefore appears as two rows. Pass ``per_window=True`` to get one row per window instead.
-That row carries the verdict for the window and the number of attempts the visit took.
+That row shows the verdict for the window and the number of attempts the visit took.
 
 The windows come from the run's own requests. Pass ``targets`` to use another set. The
 printed ``VISITS IN WINDOWS`` table lists the verdict per window for targets with windows.

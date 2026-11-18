@@ -145,8 +145,8 @@ If no observation is in progress, nothing is interrupted. The TOO is already in 
 
 Nothing is interrupted while the observation in progress is a step of a sequence visit either. The TOOs stay in the queue and are considered at the next selection.
 
-Carrying out the interrupt
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+Performing the interrupt
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 When a TOO is a candidate, the simulation proceeds as follows:
 
@@ -155,7 +155,7 @@ When a TOO is a candidate, the simulation proceeds as follows:
 3. The TOO that was selected is marked as executed.
 4. The events and the merit breakdown of the TOO are logged.
 
-The interrupt is not always carried out in the step that decides it. If the current observation has cleanup or handoff time after its collection, stopping the collection now can leave cleanup that runs past the current step. The simulation then admits the replacement for the first step after that cleanup ends, with the same comparison of values and over the same candidates. If a replacement is admitted, the simulation commits to it and stops the collection of the current observation in time for its cleanup to finish by that step. At that step the current observation is terminated and the slew to the replacement is commanded. A change in merit between the two steps does not cancel the handover. The handover is dropped only if something else, such as a protective operation, ends the observation first.
+The interrupt is not always performed in the step that decides it. If the current observation has cleanup or handoff time after its collection, stopping the collection now can leave cleanup that runs past the current step. The simulation then admits the replacement for the first step after that cleanup ends, with the same comparison of values and over the same candidates. If a replacement is admitted, the simulation commits to it and stops the collection of the current observation in time for its cleanup to finish by that step. At that step the current observation is terminated and the slew to the replacement is commanded. A change in merit between the two steps does not cancel the handover. The handover is dropped only if something else, such as a protective operation, ends the observation first.
 
 Preventing Interrupts
 ^^^^^^^^^^^^^^^^^^^^^

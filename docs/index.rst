@@ -28,6 +28,7 @@ constraints before launch.
    momentum
    radiator_shadowing
    target_of_opportunity
+   science_programs
    planning
    plan_serialization
    api/modules

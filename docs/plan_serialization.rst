@@ -841,6 +841,10 @@ way that a ``Plan`` describes what a run executed. It is one JSON file, written 
 window of time, that holds the pool of observation requests, the Targets of Opportunity
 (ToOs) with their triggers, the scheduled activities and the observation groups.
 
+This section is the reference for the file's fields. :doc:`science_programs` explains
+what each part is for and how to write a program, with a complete example and the JSON
+it produces.
+
 A program has the following fields.
 
 ``requests``
@@ -915,7 +919,7 @@ well as the flat fields.
 Typed entries
 ~~~~~~~~~~~~~
 
-Every saved entry carries a ``kind`` field that names its class:
+Every saved entry has a ``kind`` field that names its class:
 
 .. list-table::
    :header-rows: 1

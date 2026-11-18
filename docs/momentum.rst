@@ -223,7 +223,7 @@ The settings below are under ``spacecraft_bus.attitude_control.stored_momentum``
   combines with the dumps: a dump empties the wheels, and enforcement forecasts on
   from what they hold.
 * ``slew_momentum_enabled`` (bool, default ``False``) says whether the momentum
-  that the body carries while it slews counts against the capacity (see
+  that the body has while it slews counts against the capacity (see
   `Slews`_). It needs a capacity and an inertia tensor. Turning it on enables
   tracking, even with no torque source enabled.
 * ``slew_rate_fractions`` (floats, default ``[1, 0.75, 0.5, 0.25, 0.125]``) lists
@@ -405,14 +405,14 @@ Slews
 -----
 
 The momentum tracked is the whole spacecraft's. While the body turns at an angular
-velocity :math:`\omega`, the body itself carries :math:`I\omega` of that momentum
+velocity :math:`\omega`, the body itself has :math:`I\omega` of that momentum
 and the wheels hold the rest. What the wheels hold is the actuator momentum,
 :math:`R H - I\omega` in body coordinates, where :math:`H` is the stored vector in
 inertial coordinates. At rest the stored momentum and the actuator momentum are
 the same.
 
 Along a slew the body's share is large. A 1000 kg m² body turning at 0.5°/s
-carries 8.7 N m s, an order of magnitude above a day's build-up from the
+has 8.7 N m s, an order of magnitude above a day's build-up from the
 environment on the example orbit. The simulations and the planners' forecast
 therefore give the tracker the body's rate at every sample. The simulations take
 the rate from the ACS's executed motion, and the forecast takes it from the slew's
@@ -449,7 +449,7 @@ longer and the observation's collection starts later.
 
 The planners do the same for a plan. Where the forecast finds a slew in which the
 wheels reach the capacity, the observation's slew is capped at the next fraction
-and the plan is built again. Every plan entry carries ``slew_rate_fraction``. A
+and the plan is built again. Every plan entry has ``slew_rate_fraction``. A
 planned simulation flies the slew at that fraction, and dispatch honours it as the
 first fraction it tries.
 
@@ -480,7 +480,7 @@ forecast every slew along a plan, step slews included.
 Telemetry and reporting
 -----------------------
 
-Housekeeping telemetry carries the following at every step:
+Housekeeping telemetry contains the following at every step:
 
 * each source's torque by name (``disturbance_torques_body_n_m``) and their total
   (``disturbance_torque_body_n_m``);
@@ -492,9 +492,9 @@ Housekeeping telemetry carries the following at every step:
   (``geomagnetic_field_body_t``);
 * the atmosphere's density, where drag is tracked (``atmosphere_density_kg_m3``).
 
-The event log carries ``MOMENTUM`` events for each dump called for, each unload,
+The event log contains ``MOMENTUM`` events for each dump called for, each unload,
 each slew flown slower and each selection decision the forecast makes. Fault
-management carries the capacity events.
+management reports the capacity events.
 
 The timelines (:doc:`visualization`) draw dumps on the activities row. The
 momentum example notebook plots the stored momentum with each source's share,

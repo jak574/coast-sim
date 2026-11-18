@@ -5,7 +5,7 @@ Overview
 --------
 
 The communications system configuration describes how the spacecraft talks to the
-ground: the frequency bands it carries, the uplink and downlink rate on each band,
+ground: the frequency bands it supports, the uplink and downlink rate on each band,
 and the type of antenna and how it is pointed. The simulation uses it to decide
 when the spacecraft is in contact with a ground station and how much data it
 downlinks there.
@@ -79,7 +79,7 @@ station. ``downlink_rate_vs_range_km`` is a table of ``(range_km, rate_mbps)``
 rows in increasing range. The rate is interpolated linearly between rows, and
 beyond the first and last rows it is held at that row's rate.
 
-Either side of a link may carry a table, the spacecraft's band or the ground
+Either side of a link may have a table, the spacecraft's band or the ground
 station's. The effective rate at a range is the lower of the two sides' rates at
 that range, on the best band.
 
