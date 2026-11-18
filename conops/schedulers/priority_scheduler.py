@@ -1479,6 +1479,12 @@ class PriorityScheduler:
                     following = None
             # A member of a consecutive group waits for the members before it.
             pool = [r for r in pool if self._members_turn(r, active)]
+            if not pool:
+                # Every remaining request follows a group member that this
+                # plan is not placing, so none of them can be placed.
+                self._drop_members_waiting(active)
+                following = None
+                continue
             # The original order breaks ties only; a merge can change value
             # even when completion-deficit balancing is disabled.
             request = max(
@@ -1601,13 +1607,66 @@ class PriorityScheduler:
     def _members_turn(self, request: _Request, active: Sequence[_Request]) -> bool:
         """Whether a request may be placed now as far as its group's order
         goes: always, unless it is in a consecutive group and a member
-        before it still has exposure to place."""
+        before it still has exposure to collect."""
+        return self._waits_for(request, active) is None
+
+    def _waits_for(self, request: _Request, active: Sequence[_Request]) -> int | None:
+        """The first member of a consecutive group that ``request`` has to
+        follow and that is not finished, or None where it may be placed.
+
+        A member is finished when it has no exposure left once the science
+        on the timeline and the science committed outside it are counted.
+        An earlier member that still needs exposure blocks ``request`` even
+        when this plan is not placing that member (for example because it
+        cannot be observed in the horizon). Placing ``request`` would then
+        observe it out of order, so it is left for a later plan. A member
+        that is not among the scheduler's targets is ignored.
+        """
         group = request.group
         if group is None or not group.consecutive:
-            return True
+            return None
         position = group.members.index(int(request.target.obsid))
-        earlier = set(group.members[:position])
-        return not any(int(r.target.obsid) in earlier for r in active)
+        placing = {int(r.target.obsid) for r in active}
+        placed: dict[int, float] | None = None
+        for obsid in group.members[:position]:
+            if obsid in placing:
+                return obsid
+            target = self._targets_by_obsid.get(obsid)
+            if target is None or target.done:
+                continue
+            if placed is None:
+                placed = self._reserved_collection()
+            exptime = target.exptime if target.exptime is not None else target.ss_max
+            left = (
+                float(exptime)
+                - placed.get(obsid, 0.0)
+                - self.reserved_seconds.get(obsid, 0.0)
+            )
+            if left >= snapshot_min_seconds(target, self.ctx.step_size):
+                return obsid
+        return None
+
+    def _drop_members_waiting(self, active: list[_Request]) -> None:
+        """Remove each request whose consecutive group has an earlier member
+        that still needs exposure and is not being placed in this plan. Such
+        a request cannot be placed without breaking the group's order."""
+        placing = {int(r.target.obsid) for r in active}
+        waiting: dict[str, tuple[int, list[_Request]]] = {}
+        for request in active:
+            obsid = self._waits_for(request, active)
+            if obsid is None or obsid in placing or request.group is None:
+                continue
+            waiting.setdefault(request.group.name, (obsid, []))[1].append(request)
+        dropped = {id(r) for _, requests in waiting.values() for r in requests}
+        active[:] = [r for r in active if id(r) not in dropped]
+        for name, (obsid, requests) in waiting.items():
+            self._log(
+                self.ctx.ustart,
+                f"Consecutive group {name!r} waits for member {obsid}, which "
+                f"this plan does not place: members "
+                f"{sorted({int(r.target.obsid) for r in requests})} are not placed",
+                obsid,
+            )
 
     def _group_under_way(self, active: Sequence[_Request]) -> ObservationGroup | None:
         """A consecutive group that has begun and has members still to

@@ -341,3 +341,51 @@ def test_a_rolling_run_goes_on_with_a_group_across_replans() -> None:
     assert len(ditl.replans) >= 3
     assert _order(ditl.plan)[:4] == [*ORDER, FILLER]
     assert ditl.validate_plan_matches_execution() == []
+
+
+def test_a_rolling_run_holds_the_order_when_the_first_member_must_wait() -> None:
+    """The first member cannot begin inside the first plans' horizon. No
+    plan may place a later member ahead of it: the run observes the group
+    in order once the first member can begin."""
+    config = _config()
+    targets = _targets(config, merits=(40, 40, 40), filler=20)
+    first = next(t for t in targets if int(t.obsid) == ORDER[0])
+    first.earliest_start = T0 + 4 * HOUR
+    ditl = RollingHorizonDITL(
+        config,
+        targets,
+        begin=BEGIN,
+        end=END,
+        horizon=timedelta(hours=3),
+        replan_interval=timedelta(hours=1),
+    )
+    ditl.step_size = 60
+    assert ditl.calc()
+    order = _order(ditl.plan)
+    members = [obsid for obsid in order if obsid in ORDER]
+    assert members == ORDER[: len(members)]
+    assert members, "the group is observed once its first member can begin"
+    _assert_consecutive(ditl.plan, members)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_members_wait_for_a_member_the_plan_does_not_place(kind: str) -> None:
+    """A member held back from a plan is still unfinished, so the members
+    after it are not placed ahead of it."""
+    config = _config()
+    targets = _targets(config, merits=(90, 90, 90))
+    scheduler = _planner(kind, config, targets)
+    scheduler.held = frozenset({ORDER[0]})
+    plan = scheduler.schedule()
+    assert _order(plan) == [FILLER]
+    assert {int(t.obsid) for t in scheduler.unplaced} >= set(ORDER[1:])
+
+
+def test_members_follow_a_member_finished_before_the_plan() -> None:
+    """A member with no exposure left does not hold the members after it."""
+    config = _config()
+    targets = _targets(config, merits=(90, 90, 90))
+    first = next(t for t in targets if int(t.obsid) == ORDER[0])
+    first.done = True
+    plan = PriorityScheduler(config, targets, BEGIN, END, step_size=60).schedule()
+    assert _order(plan)[:2] == ORDER[1:]

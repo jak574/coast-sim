@@ -916,6 +916,11 @@ science, whatever the members' merit:
   can still end at committed science that follows it.
 * A member that cannot be finished ends the group in that plan. The members after it
   are logged as not placed.
+* If a plan leaves out a member that still needs exposure, for example because it
+  cannot be observed during the plan's horizon, the plan also leaves out every member
+  after it. Placing them would observe them before the earlier member, which breaks
+  the group's order. The log names the member they are waiting for. In a rolling run,
+  the next plan that can place that member places it and then the members after it.
 * The other requests are then planned around the group. No planner places science in
   the gaps between the group's blocks, and local search and CP-SAT do not move or
   remove the group's blocks.
