@@ -1781,23 +1781,35 @@ class LocalSearchScheduler(PriorityScheduler):
     def _normalized_placements(self, decoded: _Decoded) -> _Decoded:
         """Retain only actual placements, released where exact decoding put them."""
         snapshots = []
+        # Leading snapshots that were placed and are already as normalized;
+        # the count stops at the first one that was dropped or changes.
+        unchanged = 0
+        leading = True
         for snapshot, before, after in zip(
             decoded.sequence, decoded.states[:-1], decoded.states[1:], strict=True
         ):
             if after.cursor <= before.cursor:
+                leading = False
                 continue
             block = after.timeline[after.cursor - 1]
-            snapshots.append(
-                _Snapshot(
-                    obsid=int(block.entry.obsid),
-                    seconds=_collection_seconds(block),
-                    release=float(block.entry.begin),
-                    visit=block.entry.visit,
-                    interrupted_window=snapshot.interrupted_window,
-                    remainder=snapshot.remainder,
-                )
+            normalized = _Snapshot(
+                obsid=int(block.entry.obsid),
+                seconds=_collection_seconds(block),
+                release=float(block.entry.begin),
+                visit=block.entry.visit,
+                interrupted_window=snapshot.interrupted_window,
+                remainder=snapshot.remainder,
             )
-        return self._decode(snapshots)
+            leading = leading and normalized == snapshot
+            if leading:
+                unchanged += 1
+            snapshots.append(normalized)
+        # The states up to the first snapshot that changes are those already
+        # decoded; decoding goes on from there.
+        states = decoded.states[: unchanged + 1]
+        for snapshot in snapshots[unchanged:]:
+            states.append(self._step(states[-1], snapshot))
+        return _Decoded.model_construct(sequence=snapshots, states=states)
 
     def _repair_window(self, decoded: _Decoded) -> _Decoded:
         """Recover one timed visit, retrying it if a rebuild loses it.
