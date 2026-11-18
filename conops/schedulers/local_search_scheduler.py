@@ -1794,6 +1794,7 @@ class LocalSearchScheduler(PriorityScheduler):
                     release=float(block.entry.begin),
                     visit=block.entry.visit,
                     interrupted_window=snapshot.interrupted_window,
+                    remainder=snapshot.remainder,
                 )
             )
         return self._decode(snapshots)

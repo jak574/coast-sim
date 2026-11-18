@@ -2373,7 +2373,9 @@ This field is excluded from JSON serialization.
 
 **Attributes:**
 
-* ``mode_colors`` (dict): Colors for ACS modes
+* ``mode_colors`` (dict): Color of each ACS mode, by mode name. Every mode has a
+  default color of its own, and a mode left out of a supplied mapping keeps its
+  default
 * ``font_family`` (str): Font for plots
 * ``title_font_size`` (int): Title font size
 * ``label_font_size`` (int): Axis label font size
@@ -2393,6 +2395,9 @@ This field is excluded from JSON serialization.
            "PASS": "cyan",
            "CHARGING": "yellow",
            "SAFE": "red",
+           "IDLE": "lightsteelblue",
+           "DESAT": "magenta",
+           "ACTIVITY": "saddlebrown",
        },
        font_family="DejaVu Sans",
        title_font_size=14,
