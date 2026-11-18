@@ -867,6 +867,66 @@ A target can belong to an observation group (``observation_groups``, see
 The local-search and CP-SAT planners start from that order and keep the window and
 the budget.
 
+Consecutive groups
+^^^^^^^^^^^^^^^^^^
+
+A group with ``consecutive`` set is observed as one run of requests:
+
+* Its members are observed in the order of ``members``. A member does not begin
+  until every member before it has no exposure left to collect.
+* No science of a target outside the group is observed between the group's first
+  observation and its last.
+* Ground contacts, charging, thruster dumps and other scheduled activities may fall
+  between two of the group's observations, and between two snapshots of one member.
+  Time in which the next member is not visible is left idle.
+* A member that is an observation sequence is still observed one whole visit at a
+  time, with nothing inside the visit.
+
+This differs from a single observation sequence, which is one indivisible visit: a
+dump cannot be placed inside a sequence visit, but it can be placed between two
+members of a consecutive group.
+
+The group ends early at a member that can no longer be observed. The members after
+it are then not observed, because they follow it in the order. Members that are not
+among the run's targets are ignored when the order is applied.
+
+Dispatch applies the rule when it selects a target:
+
+* A member is not selected while a member before it is unfinished. The group's first
+  member competes on its own merit with every other target.
+* Once any member has collected science, no target outside the group is selected
+  until the group has finished. This includes a Target of Opportunity, which is
+  queued and observed after the group. An observation of a member is not interrupted
+  for one.
+* The group ends where its current member cannot be selected again: its deadline or
+  its group's window has passed, its budget has no room for it, or it is not visible
+  again before the ephemeris ends. Dispatch logs the targets it holds back and why.
+
+The planners place consecutive groups in a pass of their own, before any other
+science, whatever the members' merit:
+
+* A group's blocks need time that holds no other science, so they are placed while
+  the timeline has only passes, activities, dumps and committed entries on it. Use
+  the group's ``window_start`` to keep a group from the start of a plan.
+* Each snapshot of a member goes after the group's last block and before the next
+  committed science of another target.
+* The group's first block goes where the time before the next committed science of
+  another target is at least the exposure the group still has to place, or where no
+  such science follows. This is a lower bound on the time the group takes, so a group
+  can still end at committed science that follows it.
+* A member that cannot be finished ends the group in that plan. The members after it
+  are logged as not placed.
+* The other requests are then planned around the group. No planner places science in
+  the gaps between the group's blocks, and local search and CP-SAT do not move or
+  remove the group's blocks.
+* A group that has begun, in an earlier plan of a rolling run or before the run, is
+  placed first in the same way, so each replan goes on with it. A rolling run does not
+  cut a member's observation for a Target of Opportunity.
+
+Thruster dumps are reserved as for any plan (see `Thruster momentum dumps`_): a dump
+called for inside the group goes between two of its observations, and the pass that
+places the group again keeps the members already placed before the dump.
+
 Time budgets
 ^^^^^^^^^^^^
 

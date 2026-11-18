@@ -263,6 +263,12 @@ observation IDs and gives them something in common:
 * ``time_budget_seconds`` caps the science the members collect together.
 * ``prefer_contiguous``, on by default, raises a member's rank once another member
   has just been observed, so the members tend to be observed one after another.
+* ``consecutive``, off by default, makes the order and the adjacency a rule: the
+  members are observed in the order listed, and no other science is observed between
+  the first of them and the last. A thruster dump or a ground contact may still fall
+  between two members, which a single observation sequence does not allow inside a
+  visit. Use it for a campaign whose later requests depend on its first, such as a
+  calibration followed by the observations that use it.
 
 Use a group for requests that only make sense together, such as the tiles of a
 mosaic or the targets of one redshift bin. Groups are stored in the program, not in

@@ -19,6 +19,7 @@ from ..config.acs import scheduled_slew_time
 from ..config.config import housekeeping_while_waiting
 from ..config.data_storage import RecorderView
 from ..config.observation_categories import ObservationCategories
+from ..config.observation_groups import ObservationGroups
 from ..ditl.ditl_log import DITLLog
 from ..simulation.slew import Slew
 from . import Pointing
@@ -605,6 +606,91 @@ class TargetQueue:
         )
         return float(result) if isinstance(result, (int, float)) else 0.0
 
+    def _finished(self, target: Pointing) -> bool:
+        """Whether ``target`` takes no more science: done, or with less
+        exposure left than its minimum snapshot."""
+        if target.done:
+            return True
+        left = getattr(target, "exptime", None)
+        return isinstance(left, (int, float)) and left < snapshot_min_seconds(target)
+
+    def _observable_later(self, target: Pointing, utime: float) -> bool:
+        """Whether ``target`` can still be selected at or after ``utime``:
+        its deadline has not passed, its budget has room for it and it is
+        visible again before the ephemeris ends."""
+        if not target.merit > 0:
+            return False
+        _, deadline = self._bounds(target, utime)
+        windows = getattr(target, "visit_windows", None)
+        if isinstance(windows, list) and windows and deadline is None:
+            return False
+        _, group_deadline = self._group_bounds(target)
+        if group_deadline is not None:
+            deadline = (
+                group_deadline if deadline is None else min(deadline, group_deadline)
+            )
+        if deadline is not None and utime > deadline:
+            return False
+        if not self._within_budget(target):
+            return False
+        visibility = getattr(target, "windows", None)
+        if not isinstance(visibility, list):
+            return True
+        return any(float(window[1]) > utime for window in visibility)
+
+    def consecutive_holds(self, utime: float) -> dict[int, str]:
+        """The targets that a consecutive observation group keeps from being
+        selected at ``utime``, each with the reason.
+
+        A consecutive group's targets are observed in the order of its
+        members. A member waits for the members before it to finish, and
+        once one of the group has collected science, every target outside
+        the group waits until the group has finished. The group ends early
+        at a member that can no longer be observed, and the members after
+        it are then not observed at all.
+        """
+        groups = getattr(self.merit_model, "groups", None)
+        consecutive = (
+            groups.consecutive if isinstance(groups, ObservationGroups) else []
+        )
+        if not consecutive:
+            return {}
+        queued = {
+            int(target.obsid): target
+            for target in self.targets
+            if isinstance(getattr(target, "obsid", None), (int, float))
+        }
+        held: dict[int, str] = {}
+        open_to: dict[int, str] = {}
+        """The member each group under way is waiting for, with the group."""
+        for group in consecutive:
+            present = [queued[obsid] for obsid in group.members if obsid in queued]
+            unfinished = [t for t in present if not self._finished(t)]
+            if not unfinished:
+                continue
+            current = unfinished[0]
+            if not self._observable_later(current, utime):
+                for target in unfinished:
+                    held[int(target.obsid)] = (
+                        f"group {group.name!r} ended at member {current.obsid}, "
+                        "which can no longer be observed"
+                    )
+                continue
+            for target in unfinished[1:]:
+                held[int(target.obsid)] = (
+                    f"group {group.name!r} observes {current.obsid} first"
+                )
+            if len(unfinished) < len(present) or any(
+                t.collected_seconds > 0 for t in present
+            ):
+                open_to[int(current.obsid)] = group.name
+        if open_to:
+            names = ", ".join(repr(name) for name in sorted(set(open_to.values())))
+            for obsid in queued:
+                if obsid not in open_to and obsid not in held:
+                    held[obsid] = f"group {names} is under way"
+        return held
+
     def science_budget_left(self, target: Pointing) -> float | None:
         """Science the target's category may still collect within its time
         budget, from what the queue's targets have collected; None without
@@ -937,6 +1023,29 @@ class TargetQueue:
             and not t.done
             and self._open_at(t, utime)
         ]
+        held = self.consecutive_holds(utime)
+        if held:
+            kept = [t for t in targets if int(t.obsid) not in held]
+            if len(kept) < len(targets) and self.log is not None:
+                self.log.log_event(
+                    utime=utime,
+                    event_type="QUEUE",
+                    description=(
+                        f"{len(targets) - len(kept)} targets held back: "
+                        + "; ".join(
+                            sorted(
+                                {
+                                    held[int(t.obsid)]
+                                    for t in targets
+                                    if int(t.obsid) in held
+                                }
+                            )
+                        )
+                    ),
+                    obsid=None,
+                    acs_mode=None,
+                )
+            targets = kept
         # Candidates are scored, rather than the first in merit order taken,
         # when anything beyond base merit tells them apart. An allocation
         # does: its bonus is for the collection a candidate would make now,

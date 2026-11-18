@@ -2531,6 +2531,11 @@ one redshift bin, or of one field, are examples. Each
     weight at 0, dispatch does not prefer the group's targets.
   - The priority-first placement, which seeds the local-search and CP-SAT planners,
     goes on with the group once it has placed one of its targets.
+* ``consecutive`` (bool, default ``False``): Whether the group's targets are observed
+  in the order of ``members``, each completed before the next begins, with no science
+  of any other target between the group's first observation and its last. Ground
+  contacts, charging, thruster dumps and other scheduled activities may fall between
+  two of its observations. See the consecutive groups section of :doc:`planning`.
 
 .. code-block:: python
 

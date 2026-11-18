@@ -1087,6 +1087,10 @@ class RollingHorizonDITL(DITL):
         category = self.merit_model.categories.get_category(int(entry.obsid))
         if not category.interruptible:
             return None
+        if self.merit_model.groups.position(int(entry.obsid)) is not None:
+            # No other science goes between the observations of a
+            # consecutive group: the ToO waits for the group.
+            return None
         target = self._too_targets[id(too)]
         too_value = self.merit_model.value_terms(
             target,

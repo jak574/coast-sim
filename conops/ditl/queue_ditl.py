@@ -564,6 +564,11 @@ class QueueDITL(DITLMixin, DITLStats):
             # Nothing is inserted inside a sequence visit; the TOOs are
             # queued for the next selection.
             return False
+        if self.merit_model.groups.position(int(self.ppt.obsid)) is not None:
+            # No other science goes between the observations of a
+            # consecutive group; the TOOs are queued for the next selection
+            # after the group.
+            return False
         if not self.merit_model.category(self.ppt).interruptible:
             # The observation's category does not allow it to be cut short;
             # the TOOs are already queued for the next selection.

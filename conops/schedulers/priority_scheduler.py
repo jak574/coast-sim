@@ -533,6 +533,9 @@ class PriorityScheduler:
         """The thruster dumps this scheduler has reserved where its momentum
         forecast reached the level, in time order."""
         self._momentum_rejected: set[int] = set()
+        self._placing_groups = False
+        """Whether the requests being placed are those of consecutive
+        observation groups, which are placed before the others."""
         """Targets whose visit stores more than the wheels' capacity from
         empty, or whose slew asks more of them at the slowest configured
         rate: not planned."""
@@ -1206,6 +1209,24 @@ class PriorityScheduler:
                     f"{limit:.2f} Gb from locked entries and housekeeping alone",
                 )
         self._energy = self._charged_energy(self.timeline)
+        self._place_consecutive_groups()
+
+    def _place_consecutive_groups(self) -> None:
+        """Place the requests of consecutive observation groups, before any
+        other science is planned.
+
+        A group needs time that holds no other science from its first
+        observation to its last, so its blocks are placed first and then
+        stay where they are: every planner plans the remaining science
+        around them (see :meth:`_open_gaps`).
+        """
+        if not self.config.observation_groups.consecutive:
+            return
+        self._placing_groups = True
+        try:
+            self._place_requests(self._with_allocated_time(self._requests()))
+        finally:
+            self._placing_groups = False
 
     def _recorder_ledger(self) -> RecorderLedgers:
         return RecorderLedgers(
@@ -1431,15 +1452,22 @@ class PriorityScheduler:
         # The request for the rest of a target's exposure can start with none,
         # all of it allocated, and take allocated seconds that do not fit.
         active = [request for request in requests if request.wants_more]
+        self._group_needed: dict[str, float] = defaultdict(float)
+        """Exposure the requests of each consecutive group have to place."""
+        for request in active:
+            if request.group is not None and request.group.consecutive:
+                self._group_needed[request.group.name] += request.remaining
         order = {id(request): k for k, request in enumerate(requests)}
         placed = dict.fromkeys(order, 0)
         self._program_seconds = dict(self._delivered)
         """Science by program: collected, committed and planned so far."""
         self._cut_short: list[_Request] = []
         """Requests a move has cut short since the last placement."""
-        following: ObservationGroup | None = None
+        following: ObservationGroup | None = self._group_under_way(active)
         """A group that prefers contiguity whose target was just placed: its
-        other targets go next, as the queue follows a group in dispatch."""
+        other targets go next, as the queue follows a group in dispatch. A
+        consecutive group is followed until it has finished, and from the
+        start where it is already under way."""
         while active:
             shares = program_shares(self._program_seconds)
             pool = active
@@ -1449,6 +1477,8 @@ class PriorityScheduler:
                     pool = members
                 else:
                     following = None
+            # A member of a consecutive group waits for the members before it.
+            pool = [r for r in pool if self._members_turn(r, active)]
             # The original order breaks ties only; a merge can change value
             # even when completion-deficit balancing is disabled.
             request = max(
@@ -1501,7 +1531,8 @@ class PriorityScheduler:
                 self._record_visit(request, block)
                 following = (
                     request.group
-                    if request.group is not None and request.group.prefer_contiguous
+                    if request.group is not None
+                    and (request.group.prefer_contiguous or request.group.consecutive)
                     else None
                 )
                 if request.wants_more:
@@ -1509,7 +1540,12 @@ class PriorityScheduler:
             # By identity: a request for allocated time can equal the request
             # for the rest of its target's exposure field for field.
             active[:] = [r for r in active if r is not request]
+            unfinished = request.remaining >= max(
+                request.minimum_snapshot, self.ctx.step_size
+            )
             self._return_allocated_time(request, active, order)
+            if unfinished:
+                self._end_consecutive_group(request, active)
 
         # Insertion order need not be chronological: an earlier gap can be
         # filled after a future visit was selected. Refresh owned snapshots
@@ -1556,6 +1592,155 @@ class PriorityScheduler:
                     f"unplanned after {placed[id(request)]} snapshot(s)",
                     request.target.obsid,
                 )
+
+    def _consecutive_group(self, obsid: int) -> ObservationGroup | None:
+        """The consecutive observation group ``obsid`` is a member of, if any."""
+        group = self._merit_model.groups.group_of(obsid)
+        return group if group is not None and group.consecutive else None
+
+    def _members_turn(self, request: _Request, active: Sequence[_Request]) -> bool:
+        """Whether a request may be placed now as far as its group's order
+        goes: always, unless it is in a consecutive group and a member
+        before it still has exposure to place."""
+        group = request.group
+        if group is None or not group.consecutive:
+            return True
+        position = group.members.index(int(request.target.obsid))
+        earlier = set(group.members[:position])
+        return not any(int(r.target.obsid) in earlier for r in active)
+
+    def _group_under_way(self, active: Sequence[_Request]) -> ObservationGroup | None:
+        """A consecutive group that has begun and has members still to
+        place: one of its members has collected science, or has science
+        committed or kept on the timeline. Its remaining members are placed
+        before anything else."""
+        on_timeline = {
+            int(block.entry.obsid) for block in self.timeline if not block.is_fixed
+        }
+        begun = {
+            int(target.obsid)
+            for target in self.targets
+            if target.done
+            or target.collected_seconds > 0.0
+            or self.reserved_seconds.get(int(target.obsid), 0.0) > 0.0
+        }
+        for request in active:
+            group = request.group
+            if group is None or not group.consecutive:
+                continue
+            if any(obsid in on_timeline or obsid in begun for obsid in group.members):
+                return group
+        return None
+
+    def _end_consecutive_group(self, request: _Request, active: list[_Request]) -> None:
+        """End a consecutive group at a member that cannot be finished: the
+        members after it are not placed, since they follow it in order."""
+        group = request.group
+        if group is None or not group.consecutive:
+            return
+        obsid = int(request.target.obsid)
+        if any(int(r.target.obsid) == obsid for r in active):
+            return
+        dropped = [r for r in active if r.group is group]
+        if not dropped:
+            return
+        active[:] = [r for r in active if r.group is not group]
+        self._log(
+            self.ctx.ustart,
+            f"Consecutive group {group.name!r} ends at member {obsid}, which "
+            f"cannot be finished in this plan: members "
+            f"{sorted({int(r.target.obsid) for r in dropped})} are not placed",
+            obsid,
+        )
+
+    def _closed_gaps(self, timeline: Sequence[_Block]) -> frozenset[int]:
+        """The positions of ``timeline`` between the first and the last
+        block of a consecutive group, where no other science is placed."""
+        if not self.config.observation_groups.consecutive:
+            return frozenset()
+        spans: dict[str, tuple[int, int]] = {}
+        for index, block in enumerate(timeline):
+            if block.is_fixed:
+                continue
+            group = self._consecutive_group(int(block.entry.obsid))
+            if group is not None:
+                first, _ = spans.get(group.name, (index, index))
+                spans[group.name] = (first, index)
+        return frozenset(
+            index
+            for first, last in spans.values()
+            for index in range(first + 1, last + 1)
+        )
+
+    def _open_gaps(self, request: _Request) -> tuple[int, int, frozenset[int]]:
+        """The timeline positions a snapshot of ``request`` may be placed
+        at, as far as consecutive groups go: the first and last position,
+        and the positions between them that are closed.
+
+        No science of another target goes between the first and the last
+        block of a consecutive group. A member of such a group goes after
+        the group's last block and before the next science of another
+        target. The group's first block goes where the time before the next
+        science of another target is at least the exposure the group's
+        requests still have to place, or runs to the end of the horizon.
+        """
+        timeline = self.timeline
+        own = request.group if request.group is not None else None
+        if own is not None and not own.consecutive:
+            own = None
+        spans: dict[str, tuple[int, int]] = {}
+        own_members = set(own.members) if own is not None else set()
+        for index, block in enumerate(timeline):
+            if block.is_fixed:
+                continue
+            group = self._consecutive_group(int(block.entry.obsid))
+            if group is None:
+                continue
+            first, _ = spans.get(group.name, (index, index))
+            spans[group.name] = (first, index)
+        closed: set[int] = set()
+        for name, (first, last) in spans.items():
+            if own is None or name != own.name:
+                closed.update(range(first + 1, last + 1))
+        lowest, highest = 0, len(timeline)
+        if own is None:
+            return lowest, highest, frozenset(closed)
+        foreign = [
+            index
+            for index, block in enumerate(timeline)
+            if not block.is_fixed and int(block.entry.obsid) not in own_members
+        ]
+        if own.name in spans:
+            lowest = spans[own.name][1] + 1
+            highest = next((index for index in foreign if index >= lowest), highest)
+            return lowest, highest, frozenset(closed)
+        if self._begun_before_horizon(own):
+            return lowest, highest, frozenset(closed)
+        needed = self._group_needed.get(own.name, 0.0)
+        for index in range(len(timeline) + 1):
+            following = next((k for k in foreign if k >= index), None)
+            if following is None:
+                continue
+            pred = self._pred_at(index)
+            free_from = max(
+                self.ctx.ustart, pred.end if pred is not None else self.ctx.ustart
+            )
+            if float(timeline[following].entry.begin) - free_from < needed:
+                closed.add(index)
+        return lowest, highest, frozenset(closed)
+
+    def _begun_before_horizon(self, group: ObservationGroup) -> bool:
+        """Whether a member of ``group`` collected science before this plan."""
+        members = set(group.members)
+        return any(
+            int(target.obsid) in members
+            and (
+                target.done
+                or target.collected_seconds > 0.0
+                or self.reserved_seconds.get(int(target.obsid), 0.0) > 0.0
+            )
+            for target in self.targets
+        )
 
     def _reactivate_cut_short(
         self, active: list[_Request], order: Mapping[int, int]
@@ -1908,6 +2093,10 @@ class PriorityScheduler:
                     if k not in visited and window.deadline >= self.ctx.ustart
                 ]
                 remaining = target.per_visit_seconds * len(candidates)
+            grouped = merit_model.groups.position(int(target.obsid)) is not None
+            if grouped != self._placing_groups:
+                # Consecutive groups are placed in a pass of their own.
+                continue
             if (
                 target.done
                 or int(target.obsid) in self.held
@@ -2900,7 +3089,14 @@ class PriorityScheduler:
         the next contact and after; it is never shortened to fit.
         """
         recorder_full = battery_low = False
-        for index in range(len(self.timeline) + 1):
+        lowest, highest, closed = (
+            self._open_gaps(request)
+            if self.config.observation_groups.consecutive
+            else (0, len(self.timeline), frozenset())
+        )
+        for index in range(lowest, min(highest, len(self.timeline)) + 1):
+            if index in closed:
+                continue
             pred = self._pred_at(index)
             succ = self.timeline[index] if index < len(self.timeline) else None
 
@@ -3153,6 +3349,9 @@ class PriorityScheduler:
         """
         request = self._movable.get(id(block))
         if request is None:
+            return False
+        if request.group is not None and request.group.consecutive:
+            # Its place among its group's blocks is fixed.
             return False
         if not request.timed:
             return True

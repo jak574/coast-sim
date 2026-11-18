@@ -6,6 +6,9 @@ a list of targets, such as the targets of one redshift bin or one field,
 that share a window in which their science may be collected, a cap on the
 science they collect together, and a preference for being observed one after
 another. Dispatch, the planners and the long-range allocator honour all three.
+
+A group can also be consecutive: its targets are then observed in the order
+listed, with no other science between the first and the last of them.
 """
 
 from __future__ import annotations
@@ -55,6 +58,19 @@ class ObservationGroup(ConfigModel):
             "adds targets.group_contiguity_weight to a member's merit once another "
             "member has just been observed, and the priority-first placement goes "
             "on with the group once it has placed one of its targets"
+        ),
+    )
+
+    consecutive: bool = Field(
+        default=False,
+        description=(
+            "Whether the group's targets are observed in the order of members, "
+            "each one completed before the next begins, with no science of any "
+            "other target between the group's first observation and its last. "
+            "Ground contacts, charging, thruster dumps and other activities may "
+            "fall between two of its observations. The group ends at a member "
+            "that can no longer be observed, and the members after it are then "
+            "not observed"
         ),
     )
 
@@ -113,6 +129,20 @@ class ObservationGroups(ConfigModel):
             if obsid in group.members:
                 return group
         return None
+
+    def position(self, obsid: int) -> int | None:
+        """Where ``obsid`` comes in its consecutive group's order, or None
+        where it is in no consecutive group."""
+        group = self.group_of(obsid)
+        if group is None or not group.consecutive:
+            return None
+        return group.members.index(obsid)
+
+    @property
+    def consecutive(self) -> list[ObservationGroup]:
+        """The groups whose targets are observed in order with no other
+        science between them."""
+        return [group for group in self.groups if group.consecutive]
 
     def __bool__(self) -> bool:
         return bool(self.groups)

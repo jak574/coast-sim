@@ -1342,7 +1342,10 @@ class LocalSearchScheduler(PriorityScheduler):
                 return state
 
         timeline = state.timeline
+        closed = self._closed_gaps(timeline)
         for index in range(state.cursor, len(timeline) + 1):
+            if index in closed:
+                continue
             pred = timeline[index - 1] if index > 0 else self._origin
             succ = timeline[index] if index < len(timeline) else None
             fit = self._fit_in_gap(
