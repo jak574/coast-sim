@@ -1070,6 +1070,7 @@ class QueueDITL(DITLMixin, DITLStats):
         # Set step_size from ephem
         self.step_size = self.ephem.step_size
         self._reset_stored_momentum_tracker()
+        self._reset_radiator_thermal()
 
         # Set ACS ephemeris if not already set
         if self.acs.ephem is None:
@@ -2917,6 +2918,9 @@ class QueueDITL(DITLMixin, DITLStats):
         _q = attitude_to_quat(ra, dec, roll)
         momentum_sample = self._update_stored_momentum(utime, _pos, _q, index=ei)
         drive_angles = self._solar_array_drive_telemetry()
+        radiator_temperatures, radiator_heat_w = self._radiator_thermal_telemetry(
+            utime, bus_power, payload_power
+        )
         return Housekeeping(
             timestamp=datetime.fromtimestamp(utime, tz=timezone.utc),
             ra=ra,
@@ -2963,7 +2967,8 @@ class QueueDITL(DITLMixin, DITLStats):
             telescope_hard_violations=self.acs.telescope_hard_violations,
             radiator_sun_exposure=self.acs.radiator_sun_exposure,
             radiator_earth_exposure=self.acs.radiator_earth_exposure,
-            radiator_heat_dissipation_w=self.acs.radiator_heat_dissipation_w,
+            radiator_heat_dissipation_w=radiator_heat_w,
+            radiator_temperatures_k=radiator_temperatures,
             sun_body_vector=sun_body_vector,
             earth_body_vector=earth_body_vector,
             quat_w=float(_q[0]),

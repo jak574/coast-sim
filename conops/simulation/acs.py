@@ -93,6 +93,7 @@ class ACS:
     radiator_sun_exposure: float
     radiator_earth_exposure: float
     radiator_heat_dissipation_w: float
+    radiator_exposures: list[tuple[float, float]]
     science_observation_active: bool
     solar_array_drive_state: SolarArrayDriveState
 
@@ -166,6 +167,8 @@ class ACS:
         self.radiator_sun_exposure = 0.0
         self.radiator_earth_exposure = 0.0
         self.radiator_heat_dissipation_w = 0.0
+        # Sun and Earth exposure of each radiator, in configuration order
+        self.radiator_exposures = []
 
         # Command queue (sorted by execution_time)
         self.command_queue = []
@@ -1712,6 +1715,10 @@ class ACS:
         self.radiator_sun_exposure = cast(float, metrics["sun_exposure"])
         self.radiator_earth_exposure = cast(float, metrics["earth_exposure"])
         self.radiator_heat_dissipation_w = cast(float, metrics["heat_dissipation_w"])
+        self.radiator_exposures = [
+            (cast(float, r["sun_exposure"]), cast(float, r["earth_exposure"]))
+            for r in per_radiator
+        ]
 
         if self.radiator_hard_violations > 0:
             self._log_or_print(

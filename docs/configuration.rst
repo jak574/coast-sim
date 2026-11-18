@@ -1160,6 +1160,9 @@ this field when radiators are configured.
 * ``dissipation_coefficient_w_per_m2`` (float): Emitted flux cap for model calibration/backward compatibility
 * ``sun_loading_factor`` (float): Weighting factor applied to Sun exposure term
 * ``earth_loading_factor`` (float): Weighting factor applied to Earth exposure term
+* ``thermal_mass_j_per_k`` (float, optional): Heat capacity of the radiator and the hardware it cools (J/K). When set, the radiator temperature is integrated over the run; see `Radiator Thermal Mass`_. Default ``None``
+* ``heat_load_w`` (float): Constant internal heat conducted to the radiator (W). Requires ``thermal_mass_j_per_k``. Default 0
+* ``subsystem_power_fraction`` (float): Fraction [0, 1] of the electrical power of ``subsystem`` that reaches the radiator as heat. Requires ``thermal_mass_j_per_k`` and a ``subsystem`` of ``"spacecraft_bus"`` or ``"payload"``. Default 0
 * ``hard_constraint`` (optional): Keep-out constraint for invalid radiator pointing
 
 **RadiatorOrientation Attributes:**
@@ -1238,6 +1241,77 @@ Where:
 
 Positive :math:`Q_{net}` means net heat rejection (dumping heat).
 Negative :math:`Q_{net}` means net absorbed external radiative load.
+
+Radiator Thermal Mass
+^^^^^^^^^^^^^^^^^^^^^
+
+By default a radiator stays at ``radiator_temperature_k`` for the whole run, so
+the model above describes heat flow only. Setting ``thermal_mass_j_per_k`` makes
+the radiator a single thermal node with that heat capacity. Its temperature
+:math:`T_r` then changes during the run according to the energy balance:
+
+.. math::
+
+    C\,\frac{dT_r}{dt} = Q_{int} + A\,\eta\,\alpha(S_0 f_{sun}E_{sun} + F_{earth} f_{earth}E_{earth}) - A\,\eta\,\epsilon\sigma(T_r^4 - T_s^4)
+
+Where:
+
+* :math:`C` is ``thermal_mass_j_per_k``
+* :math:`Q_{int}` is the internal heat: ``heat_load_w`` plus
+  ``subsystem_power_fraction`` times the electrical power that the radiator's
+  ``subsystem`` draws at that step. The bus power includes its heater, and the
+  payload power includes the instrument heaters
+* the other symbols are those of `Radiator Net Heat Model`_
+
+The thermal mass is the product of mass and specific heat of everything that
+follows the radiator temperature. For example, 20 kg of aluminium at
+900 J/(kg K) is 18,000 J/K.
+
+What changes for a radiator that has a thermal mass:
+
+* ``radiator_temperature_k`` is the temperature at the start of the run.
+* The emission cap ``dissipation_coefficient_w_per_m2`` is not applied. The cap
+  holds the emitted flux constant above a certain temperature, and a node with
+  a constant emitted flux has no equilibrium temperature.
+* The temperature is recorded at every step in the telemetry field
+  ``radiator_temperatures_k``, a mapping from radiator name to Kelvin. Radiator
+  names must therefore be unique when any radiator has a thermal mass.
+* ``radiator_heat_dissipation_w`` is computed at the current temperature.
+
+The inputs of each simulation step (exposures and subsystem power) are held
+constant until the next step. The integration is stable for any step length:
+within a step the temperature approaches the equilibrium temperature of those
+inputs and does not pass it.
+
+The temperatures belong to the run, not to the configuration, so two
+simulations that share one ``MissionConfig`` do not affect each other.
+
+The temperature is reported only. It does not affect scheduling, heater power
+or fault management.
+
+.. code-block:: python
+
+   from conops.config import Radiator, RadiatorConfiguration, RadiatorOrientation
+
+   config.spacecraft_bus.radiators = RadiatorConfiguration(
+       radiators=[
+           Radiator(
+               name="BusRad-Y",
+               width_m=1.2,
+               height_m=0.8,
+               orientation=RadiatorOrientation(normal=(0.0, -1.0, 0.0)),
+               subsystem="spacecraft_bus",
+               radiator_temperature_k=285.0,  # at the start of the run
+               thermal_mass_j_per_k=18_000.0,
+               subsystem_power_fraction=0.6,  # 60% of bus power leaves here
+           )
+       ]
+   )
+
+   # After the run
+   temperatures = [
+       sample["BusRad-Y"] for sample in ditl.telemetry.housekeeping.radiator_temperatures_k
+   ]
 
 targets
 ~~~~~~~

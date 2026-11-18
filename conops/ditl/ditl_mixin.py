@@ -23,6 +23,11 @@ from ..config import (
 )
 from ..config.data_storage import DataStorage, RecorderSummary, RecorderView
 from ..config.observation_timing import ObservationTiming, timing_for
+from ..config.radiator import (
+    BUS_SUBSYSTEM,
+    PAYLOAD_SUBSYSTEM,
+    RadiatorConfiguration,
+)
 from ..schedulers.recorder import contact_downlink_gb
 from ..simulation.acs import ACS
 from ..simulation.attitude import slew_angular_velocity
@@ -36,6 +41,7 @@ from ..simulation.momentum import (
 )
 from ..simulation.momentum_budget import MomentumBudget, MomentumLimitError
 from ..simulation.passes import Pass, PassTimes
+from ..simulation.radiator_thermal import RadiatorThermalModel
 from ..simulation.slew import Slew
 from ..targets import AttitudeTimeseriesSchema, Plan, PlanEntry
 from ..targets.plan_entry import extra_data_gb, instrument_modes_of
@@ -247,6 +253,7 @@ class DITLMixin:
     telemetry: Telemetry
     calculate_field_of_regard: bool
     _stored_momentum_tracker: StoredMomentumTracker | None
+    _radiator_thermal: RadiatorThermalModel | None
 
     def __init__(
         self,
@@ -344,6 +351,7 @@ class DITLMixin:
         # Initialize common subsystems (can be overridden by subclasses)
         self._init_subsystems()
         self._stored_momentum_tracker = self._build_stored_momentum_tracker()
+        self._reset_radiator_thermal()
 
     @property
     def fault_management(self) -> FaultManagementRun:
@@ -464,6 +472,38 @@ class DITLMixin:
     def _antenna_repoints(self, target: PlanEntry) -> str:
         """The category setting for antenna repoints during ``target``."""
         return self.config.observation_categories.antenna_repoints(int(target.obsid))
+
+    def _reset_radiator_thermal(self) -> None:
+        """Start the run's radiator temperatures from the configured values."""
+        radiators = getattr(self.config.spacecraft_bus, "radiators", None)
+        self._radiator_thermal = (
+            RadiatorThermalModel.for_radiators(radiators)
+            if isinstance(radiators, RadiatorConfiguration)
+            else None
+        )
+
+    def _radiator_thermal_telemetry(
+        self, utime: float, bus_power_w: float | None, payload_power_w: float | None
+    ) -> tuple[dict[str, float] | None, float]:
+        """Advance the radiator temperatures to this step and return them
+        with the total radiator heat flow to record.
+
+        Without a radiator thermal mass there are no temperatures, and the
+        heat flow is the one the ACS computed at the fixed temperatures.
+        """
+        model = self._radiator_thermal
+        if model is None:
+            return None, self.acs.radiator_heat_dissipation_w
+        exposures = self.acs.radiator_exposures
+        model.advance(
+            utime,
+            exposures,
+            {
+                BUS_SUBSYSTEM: bus_power_w or 0.0,
+                PAYLOAD_SUBSYSTEM: payload_power_w or 0.0,
+            },
+        )
+        return model.temperatures_k, model.heat_dissipation_w(exposures)
 
     def _build_stored_momentum_tracker(self) -> StoredMomentumTracker | None:
         attitude_control = self.config.spacecraft_bus.attitude_control
