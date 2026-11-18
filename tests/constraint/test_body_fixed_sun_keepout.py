@@ -67,12 +67,14 @@ def _run(kind: str, keep_out: bool) -> DITL | QueueDITL:
 
 def _sun_angles(run: DITL | QueueDITL) -> tuple[list[float], list[ACSMode]]:
     """The Sun's angle from ``NORMAL`` and the ACS mode at every step."""
-    samples = list(run.telemetry.housekeeping)
-    angles = [
-        float(np.degrees(np.arccos(np.clip(np.dot(s.sun_body_vector, NORMAL), -1, 1))))
-        for s in samples
-    ]
-    return angles, [ACSMode(s.acs_mode) for s in samples]
+    angles: list[float] = []
+    modes: list[ACSMode] = []
+    for sample in run.telemetry.housekeeping:
+        assert sample.sun_body_vector is not None and sample.acs_mode is not None
+        cosine = float(np.dot(np.asarray(sample.sun_body_vector), np.asarray(NORMAL)))
+        angles.append(float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))))
+        modes.append(ACSMode(sample.acs_mode))
+    return angles, modes
 
 
 def _slews_entering_from_legal_ends(angles: list[float], modes: list[ACSMode]) -> int:

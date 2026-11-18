@@ -190,6 +190,7 @@ quaternion applies the inverse rotation ``R_x(-roll)``.
    - ``radiator_earth_exposure``: Area-weighted Earth exposure for all configured radiators (0-1)
    - ``radiator_heat_dissipation_w``: Total first-order net radiator heat flow (W). A positive value means the radiators reject heat. A negative value means they absorb a net external radiative load
    - ``radiator_temperatures_k``: Temperature in Kelvin of each radiator that has a thermal mass, by radiator name. ``None`` when no radiator has one. See "Radiator Thermal Mass" in :doc:`configuration`
+   - ``thermal_node_temperatures_k``: Temperature in Kelvin of each interior thermal node, by node name. ``None`` when none is configured. See "Thermal Nodes and Couplings" in :doc:`configuration`
 
 The radiator metrics are continuous measures of performance. A low or negative value
 does not indicate a hardware failure: the pointing alone can reduce heat rejection,

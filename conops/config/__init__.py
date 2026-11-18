@@ -76,7 +76,7 @@ from .surfaces import (
     telescope_surfaces,
 )
 from .targets import TargetConfig
-from .thermal import Heater
+from .thermal import Heater, ThermalCoupling, ThermalNetwork, ThermalNode
 from .visualization import VisualizationConfig
 
 __all__ = [
@@ -112,6 +112,9 @@ __all__ = [
     "GroundStation",
     "GroundStationRegistry",
     "Heater",
+    "ThermalCoupling",
+    "ThermalNetwork",
+    "ThermalNode",
     "Instrument",
     "ConcurrencyRules",
     "InstrumentMode",

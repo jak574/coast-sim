@@ -11,7 +11,7 @@ from .power import PowerDraw
 from .radiator import DefaultRadiatorConfiguration, RadiatorConfiguration
 from .star_tracker import DefaultStarTrackerConfiguration, StarTrackerConfiguration
 from .surfaces import SurfaceModel
-from .thermal import Heater
+from .thermal import Heater, ThermalNetwork
 
 # Allow roughly eight significant digits of input precision. This is a
 # numerical-consistency tolerance, not a mass-properties uncertainty budget.
@@ -64,6 +64,13 @@ class SpacecraftBus(ConfigModel):
         default_factory=DefaultRadiatorConfiguration,
         description="Body-mounted radiator configuration",
     )
+    thermal: ThermalNetwork = Field(
+        default_factory=ThermalNetwork,
+        description=(
+            "Interior thermal nodes and the conductive paths among them and "
+            "the radiators that have a thermal mass"
+        ),
+    )
     surfaces: SurfaceModel | None = Field(
         default=None,
         description=(
@@ -110,6 +117,39 @@ class SpacecraftBus(ConfigModel):
                 "principal inertia moments must satisfy the triangle inequality"
             )
         return tuple(tuple(float(x) for x in row) for row in scaled * scale)  # type: ignore[return-value]
+
+    @model_validator(mode="after")
+    def _thermal_network_names_resolve(self) -> "SpacecraftBus":
+        # Validation also runs on test doubles of the bus, which may lack
+        # these fields.
+        network = getattr(self, "thermal", None)
+        configured = getattr(self, "radiators", None)
+        if not isinstance(network, ThermalNetwork) or not isinstance(
+            configured, RadiatorConfiguration
+        ):
+            return self
+        if not network.nodes and not network.couplings:
+            return self
+        radiators = [
+            radiator.name
+            for radiator in configured.radiators
+            if radiator.thermal_mass_j_per_k is not None
+        ]
+        names = [node.name for node in network.nodes] + radiators
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(
+                "thermal node names must be unique among nodes and radiators "
+                f"with a thermal mass; repeated: {repeated}"
+            )
+        for coupling in network.couplings:
+            unknown = [name for name in coupling.between if name not in names]
+            if unknown:
+                raise ValueError(
+                    f"thermal coupling {coupling.between} names {unknown}, which "
+                    "is neither a thermal node nor a radiator with a thermal mass"
+                )
+        return self
 
     @model_validator(mode="after")
     def _require_inertia_for_gravity_gradient(self) -> "SpacecraftBus":

@@ -49,6 +49,9 @@ from .config import (
     StoredMomentumConfig,
     Surface,
     SurfaceModel,
+    ThermalCoupling,
+    ThermalNetwork,
+    ThermalNode,
     ThrusterDumpConfig,
 )
 from .ditl import (
@@ -154,6 +157,9 @@ __all__ = [
     "GroundStation",
     "GroundStationRegistry",
     "Heater",
+    "ThermalCoupling",
+    "ThermalNetwork",
+    "ThermalNode",
     "Instrument",
     "LocalSearchScheduler",
     "LongRangeAllocator",

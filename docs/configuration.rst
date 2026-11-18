@@ -366,6 +366,7 @@ The :class:`~conops.config.SpacecraftBus` defines the spacecraft bus subsystems.
 * ``data_generation`` (:class:`~conops.config.HousekeepingData`): Data the bus generates at all times, such as housekeeping, by ACS mode; see :doc:`data_management`
 * ``star_trackers`` (:class:`~conops.config.StarTrackerConfiguration`): Optional star tracker configuration
 * ``radiators`` (:class:`~conops.config.RadiatorConfiguration`): Optional body-mounted radiator configuration
+* ``thermal`` (:class:`~conops.config.ThermalNetwork`): Interior thermal nodes and the conductive paths among them and the radiators that have a thermal mass; see `Thermal Nodes and Couplings`_. Empty by default
 * ``surfaces`` (:class:`~conops.config.SurfaceModel` | None): The spacecraft's surfaces, modelled as flat plates placed about its centre of mass. They are used to compute the torques of sunlight and drag (see `Stored momentum`_ below). If this is None and those torques are tracked, a placeholder model is built from the bus, panels and telescopes
 
 .. code-block:: python
@@ -1206,9 +1207,11 @@ this field when radiators are configured.
 * ``dissipation_coefficient_w_per_m2`` (float): Emitted flux cap for model calibration/backward compatibility
 * ``sun_loading_factor`` (float): Weighting factor applied to Sun exposure term
 * ``earth_loading_factor`` (float): Weighting factor applied to Earth exposure term
+* ``earth_flux_model`` (str): ``"uniform"`` (default) or ``"view_factor"``; see `Earth Flux Model`_
+* ``earth_albedo`` (float): Fraction [0, 1] of sunlight that the Earth reflects. Requires ``earth_flux_model="view_factor"``. Default 0
 * ``thermal_mass_j_per_k`` (float, optional): Heat capacity of the radiator and the hardware it cools (J/K). When set, the radiator temperature is integrated over the run; see `Radiator Thermal Mass`_. Default ``None``
 * ``heat_load_w`` (float): Constant internal heat conducted to the radiator (W). Requires ``thermal_mass_j_per_k``. Default 0
-* ``subsystem_power_fraction`` (float): Fraction [0, 1] of the electrical power of ``subsystem`` that reaches the radiator as heat. Requires ``thermal_mass_j_per_k`` and a ``subsystem`` of ``"spacecraft_bus"`` or ``"payload"``. Default 0
+* ``subsystem_power_fraction`` (float): Fraction [0, 1] of the electrical power of ``subsystem`` that reaches the radiator as heat. Requires ``thermal_mass_j_per_k`` and a ``subsystem`` of ``"spacecraft_bus"``, ``"payload"`` or the name of one instrument. Default 0
 * ``hard_constraint`` (optional): Keep-out constraint for invalid radiator pointing
 
 **RadiatorOrientation Attributes:**
@@ -1288,6 +1291,47 @@ Where:
 Positive :math:`Q_{net}` means net heat rejection (dumping heat).
 Negative :math:`Q_{net}` means net absorbed external radiative load.
 
+Earth Flux Model
+^^^^^^^^^^^^^^^^
+
+``earth_flux_model`` selects how the Earth loads a radiator.
+
+With ``"uniform"``, the default, the Earth term is the one in the equation
+above: ``earth_ir_flux_w_per_m2`` times the cosine exposure, at any distance
+from the Earth, absorbed with ``absorptivity``.
+
+With ``"view_factor"`` three things change:
+
+* **Distance.** The Earth term is multiplied by :math:`(R_E / r)^2`, where
+  :math:`R_E` is the Earth's mean radius and :math:`r` the distance from the
+  Earth's centre at that step. This is the view factor from a small plate to a
+  distant sphere. On an eccentric orbit the Earth load therefore falls between
+  perigee and apogee.
+* **Infrared absorption.** The Earth's infrared flux is absorbed with
+  ``emissivity``, because a surface absorbs thermal infrared as well as it
+  emits it. ``absorptivity`` is the solar value and applies to sunlight only.
+* **Albedo.** With ``earth_albedo`` above zero, the radiator also absorbs
+  sunlight reflected by the Earth.
+
+.. math::
+
+    Q_{earth} = A\,\eta\,f_{earth}\,E_{earth}\left(\frac{R_E}{r}\right)^2 \left[\epsilon F_{earth} + \alpha\,a\,S_0 \max(0, \cos\theta)\right]
+
+Here :math:`a` is ``earth_albedo`` and :math:`\theta` is the angle at the
+Earth's centre between the spacecraft and the Sun, so the albedo term is
+largest above the subsolar point and zero over the night side.
+
+``earth_loading_factor`` still multiplies the Earth terms, and its default is
+0.3. Set it to 1.0 to use ``earth_ir_flux_w_per_m2`` and ``earth_albedo``
+unscaled.
+
+The model is approximate close to the Earth: it treats the Earth as small
+compared with the distance, so it does not account for the part of the Earth's
+disc that a tilted radiator cannot see.
+
+The telemetry field ``radiator_earth_exposure`` and the scheduler's radiator
+exposure weights use the cosine exposure with either model.
+
 Radiator Thermal Mass
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -1307,7 +1351,9 @@ Where:
   ``subsystem_power_fraction`` times the electrical power that the radiator's
   ``subsystem`` draws at that step. The bus power includes its heater, and the
   payload power includes the instrument heaters
-* the other symbols are those of `Radiator Net Heat Model`_
+* the other symbols are those of `Radiator Net Heat Model`_. With
+  ``earth_flux_model="view_factor"`` the Earth term is the one in
+  `Earth Flux Model`_
 
 The thermal mass is the product of mass and specific heat of everything that
 follows the radiator temperature. For example, 20 kg of aluminium at
@@ -1329,11 +1375,15 @@ constant until the next step. The integration is stable for any step length:
 within a step the temperature approaches the equilibrium temperature of those
 inputs and does not pass it.
 
+``subsystem`` may be ``"spacecraft_bus"``, ``"payload"`` or the name of one
+instrument, in which case only that instrument's power in its current mode
+counts. A name that matches none of these raises an error when the run starts.
+
 The temperatures belong to the run, not to the configuration, so two
 simulations that share one ``MissionConfig`` do not affect each other.
 
-The temperature is reported only. It does not affect scheduling, heater power
-or fault management.
+The temperature is reported only. It does not affect scheduling, heater power,
+fault management or the thermal settling table.
 
 .. code-block:: python
 
@@ -1358,6 +1408,114 @@ or fault management.
    temperatures = [
        sample["BusRad-Y"] for sample in ditl.telemetry.housekeeping.radiator_temperatures_k
    ]
+
+Thermal Nodes and Couplings
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A radiator with a thermal mass is a thermal node on the outside of the
+spacecraft. ``spacecraft_bus.thermal`` (:class:`~conops.config.ThermalNetwork`)
+adds nodes inside it and the conductive paths that join nodes.
+
+**ThermalNetwork Attributes:**
+
+* ``nodes`` (list[:class:`~conops.config.ThermalNode`]): Interior nodes
+* ``couplings`` (list[:class:`~conops.config.ThermalCoupling`]): Conductive paths
+* ``start_at_equilibrium`` (bool): Start the run at steady temperatures; see below. Default ``False``
+
+**ThermalNode Attributes:**
+
+An interior node has a heat capacity and one temperature. It does not absorb
+Sun or Earth flux and does not radiate to space; it gains and loses heat only
+through its own heat sources and its couplings. Examples are a mirror, a
+metering structure or an instrument.
+
+* ``name`` (str): Unique among nodes and radiators that have a thermal mass
+* ``thermal_mass_j_per_k`` (float): Heat capacity (J/K)
+* ``temperature_k`` (float): Temperature at the start of the run (K). Default 293
+* ``heat_load_w`` (float): Constant heat generated in the node (W). Default 0
+* ``subsystem`` (str, optional): ``"spacecraft_bus"``, ``"payload"`` or the name of one instrument
+* ``subsystem_power_fraction`` (float): Fraction [0, 1] of that subsystem's electrical power that becomes heat in the node. Default 0
+
+**ThermalCoupling Attributes:**
+
+* ``between`` (tuple[str, str]): Names of the two nodes joined. Each is a ``ThermalNode`` or a radiator that has a thermal mass
+* ``conductance_w_per_k`` (float): Conductance of the path (W/K)
+
+The heat flow from node *i* to node *j* is :math:`G_{ij}(T_i - T_j)`, so each
+node obeys:
+
+.. math::
+
+    C_i\,\frac{dT_i}{dt} = Q_{int,i} + Q_{abs,i} - Q_{emit,i}(T_i) + \sum_j G_{ij}(T_j - T_i)
+
+The absorbed and emitted terms are zero for an interior node. Heat is conserved
+across a coupling: what one node loses through it the other gains.
+
+A radiator that is coupled to nothing is integrated as described in
+`Radiator Thermal Mass`_. Nodes that are coupled are integrated together with
+the backward Euler method. That method is stable for any step length and any
+conductance, including a conductance large enough that two nodes are
+effectively one. It is first-order accurate, so each simulation step is split
+into as many as 64 parts, chosen so that no part is longer than a quarter of
+the shortest time constant among the coupled nodes.
+
+**Starting temperatures.** By default each node starts at its configured
+temperature (``radiator_temperature_k`` or ``temperature_k``). A node with a
+long time constant then spends the first part of the run moving from that value
+toward the temperatures the run would produce. With
+``start_at_equilibrium=True`` the run starts instead at the steady temperatures
+for the attitude and power of the first step. A group of coupled nodes that
+contains no radiator able to emit has no steady temperature, and keeps its
+configured temperatures.
+
+**Telemetry.** Interior node temperatures are recorded at every step in
+``thermal_node_temperatures_k``, a mapping from node name to Kelvin. Radiator
+temperatures remain in ``radiator_temperatures_k``.
+
+.. code-block:: python
+
+   from conops.config import (
+       Radiator,
+       RadiatorConfiguration,
+       ThermalCoupling,
+       ThermalNetwork,
+       ThermalNode,
+   )
+
+   config.spacecraft_bus.radiators = RadiatorConfiguration(
+       radiators=[
+           Radiator(
+               name="Payload radiator",
+               subsystem="payload",
+               thermal_mass_j_per_k=9_000.0,
+               earth_flux_model="view_factor",
+               earth_loading_factor=1.0,
+               earth_albedo=0.3,
+           )
+       ]
+   )
+   config.spacecraft_bus.thermal = ThermalNetwork(
+       nodes=[
+           # The detector is heated by the camera's own power draw
+           ThermalNode(
+               name="Detector",
+               thermal_mass_j_per_k=1_500.0,
+               subsystem="camera",
+               subsystem_power_fraction=0.8,
+           ),
+           # The optical bench generates no heat
+           ThermalNode(name="Optical bench", thermal_mass_j_per_k=60_000.0),
+       ],
+       couplings=[
+           ThermalCoupling(
+               between=("Detector", "Optical bench"), conductance_w_per_k=0.5
+           ),
+           ThermalCoupling(
+               between=("Optical bench", "Payload radiator"), conductance_w_per_k=4.0
+           ),
+       ],
+       start_at_equilibrium=True,
+   )
 
 targets
 ~~~~~~~

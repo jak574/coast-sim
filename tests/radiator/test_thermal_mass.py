@@ -8,10 +8,10 @@ import pytest
 
 from conops import DITL, QueueDITL
 from conops.common import ACSMode
-from conops.config import PowerDraw, Radiator, RadiatorConfiguration
+from conops.config import PowerDraw, Radiator, RadiatorConfiguration, ThermalNetwork
 from conops.config.radiator import STEFAN_BOLTZMANN_W_PER_M2_K4
 from conops.schedulers import PriorityScheduler
-from conops.simulation.radiator_thermal import RadiatorThermalModel
+from conops.simulation.thermal_network import ThermalNetworkModel
 from tests.scheduler.planning_scenario import BEGIN, make_config
 
 HOUR = 3600.0
@@ -34,7 +34,7 @@ def test_without_a_thermal_mass_the_heat_flow_is_unchanged() -> None:
     # 0.85 sigma 300^4 is 390 W/m2, capped at the 220 W/m2 coefficient.
     assert radiator.heat_dissipation_w(0.0, 0.0) == pytest.approx(0.9 * 220.0)
     assert radiator.temperature_after(300.0, HOUR, 500.0, 1.0, 1.0) == 300.0
-    assert RadiatorThermalModel.for_radiators(RadiatorConfiguration()) is None
+    assert ThermalNetworkModel.for_spacecraft([radiator], ThermalNetwork()) is None
 
 
 def test_equilibrium_balances_the_heat_received_and_emitted() -> None:
@@ -98,8 +98,11 @@ def test_a_radiator_that_cannot_emit_stores_all_the_heat() -> None:
 def test_heat_inputs_are_rejected_without_a_thermal_mass() -> None:
     with pytest.raises(ValueError, match="thermal_mass_j_per_k"):
         Radiator(heat_load_w=10.0)
-    with pytest.raises(ValueError, match="subsystem"):
-        _radiator(subsystem="optical bench", subsystem_power_fraction=0.5)
+    with pytest.raises(ValueError, match="optical bench"):
+        ThermalNetworkModel(
+            [_radiator(subsystem="optical bench", subsystem_power_fraction=0.5)],
+            ThermalNetwork(),
+        )
     with pytest.raises(ValueError, match="unique"):
         RadiatorConfiguration(radiators=[_radiator(), _radiator()])
 
@@ -107,16 +110,15 @@ def test_heat_inputs_are_rejected_without_a_thermal_mass() -> None:
 def test_the_model_holds_each_steps_inputs_until_the_next() -> None:
     radiator = _radiator(heat_load_w=0.0, subsystem_power_fraction=0.5)
     fixed = Radiator(name="Fixed")
-    model = RadiatorThermalModel.for_radiators(
-        RadiatorConfiguration(radiators=[fixed, radiator])
-    )
+    model = ThermalNetworkModel.for_spacecraft([fixed, radiator], ThermalNetwork())
     assert model is not None
-    dark = [(0.0, 0.0), (0.0, 0.0)]
+    dark = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
     model.advance(0.0, dark, {"spacecraft_bus": 300.0})
-    assert model.temperatures_k == {"Bus": 280.0}
+    assert model.radiator_temperatures_k == {"Bus": 280.0}
     model.advance(600.0, dark, {"spacecraft_bus": 0.0})
     expected = radiator.temperature_after(280.0, 600.0, 150.0, 0.0, 0.0)
-    assert model.temperatures_k == {"Bus": pytest.approx(expected)}
+    assert model.radiator_temperatures_k == {"Bus": pytest.approx(expected)}
+    assert model.node_temperatures_k == {}
     assert model.heat_dissipation_w(dark) == pytest.approx(
         fixed.heat_dissipation_w(0.0, 0.0) + radiator.emitted_power_w(expected)
     )

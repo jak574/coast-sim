@@ -26,9 +26,9 @@ that defines them:
    conops.simulation.momentum_budget
    conops.simulation.momentum_planning
    conops.simulation.passes
-   conops.simulation.radiator_thermal
    conops.simulation.roll
    conops.simulation.saa
    conops.simulation.safe_hold
    conops.simulation.slew
    conops.simulation.slew_requirements
+   conops.simulation.thermal_network

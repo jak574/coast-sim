@@ -237,6 +237,13 @@ class Housekeeping(BaseModel):
             "by radiator name; None where no radiator has one"
         ),
     )
+    thermal_node_temperatures_k: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "Temperature in Kelvin of each interior thermal node, by node "
+            "name; None where none is configured"
+        ),
+    )
     sun_body_vector: list[float] | None = Field(
         default=None,
         description="Unit vector toward the Sun in spacecraft body frame [x, y, z]",
@@ -557,6 +564,11 @@ class HousekeepingList(list[Housekeeping]):
     def radiator_temperatures_k(self) -> list[dict[str, float] | None]:
         """Get per-radiator temperatures from all housekeeping records."""
         return [hk.radiator_temperatures_k for hk in self]
+
+    @property
+    def thermal_node_temperatures_k(self) -> list[dict[str, float] | None]:
+        """Get interior thermal node temperatures from all housekeeping records."""
+        return [hk.thermal_node_temperatures_k for hk in self]
 
     @property
     def sun_body_vector(self) -> list[list[float] | None]:
