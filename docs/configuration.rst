@@ -476,22 +476,6 @@ The :class:`~conops.config.AttitudeControlSystem` defines slew performance and p
 * ``slew_accuracy`` (float): Pointing accuracy after slew completion in degrees
 * ``safe_mode_attitude`` (:class:`~conops.config.activity_attitude.ActivityAttitude` | None): Optional fixed or power-positive attitude the spacecraft holds after fault management puts it in safe mode. An inherited attitude is rejected. None keeps the existing charging guidance; see :ref:`power-positive-fault-safe-mode`
 * ``settle_time`` (float): Time to settle after slew completion in seconds
-* ``slew_requirements`` (list of :class:`~conops.config.SlewRequirement`, optional): The
-  mission's slew requirement classes. Each class has a ``name`` and two limits:
-
-  - ``max_great_circle_deg`` is the widest slew that belongs to the class, measured as
-    the great-circle angle between the two pointings the slew joins.
-  - ``max_seconds`` is the longest time a slew of the class may take, including its
-    settle.
-
-  The classes are a check on the slews the ACS model flies. They do not constrain
-  those slews. Each plan entry records the great-circle angle of its slew
-  (``great_circle_deg``) beside the rotation actually flown (``slewdist``), which is
-  longer when the slew also changes the roll. The planners log any slew that takes
-  longer than its class allows. A run reports those slews through
-  ``slew_requirement_mismatches()``, separately from the plan's execution mismatches.
-  ``print_statistics`` summarises the slews by class, with the longest slew of each
-  class and the number that exceeded the allowance.
 * ``thermal_settling`` (list of :class:`~conops.config.ThermalSettlingStep`, optional): A
   table that sets the settle time after a slew from how far the slew moves the Sun's
   direction in the body frame. The table exists because the structure settles
@@ -1516,6 +1500,15 @@ temperatures remain in ``radiator_temperatures_k``.
        ],
        start_at_equilibrium=True,
    )
+
+requirements
+~~~~~~~~~~~~
+
+``MissionConfig.requirements`` is a list of mission requirements, such as slew
+times by class and limits on telemetry quantities. They are checked against a
+plan and a run and do not constrain either. Slew time classes, formerly
+``attitude_control.slew_requirements``, are configured here. See
+:doc:`requirements`.
 
 targets
 ~~~~~~~

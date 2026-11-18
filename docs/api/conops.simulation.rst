@@ -30,5 +30,4 @@ that defines them:
    conops.simulation.saa
    conops.simulation.safe_hold
    conops.simulation.slew
-   conops.simulation.slew_requirements
    conops.simulation.thermal_network

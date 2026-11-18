@@ -6,15 +6,19 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from ..common import ChargeState, normalize_acs_mode, unixtime2date
-from ..config.acs import AttitudeControlSystem
 from ..config.config import MissionConfig
 from ..config.data_storage import DataStorage
 from ..config.observation_categories import ObservationCategories
 from ..config.observation_groups import ObservationGroups
+from ..requirements import (
+    RequirementReport,
+    SlewClassSummary,
+    SlewTimeRequirement,
+    check_requirements,
+)
 from ..simulation.acs import ACS
 from ..simulation.coverage import StationCoverage
 from ..simulation.passes import PassTimes
-from ..simulation.slew_requirements import SlewClassSummary, summarise_plan
 from ..targets import Plan, PlanEntry, Pointing
 from ..targets.activity import CHARGE_OBSID
 from .plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
@@ -271,25 +275,41 @@ class DITLStats:
             )
         return rows
 
-    def slew_class_summary(self) -> list[SlewClassSummary]:
-        """The run's slews against the ACS's slew requirement classes: one
-        row per class with its slews, the longest and how many broke the
-        allowance, and a row for slews wider than the widest class. Empty
-        without a table."""
-        acs = getattr(
-            getattr(self.config, "spacecraft_bus", None), "attitude_control", None
-        )
-        requirements = getattr(acs, "slew_requirements", None)
-        if (
-            not isinstance(acs, AttitudeControlSystem)
-            or not isinstance(requirements, list)
-            or not requirements
-        ):
-            # No table, or a test double's configuration.
-            return []
+    def _plan_entries(self) -> list[PlanEntry]:
         plan = getattr(self, "plan", None)
-        entries = list(plan) if isinstance(plan, (Plan, list, tuple)) else []
-        return summarise_plan(entries, acs)
+        return list(plan) if isinstance(plan, (Plan, list, tuple)) else []
+
+    def check_requirements(self) -> RequirementReport:
+        """Check the mission's requirements (``config.requirements``) against
+        the plan and the telemetry of this run.
+
+        Before the run has produced telemetry, the requirements that need it
+        are reported as not evaluated.
+        """
+        config = self.config
+        if not isinstance(getattr(config, "requirements", None), list):
+            # A test double's configuration.
+            return RequirementReport()
+        telemetry = getattr(self, "telemetry", None)
+        samples = list(telemetry.housekeeping) if telemetry is not None else []
+        return check_requirements(config, self._plan_entries(), samples or None)
+
+    def slew_class_summary(self) -> list[SlewClassSummary]:
+        """The run's slews against the classes of each slew time requirement:
+        one row per class with its slews, the longest and how many broke the
+        allowance, and a row for slews wider than the widest class. Empty
+        without such a requirement."""
+        requirements = getattr(self.config, "requirements", None)
+        if not isinstance(requirements, list):
+            # A test double's configuration.
+            return []
+        entries = self._plan_entries()
+        return [
+            row
+            for requirement in requirements
+            if isinstance(requirement, SlewTimeRequirement)
+            for row in requirement.summarise(entries)
+        ]
 
     def visit_table(
         self, targets: Sequence[Pointing] | None = None, *, per_window: bool = False
@@ -457,6 +477,14 @@ class DITLStats:
                     f"{summary.group:<18} {summary.members:>7} {summary.observed:>8} "
                     f"{summary.visits:>6} {summary.science_hours:>9.2f} {budget}"
                 )
+        report = self.check_requirements()
+        if report.results:
+            print("\n" + "-" * 70)
+            print("REQUIREMENTS")
+            print("-" * 70)
+            print(report)
+            for violation in report.violations:
+                print(f"  {violation.requirement}: {violation}")
         classes = self.slew_class_summary()
         if classes:
             print("\n" + "-" * 70)

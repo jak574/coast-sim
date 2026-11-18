@@ -2712,12 +2712,6 @@ class QueueDITL(DITLMixin, DITLStats):
         """Return plan/ACS mismatches over exported science and contact intervals."""
         return self._plan_validator().validate()
 
-    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
-        """The slews of the executed plan that took longer than their
-        requirement class allows (``attitude_control.slew_requirements``);
-        empty without a table. A report, not a fault: the run completes."""
-        return self._plan_validator().slew_requirement_mismatches()
-
     def _assert_plan_matches_execution(self) -> None:
         """Raise if the exported plan doesn't match executed telemetry, logging the first mismatch."""
         mismatches = self.validate_plan_matches_execution()

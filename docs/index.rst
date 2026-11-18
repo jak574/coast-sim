@@ -31,6 +31,7 @@ constraints before launch.
    science_programs
    planning
    plan_serialization
+   requirements
    api/modules
    contributing
    README

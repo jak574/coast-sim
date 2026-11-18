@@ -99,10 +99,10 @@ follows the category table.
 ``slew_class_summary()``
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ACS configuration can hold a table of slew requirement classes (see
-:doc:`configuration`). This method returns one
-:class:`~conops.simulation.slew_requirements.SlewClassSummary` per class, in the table's
-order. Each summary gives:
+A mission can configure a slew time requirement with a table of slew classes
+(see :doc:`requirements`). This method returns one
+:class:`~conops.requirements.slew.SlewClassSummary` per class, in ascending
+angle. Each summary gives:
 
 - the number of slews that fall in the class, judged by great-circle angle;
 - the duration of the longest of those slews, including its settling;

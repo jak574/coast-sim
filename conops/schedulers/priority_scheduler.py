@@ -1406,17 +1406,20 @@ class PriorityScheduler:
                 "step_size": self.ctx.step_size,
             },
         )
-        self._log_slew_requirements(self.plan)
+        self._log_requirements(self.plan)
         return self.plan
 
-    def _log_slew_requirements(self, plan: Plan) -> None:
-        """Say which of the plan's slews take longer than their requirement
-        class allows, where the ACS has a table; the plan stands."""
-        from ..simulation.slew_requirements import check_plan
+    def _log_requirements(self, plan: Plan) -> None:
+        """Log each violation of the mission's requirements that the plan
+        alone shows, such as a slew over its class's time. The plan is not
+        changed."""
+        from ..requirements import check_requirements
 
-        for violation in check_plan(plan, self.config.spacecraft_bus.attitude_control):
+        for violation in check_requirements(self.config, list(plan)).violations:
             self._log(
-                violation.utime, f"Slew requirement: {violation}", violation.obsid
+                violation.utime,
+                f"Requirement {violation.requirement}: {violation}",
+                violation.obsid,
             )
 
     def _place_requests(self, requests: Sequence[_Request]) -> None:

@@ -1,4 +1,4 @@
-from .acs import AttitudeControlSystem, SlewRequirement, ThermalSettlingStep
+from .acs import AttitudeControlSystem, ThermalSettlingStep
 from .activity_attitude import ActivityAttitude
 from .battery import Battery
 from .communications import (
@@ -83,7 +83,6 @@ __all__ = [
     "ActivityAttitude",
     "AntennaPointing",
     "AttitudeControlSystem",
-    "SlewRequirement",
     "ThermalSettlingStep",
     "AttitudeConstraintScope",
     "BandCapability",

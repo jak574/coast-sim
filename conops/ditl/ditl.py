@@ -678,12 +678,6 @@ class DITL(DITLMixin, DITLStats):
         """
         return self._plan_validator().validate()
 
-    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
-        """The slews of the executed plan that took longer than their
-        requirement class allows (``attitude_control.slew_requirements``);
-        empty without a table. A report, not a fault: the run completes."""
-        return self._plan_validator().slew_requirement_mismatches()
-
     def _plan_validator(self) -> PlanExecutionValidator:
         """Build a validator over this run's plan and executed telemetry."""
         return PlanExecutionValidator(

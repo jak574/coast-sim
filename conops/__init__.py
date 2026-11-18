@@ -73,6 +73,17 @@ from .ditl import (
     TOORequest,
     create_ditl,
 )
+from .requirements import (
+    Requirement,
+    RequirementEvidence,
+    RequirementReport,
+    RequirementResult,
+    RequirementViolation,
+    SlewClass,
+    SlewTimeRequirement,
+    TelemetryLimitRequirement,
+    check_requirements,
+)
 from .schedulers import (
     CpSatScheduler,
     DispatchPolicy,
@@ -122,6 +133,15 @@ from .visualization import (
 )
 
 __all__ = [
+    "Requirement",
+    "RequirementEvidence",
+    "RequirementReport",
+    "RequirementResult",
+    "RequirementViolation",
+    "SlewClass",
+    "SlewTimeRequirement",
+    "TelemetryLimitRequirement",
+    "check_requirements",
     "ACS",
     "DAY_SECONDS",
     "DITL",
