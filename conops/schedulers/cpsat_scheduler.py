@@ -46,6 +46,7 @@ from ..targets.merit import MeritModel
 from ..targets.plan_entry import (
     extra_data_gb,
     instrument_modes_of,
+    is_rounding_remainder,
     snapshot_min_seconds,
 )
 from ._delivered_shares import (
@@ -320,6 +321,7 @@ class _Task:
         overhead: int = 0,
         setup: int = 0,
         collection: tuple[int, int] = (0, 0),
+        whole: int | None = None,
         window: tuple[int, int] = (0, 0),
         rate: float = 0.0,
         earliness: float = 0.0,
@@ -358,6 +360,10 @@ class _Task:
         its data in a recorder segment."""
         self.collection = collection
         """Shortest and longest collection of a candidate snapshot, in seconds."""
+        self.whole = whole
+        """The least the snapshot collects unless it takes the last of the
+        request's exposure in the chunk, where that is more than the shortest
+        collection; None where the shortest collection applies either way."""
         self.window = window
         """The candidate's visibility window, in which its slew starts."""
         self.rate = rate
@@ -764,6 +770,26 @@ class _ChunkModel:
             objective.extend(self._urgency_objective(k, task, counted))
         for obsid, counted_list in totals.items():
             model.add(sum(counted_list) <= int(budget[obsid]))
+        # A snapshot below the request's minimum is the remainder of its
+        # exposure, as in the other planners: at most one per request, and
+        # only where the chunk's snapshots of it take all the exposure the
+        # chunk may place.
+        remainders: dict[int, list[cp_model.IntVar]] = {}
+        for k, task in enumerate(self.tasks):
+            obsid = task.obsid
+            if obsid is None or task.whole is None:
+                continue
+            remainder = model.new_bool_var(f"remainder{k}")
+            model.add_implication(remainder, present[k])
+            model.add(self.collection[k] >= task.whole).only_enforce_if(
+                [present[k], ~remainder]
+            )
+            model.add(sum(totals[obsid]) == int(budget[obsid])).only_enforce_if(
+                remainder
+            )
+            remainders.setdefault(obsid, []).append(remainder)
+        for literals in remainders.values():
+            model.add_at_most_one(literals)
         for cap, members in self.category_caps:
             # A category's time budget: its candidates share what is left.
             model.add(sum(self.counted[k] for k in members) <= cap)
@@ -2065,6 +2091,10 @@ class CpSatScheduler(LocalSearchScheduler):
             shortest, longest = self._collection_bounds(request, remaining)
             if longest < shortest:
                 continue
+            # The remainder of the exposure may be shorter than the minimum
+            # once another snapshot is placed, as in the other planners, so
+            # the model can hold a plan that ends an exposure with one.
+            least = self._remainder_bound(request, shortest)
             slews_from, opens = self._opens(request, state, origin_time)
             spacing = cadence = None
             if request.cadence is not None:
@@ -2101,7 +2131,8 @@ class CpSatScheduler(LocalSearchScheduler):
                     earliest = int(np.ceil(max(w0, slot_opens) - origin_time))
                     # The slew must start in the chunk (see _ChunkModel); the
                     # snapshot may arrive after it ends.
-                    latest = window[1] - overhead - shortest
+                    floor = shortest if visit is not None else least
+                    latest = window[1] - overhead - floor
                     if slot_deadline is not None:
                         latest = min(latest, int(slot_deadline - origin_time - setup))
                     if latest < earliest or window[0] >= chunk_end - origin_time:
@@ -2167,7 +2198,8 @@ class CpSatScheduler(LocalSearchScheduler):
                             spacing=spacing,
                             overhead=task_overhead,
                             setup=int(np.ceil(setup)),
-                            collection=(shortest, longest),
+                            collection=(floor, longest),
+                            whole=shortest if floor < shortest else None,
                             window=window,
                             rate=rate,
                             earliness=earliness,
@@ -2208,13 +2240,24 @@ class CpSatScheduler(LocalSearchScheduler):
         # snapshot counts from dividing by zero.
         shortest = int(np.ceil(snapshot_min_seconds(target, request.step)))
         placed_before = remaining < self._initial_remaining[int(target.obsid)]
-        if placed_before and remaining >= request.step:
+        if placed_before and not is_rounding_remainder(
+            remaining, request.step, target.exporig
+        ):
             # Some of the exposure is placed already: the remainder may
             # be shorter than ss_min, as in the other planners, unless
-            # it is shorter than the step, which is rounding.
+            # it is rounding.
             shortest = min(shortest, int(np.ceil(remaining)))
         longest = int(np.floor(min(float(target.ss_max), remaining)))
         return max(1, shortest), longest
+
+    @staticmethod
+    def _remainder_bound(request: _Request, shortest: int) -> int:
+        """The least a snapshot of ``request`` collects where it is the
+        remainder of the exposure: a simulation step, or ``shortest`` where
+        that is less or the request is observed in whole visits."""
+        if request.timed or request.whole or request.target.sequence is not None:
+            return shortest
+        return min(shortest, max(1, int(np.ceil(request.step))))
 
     def _visit_slots(
         self,
@@ -2452,7 +2495,6 @@ class CpSatScheduler(LocalSearchScheduler):
         out if it no longer fits. The solver's first solution is then at least
         as good as the hint.
         """
-        step = self.ctx.step_size
         # Where the priority-first plan put each candidate, from the chunk's origin.
         wanted: dict[int, _PlannedSnapshot] = {}
         for k, task in enumerate(tasks):
@@ -2474,6 +2516,59 @@ class CpSatScheduler(LocalSearchScheduler):
             [*wanted, *passes],
             key=lambda k: wanted[k].arrival if k in wanted else tasks[k].arrival[0],
         )
+        # The model takes a snapshot below its request's minimum only as
+        # the one remainder that completes the exposure the chunk may place.
+        # Each hinted collection is cut to whole seconds, which can leave a
+        # few seconds of that exposure out: they are added to the remainder.
+        # A short snapshot the hint still cannot hold as a remainder is
+        # hinted at the minimum, or not at all, as any other snapshot is.
+        added: dict[int, int] = {}
+        whole_only: set[int] = set()
+        while True:
+            hint, exposure_left = self._hint_in_order(
+                tasks, wanted, order, slews, budget, chunk_seconds, added, whole_only
+            )
+            hinted: dict[int, int] = {}
+            short: dict[int, list[int]] = {}
+            for k, task_hint in hint.items():
+                task = tasks[k]
+                if task.obsid is None:
+                    continue
+                hinted[task.obsid] = hinted.get(task.obsid, 0) + 1
+                if task.whole is not None and task_hint.collection < task.whole:
+                    short.setdefault(task.obsid, []).append(k)
+            settled = True
+            for obsid, candidates in short.items():
+                left = exposure_left[obsid]
+                if len(candidates) == 1 and left == 0:
+                    continue
+                settled = False
+                k = candidates[0]
+                if len(candidates) == 1 and k not in added and left < hinted[obsid]:
+                    added[k] = left
+                else:
+                    whole_only.update(candidates)
+            if settled:
+                return hint
+
+    def _hint_in_order(
+        self,
+        tasks: Sequence[_Task],
+        wanted: dict[int, _PlannedSnapshot],
+        order: Sequence[int],
+        slews: npt.NDArray[np.int64],
+        budget: dict[int, float],
+        chunk_seconds: int,
+        added: dict[int, int],
+        whole_only: set[int],
+    ) -> tuple[dict[int, _TaskHint], dict[int, int]]:
+        """Hint the tasks of ``order``, in that order: the hint, and the
+        exposure of each request the chunk may place that the hint does not.
+        A candidate in ``added`` collects that many seconds more than the
+        plan's snapshot; one in ``whole_only`` collects its request's
+        minimum at least."""
+        step = self.ctx.step_size
+        passes = [k for k, task in enumerate(tasks) if k and not task.optional]
         exposure_left = {
             obsid: int(budget[obsid])
             for obsid in {task.obsid for task in tasks if task.obsid is not None}
@@ -2510,15 +2605,18 @@ class CpSatScheduler(LocalSearchScheduler):
                 ingress = 0 if next_task.inherits_attitude else int(slews[k, next_pass])
                 latest_slew = next_task.arrival[0] - ingress
                 ends_by = min(ends_by, latest_slew)
+            least = task.collection[0]
+            if k in whole_only and task.whole is not None:
+                least = task.whole
             seconds = min(
-                max(int(wanted[k].seconds), task.collection[0]),
+                max(int(wanted[k].seconds) + added.get(k, 0), least),
                 task.collection[1],
                 exposure_left[obsid],
                 ends_by - arrival - task.overhead,
             )
             if (
                 arrival > task.arrival[1]
-                or seconds < task.collection[0]
+                or seconds < least
                 or slew_start >= chunk_seconds
             ):
                 continue
@@ -2528,7 +2626,7 @@ class CpSatScheduler(LocalSearchScheduler):
                 due[obsid] = arrival + seconds + task.spacing
             free = arrival + task.overhead + seconds
             pose = k
-        return hint
+        return hint, exposure_left
 
     # ── Model inputs ─────────────────────────────────────────────────────
 

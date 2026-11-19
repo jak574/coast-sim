@@ -268,6 +268,10 @@ class RollingHorizonDITL(DITL):
             raise ValueError("give allocator or allocation, not both")
         if commit_lead_time < timedelta(0):
             raise ValueError("commit_lead_time must not be negative")
+        if start_plan is not None and not (
+            isinstance(scheduler, type) and issubclass(scheduler, LocalSearchScheduler)
+        ):
+            raise ValueError("only the local-search schedulers take a start plan")
         super().__init__(
             config=config,
             ephem=ephem,
@@ -452,7 +456,7 @@ class RollingHorizonDITL(DITL):
             at = min(interrupted, utime)
             target = self._target_for(int(entry.obsid))
             if target is not None:
-                target.record_interruption(at)
+                target.record_interruption(at, began=float(entry.begin))
             if entry is not target:
                 # Record this entry without a Pointing's parent delegation.
                 PlanEntry.record_interruption(entry, at)

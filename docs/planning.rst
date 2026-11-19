@@ -347,7 +347,8 @@ subsections after it give the detail.
    There is one exception to the ``ss_min`` limit. Once any of the request is
    placed, or the target has collected anything, its remainder is placed however
    short it is, in the same way that dispatch finishes such a target. A remainder
-   shorter than the simulation step is treated as rounding and ends the request.
+   that is shorter than the simulation step and no more than a tenth of the
+   request's exposure is treated as rounding and ends the request.
 4. **Each snapshot** goes in the earliest slot where every check ``DITL`` and the plan
    validator will apply passes:
 
@@ -805,7 +806,9 @@ A rolling run can start from a plan. Pass the plan as
 local-search or CP-SAT scheduler of each replan is then given the entries of that
 plan that lie inside the horizon it plans, as a ``start_plan`` the scheduler
 improves on. A dispatch run's executed plan is the natural plan to start from. Each
-replan record says how many entries seeded it (``seed_entries``).
+replan record says how many entries seeded it (``seed_entries``). A rolling run
+whose scheduler takes no start plan, such as the priority-first scheduler, raises
+``ValueError`` when given one, as a planned run does.
 
 Local-search and CP-SAT replans also consider the previous rolling plan's
 uncommitted suffix. It is decoded again against the actual handoff state,
@@ -952,6 +955,11 @@ visits this far apart means every visit has the full cadence value.
 
 Dispatch follows the same rule. It does not select such a target until a cadence
 after its last visit, so the target is not revisited as soon as nothing outranks it.
+
+An observation that was cut short is not a visit to wait a cadence after, in
+dispatch or in the planners. A target whose last observation was cut is observed
+again without the wait, and so is a visit that was cut in a visit window that is
+still open.
 
 The planners apply the spacing as follows:
 

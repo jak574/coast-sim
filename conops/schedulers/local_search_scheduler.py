@@ -33,7 +33,7 @@ from ..ditl.ditl_log import DITLLog
 from ..ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
 from ..targets import Plan, Pointing, ScheduledActivity
 from ..targets.merit import MeritBreakdown
-from ..targets.plan_entry import snapshot_min_seconds
+from ..targets.plan_entry import is_rounding_remainder, snapshot_min_seconds
 from .battery import Additions
 from .priority_scheduler import (
     ActivitySchedulingError,
@@ -141,12 +141,14 @@ class _Decoded(BaseModel):
 def _wants_more(request: _Request, remaining: float, exposure: float) -> bool:
     """Whether ``remaining`` seconds are enough for another snapshot of
     ``request``, of ``exposure`` to place at the start: once some of the
-    exposure has been placed, a remainder of any length but shorter than
-    the step, which is rounding."""
+    exposure has been placed, a remainder of any length that is not
+    rounding (see :func:`is_rounding_remainder`)."""
     if remaining <= 0:
         return False
     if remaining < exposure:
-        return remaining >= request.step
+        return not is_rounding_remainder(
+            remaining, request.step, request.target.exporig
+        )
     return remaining >= float(snapshot_min_seconds(request.target, request.step))
 
 

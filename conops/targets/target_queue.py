@@ -538,10 +538,30 @@ class TargetQueue:
         if estimate.slewpath is not None:
             target.slewpath = estimate.slewpath
 
+    def _bounds(
+        self, target: Pointing, utime: float
+    ) -> tuple[float | None, float | None]:
+        """When ``target`` may begin collecting if selected at ``utime``:
+        its own bounds (see :meth:`_own_bounds`), narrowed by its group's
+        window. Every check of a start or a deadline reads these, so a
+        group's deadline is a deadline for collection to begin, as the
+        target's own is."""
+        start, deadline = self._own_bounds(target, utime)
+        group_start, group_deadline = self._group_bounds(target)
+        if group_start is not None:
+            start = group_start if start is None else max(start, group_start)
+        if group_deadline is not None:
+            deadline = (
+                group_deadline if deadline is None else min(deadline, group_deadline)
+            )
+        return start, deadline
+
     @staticmethod
-    def _bounds(target: Pointing, utime: float) -> tuple[float | None, float | None]:
-        """When ``target`` may begin collecting if selected at ``utime``: its
-        next visit window's bounds, or its own earliest start and deadline."""
+    def _own_bounds(
+        target: Pointing, utime: float
+    ) -> tuple[float | None, float | None]:
+        """The target's next visit window's bounds, or its own earliest
+        start and deadline."""
         windows = getattr(target, "visit_windows", None)
         # A test double's target has no windows.
         if isinstance(windows, list) and windows:
@@ -558,18 +578,15 @@ class TargetQueue:
         earliest start and by its deadline, or within an unvisited visit
         window, and, with cadence counting, a cadence after its last visit;
         a target whose windows are all past or visited is not."""
-        start, deadline = self._bounds(target, utime)
         windows = getattr(target, "visit_windows", None)
-        if isinstance(windows, list) and windows and deadline is None:
+        if (
+            isinstance(windows, list)
+            and windows
+            and self._own_bounds(target, utime)[1] is None
+        ):
             return False
         # Its group's window narrows its own.
-        group_start, group_deadline = self._group_bounds(target)
-        if group_start is not None:
-            start = group_start if start is None else max(start, group_start)
-        if group_deadline is not None:
-            deadline = (
-                group_deadline if deadline is None else min(deadline, group_deadline)
-            )
+        start, deadline = self._bounds(target, utime)
         if deadline is not None and utime > deadline:
             return False
         if not self._cadence_due(target, utime):
@@ -620,15 +637,14 @@ class TargetQueue:
         visible again before the ephemeris ends."""
         if not target.merit > 0:
             return False
-        _, deadline = self._bounds(target, utime)
         windows = getattr(target, "visit_windows", None)
-        if isinstance(windows, list) and windows and deadline is None:
+        if (
+            isinstance(windows, list)
+            and windows
+            and self._own_bounds(target, utime)[1] is None
+        ):
             return False
-        _, group_deadline = self._group_bounds(target)
-        if group_deadline is not None:
-            deadline = (
-                group_deadline if deadline is None else min(deadline, group_deadline)
-            )
+        _, deadline = self._bounds(target, utime)
         if deadline is not None and utime > deadline:
             return False
         if not self._within_budget(target):
@@ -730,7 +746,12 @@ class TargetQueue:
         last visit, as the planners space visits, so a target is not
         revisited as soon as nothing outranks it. A target without a cadence,
         or never visited, is due; so is any target where cadence does not
-        count (``cadence_weight`` of 0)."""
+        count (``cadence_weight`` of 0).
+
+        An observation cut short is not a visit to wait a cadence after, as
+        in the planners: a target whose last observation was cut is due, and
+        so is one whose last collection was in a visit window that is not
+        yet visited, so the visit is taken again while its window is open."""
         merit_model = self.merit_model
         if merit_model.cadence_weight <= 0.0:
             return True
@@ -738,6 +759,13 @@ class TargetQueue:
         last = getattr(target, "last_collection_time", None)
         if interval is None or not isinstance(last, (int, float)):
             return True
+        if getattr(target, "last_observation_cut", False) is True:
+            return True
+        windows = getattr(target, "visit_windows", None)
+        if isinstance(windows, list) and windows:
+            index = target.visit_index_at(float(last))
+            if index is not None and not target.visit_complete(index):
+                return True
         return utime >= float(last) + float(interval)
 
     def _slew_allowance(self) -> float | None:

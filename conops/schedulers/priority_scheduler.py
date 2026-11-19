@@ -41,7 +41,7 @@ from ..targets import (
 )
 from ..targets.activity import CHARGE_OBSID
 from ..targets.merit import MeritBreakdown, MeritModel
-from ..targets.plan_entry import snapshot_min_seconds
+from ..targets.plan_entry import is_rounding_remainder, snapshot_min_seconds
 from .allocator import AllocatedTime
 from .battery import MIN_CHARGE_SECONDS, Addition, Additions, Angles, BatteryLedger
 from .context import Attitude, SchedulingContext
@@ -222,7 +222,9 @@ class _Request(BaseModel):
         or what remains where that is less and a snapshot has been placed,
         or the target has collected, before (see :func:`snapshot_min_seconds`)."""
         least = float(snapshot_min_seconds(self.target, self.step))
-        if self.placed_before and self.remaining >= self.step:
+        if self.placed_before and not is_rounding_remainder(
+            self.remaining, self.step, self.target.exporig
+        ):
             least = min(least, self.remaining)
         return least
 
@@ -2106,6 +2108,10 @@ class PriorityScheduler:
                 index = target.visit_index_at(last_collection)
                 if index is not None and not target.visit_complete(index):
                     last_collection = None
+            if last_collection is not None and target.last_observation_cut:
+                # Nor is an observation cut short a visit to wait a cadence
+                # after: what it left is placed without that wait.
+                last_collection = None
             visits = [
                 t
                 for t in (

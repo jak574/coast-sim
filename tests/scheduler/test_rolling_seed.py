@@ -108,22 +108,22 @@ class TestSeeding:
         assert all(s is None for s in _Recording.seeds)
         assert all(r.seed_entries == 0 for r in rolling.replans)
 
-    def test_a_priority_scheduler_is_not_seeded(self) -> None:
+    def test_a_priority_scheduler_refuses_a_start_plan(self) -> None:
+        """The planned factory refuses a start plan for a scheduler that
+        takes none; a rolling run does too, instead of ignoring the plan."""
         plan = _dispatch_plan()
         config = _config(HOURS)
-        rolling = RollingHorizonDITL(
-            config,
-            _targets(config),
-            begin=BEGIN,
-            end=END,
-            horizon=timedelta(hours=6),
-            replan_interval=timedelta(hours=6),
-            scheduler=PriorityScheduler,
-            start_plan=plan,
-        )
-        rolling.step_size = STEP
-        assert rolling.calc()
-        assert all(r.seed_entries == 0 for r in rolling.replans)
+        with pytest.raises(ValueError, match="only the local-search schedulers"):
+            RollingHorizonDITL(
+                config,
+                _targets(config),
+                begin=BEGIN,
+                end=END,
+                horizon=timedelta(hours=6),
+                replan_interval=timedelta(hours=6),
+                scheduler=PriorityScheduler,
+                start_plan=plan,
+            )
 
 
 class TestFactory:

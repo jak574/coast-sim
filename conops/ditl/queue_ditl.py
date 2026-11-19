@@ -2193,10 +2193,23 @@ class QueueDITL(DITLMixin, DITLStats):
             # Subsequent steps belong to the already admitted whole visit.
             return self._sequence.parent.current_deadline
         current = getattr(ppt, "current_deadline", None)
-        if isinstance(current, (int, float)):
-            return float(current)
-        deadline = getattr(ppt, "deadline", None)
-        return float(deadline) if isinstance(deadline, (int, float)) else None
+        if not isinstance(current, (int, float)):
+            current = getattr(ppt, "deadline", None)
+        deadline = float(current) if isinstance(current, (int, float)) else None
+        # Its group's window deadline applies as its own does.
+        obsid = getattr(ppt, "obsid", None)
+        # A test double's observation has no obsid to look a group up by.
+        group = (
+            self.merit_model.groups.group_of(obsid)
+            if isinstance(obsid, int) and not isinstance(obsid, bool)
+            else None
+        )
+        group_deadline = group.bounds[1] if group is not None else None
+        if group_deadline is not None:
+            deadline = (
+                group_deadline if deadline is None else min(deadline, group_deadline)
+            )
+        return deadline
 
     def _next_activity_begin(
         self, after: float, *, protected_visit: bool = False
@@ -2350,7 +2363,7 @@ class QueueDITL(DITLMixin, DITLStats):
         if run is None:
             return
         self._sequence = None
-        run.parent.record_interruption(utime)
+        run.parent.record_interruption(utime, began=run.begun)
         self.log.log_event(
             utime=utime,
             event_type="OBSERVATION",
@@ -4418,7 +4431,7 @@ class QueueDITL(DITLMixin, DITLStats):
             self._close_last_plan_entry(utime, interrupted=interrupted)
 
         if interrupted:
-            self.ppt.record_interruption(utime)
+            self.ppt.record_interruption(utime, began=float(self.ppt.begin))
             self._log_cut_visit(utime)
         if mark_done:
             self.ppt.done = True

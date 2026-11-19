@@ -348,17 +348,27 @@ class Pointing(PlanEntry):
         if self._visit_parent is not None:
             self._visit_parent.record_calibration(utime, seconds)
 
-    def record_interruption(self, utime: float) -> None:
+    def record_interruption(self, utime: float, *, began: float | None = None) -> None:
         """A visit cut short is taken again, whole, while its window is
         open: the window counts as visited only once one attempt has
         collected a whole visit's science in it, uninterrupted. The science
         every attempt collected still counts. Follow the visit credited by
-        collection, including when it runs past the next window's opening."""
-        super().record_interruption(utime)
+        collection, including when it runs past the next window's opening.
+
+        ``began`` is when the observation that was cut began. Where the
+        target has collected nothing since then, the cut observation
+        collected nothing, and the visit last credited belongs to an
+        earlier observation that was not cut: it stays as it is."""
+        collected_before = (
+            began is not None
+            and self._last_collection_time is not None
+            and self._last_collection_time <= began
+        )
+        super().record_interruption(utime, began=began)
         if self._visit_parent is not None:
-            self._visit_parent.record_interruption(utime)
+            self._visit_parent.record_interruption(utime, began=began)
         if self.visit_windows:
-            index = self._collecting_visit
+            index = None if collected_before else self._collecting_visit
             self._collecting_visit = None
             if index is not None:
                 attempt = self._visit_attempt_seconds.pop(index, 0.0)

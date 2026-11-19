@@ -105,3 +105,35 @@ def test_the_solver_is_hinted_every_variable(monkeypatch: pytest.MonkeyPatch) ->
     ).schedule()
     assert hinted
     assert all(given == variables for given, variables in hinted)
+
+
+def test_cpsat_holds_a_remainder_of_the_priority_plan() -> None:
+    """The priority-first plan ends two exposures with a snapshot below
+    ``ss_min``. The model takes each as the remainder of its exposure, so
+    the solver starts from the whole plan and both chunks are kept."""
+    pytest.importorskip("ortools")
+    from conops.schedulers import CpSatScheduler
+
+    scenario = baseline("examples/example.tle", hours=6, targets=100)
+    config = scenario.make_config()
+    targets = scenario.make_targets(config)
+    scheduler = CpSatScheduler(
+        config,
+        targets,
+        scenario.begin,
+        scenario.end,
+        solver_deterministic_time=4.0,
+        workers=1,
+    )
+    plan = scheduler.schedule()
+    ss_min = {int(t.obsid): float(t.ss_min) for t in targets}
+    short = [
+        e
+        for e in plan
+        if e.collection_begin is not None
+        and int(e.obsid) in ss_min
+        and float(e.collection_end) - float(e.collection_begin) < ss_min[int(e.obsid)]
+    ]
+    assert short
+    assert scheduler.solver_chunks_used == [True, True]
+    assert scheduler.score >= scheduler.initial_score

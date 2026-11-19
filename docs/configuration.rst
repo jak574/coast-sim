@@ -1908,8 +1908,11 @@ A charging or ground-contact interruption ends the current visit. It does not
 end the target's remaining integration allocation. A target with positive
 remaining ``exptime`` stays eligible for later visits, subject to visibility
 and ``ss_min``. Once the target has collected anything, ``ss_min`` relaxes to
-the remainder, in dispatch and in the plans alike. A remainder shorter than
-the simulation step is treated as rounding and ends the target. Exhausted or
+the remainder, in dispatch and in the plans alike. A remainder that is shorter
+than the simulation step and no more than a tenth of the request's exposure is
+treated as rounding and ends the target. A request only a few steps long can have
+most of its science left and less than a step of it; that remainder is observed.
+Exhausted or
 explicitly completed targets are not reopened, and integration budgets are not
 reset at day boundaries.
 
@@ -2517,7 +2520,9 @@ one redshift bin, or of one field, are examples. Each
   most one group
 * ``window_start`` and ``window_deadline`` (Unix seconds, a datetime or an ISO string,
   optional): The window in which the group's science may begin. It narrows each
-  member's own earliest start and deadline
+  member's own earliest start and deadline, and is applied in the same way. A member
+  that cannot reach its pointing and begin collecting by ``window_deadline`` is not
+  selected
 * ``time_budget_seconds`` (float, optional): The most science the group's targets may
   collect together over a run, counting what they had collected before it. Dispatch,
   the planners and the allocator apply it beside the budgets of the targets'

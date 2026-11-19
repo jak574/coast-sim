@@ -583,8 +583,9 @@ class PlanEntry(BaseModel):
         """Credit executed science collection to this target.
 
         Reduces the remaining exposure time and records when the target was
-        last observed. A remainder shorter than ``step``, the step the
-        simulation runs at, ends the target: it is rounding, not science.
+        last observed. A remainder that is rounding at ``step``, the step
+        the simulation runs at, ends the target (see
+        :func:`is_rounding_remainder`).
 
         Args:
             utime: Time the collection ended.
@@ -595,9 +596,9 @@ class PlanEntry(BaseModel):
             return
         if self.exptime is not None:
             self.exptime = max(0, self.exptime - seconds)
-            if 0 < self.exptime < step:
-                # A remainder shorter than the step the simulation runs at
-                # is rounding, not science to come back for.
+            if self.exptime > 0 and is_rounding_remainder(
+                self.exptime, step, self.exporig
+            ):
                 self.exptime = 0
         self._collected_seconds += seconds
         self._last_collection_time = utime
@@ -632,9 +633,21 @@ class PlanEntry(BaseModel):
         """When this target's observations were cut short, in order."""
         return tuple(self._interruptions)
 
-    def record_interruption(self, utime: float) -> None:
-        """Record that an observation of this target was cut short at ``utime``."""
+    def record_interruption(self, utime: float, *, began: float | None = None) -> None:
+        """Record that an observation of this target was cut short at
+        ``utime``. ``began`` is when that observation began, where the
+        caller has it; a target with visit windows uses it (see
+        :meth:`Pointing.record_interruption`)."""
         self._interruptions.append(utime)
+
+    @property
+    def last_observation_cut(self) -> bool:
+        """Whether the target's most recent observation was cut short: it
+        has an interruption at or after its last collection."""
+        if not self._interruptions:
+            return False
+        last = self._last_collection_time
+        return last is None or self._interruptions[-1] >= last
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -1355,15 +1368,40 @@ class PlanEntry(BaseModel):
         )
 
 
+ROUNDING_REMAINDER_FRACTION = 0.1
+"""The largest part of a request's exposure that a remainder shorter than
+the simulation step may be and still count as rounding."""
+
+
+def is_rounding_remainder(
+    remaining: float, step: float, exposure: float | None
+) -> bool:
+    """Whether ``remaining`` seconds of a request for ``exposure`` seconds
+    are rounding, not science to observe.
+
+    The remainder is rounding when it is shorter than ``step``, the step
+    the simulation runs at, and no more than
+    :data:`ROUNDING_REMAINDER_FRACTION` of the exposure. A request only a
+    few steps long can have most of its science left and still less than a
+    step of it, and that remainder is observed. Without an exposure to
+    compare with, any remainder shorter than the step is rounding.
+    """
+    if remaining >= step:
+        return False
+    if exposure is None or exposure <= 0.0:
+        return True
+    return remaining <= ROUNDING_REMAINDER_FRACTION * exposure
+
+
 def snapshot_min_seconds(entry: PlanEntry, step: float = 0.0) -> float:
     """The least a snapshot of ``entry`` may collect, in seconds.
 
     ``ss_min`` for its first snapshot; once it has collected anything, the
     smaller of ``ss_min`` and what remains, so a target cut short by an
     interruption, or left with a remainder, finishes its exposure instead
-    of losing what is below ``ss_min``. A remainder shorter than ``step``,
-    the step the simulation runs at, is rounding rather than science and
-    gets no snapshot: the minimum stays ``ss_min``. Reads the public
+    of losing what is below ``ss_min``. A remainder that is rounding at
+    ``step`` (see :func:`is_rounding_remainder`) gets no snapshot: the
+    minimum stays ``ss_min``. Reads the public
     attributes, so a test double with a numeric ``ss_min`` and no
     collection record gets its ``ss_min``.
     """
@@ -1374,7 +1412,11 @@ def snapshot_min_seconds(entry: PlanEntry, step: float = 0.0) -> float:
         not isinstance(collected, (int, float))
         or collected <= 0.0
         or not isinstance(remaining, (int, float))
-        or float(remaining) < step
+    ):
+        return ss_min
+    exposure = getattr(entry, "exporig", None)
+    if is_rounding_remainder(
+        float(remaining), step, exposure if isinstance(exposure, (int, float)) else None
     ):
         return ss_min
     return min(ss_min, max(0.0, float(remaining)))
