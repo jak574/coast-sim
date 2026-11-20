@@ -3798,6 +3798,12 @@ class PriorityScheduler:
             self._apply_slew(move.new_block, move.slew)
         if after is not None and after_slew is not None:
             self._apply_slew(after, after_slew)
+        if after is not None and after.activity is not None:
+            # An activity that may begin late follows the run where the run
+            # now ends. The trial above settled a copy of it; the block
+            # itself is settled here, or it would begin before the moved
+            # run has ended.
+            self._settle_block(after, previous.end)
 
         self.timeline[index:end] = [new_block, *led, *(m.new_block for m in moves)]
         if after is not None and after.follows:

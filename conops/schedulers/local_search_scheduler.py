@@ -19,7 +19,7 @@ import math
 import random
 import time
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from copy import copy
 from datetime import datetime
 from itertools import pairwise
@@ -31,7 +31,7 @@ from ..common.numerics import TIME_TOLERANCE_S
 from ..config import MissionConfig
 from ..ditl.ditl_log import DITLLog
 from ..ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
-from ..targets import Plan, Pointing, ScheduledActivity
+from ..targets import Plan, PlanEntry, Pointing, ScheduledActivity
 from ..targets.merit import MeritBreakdown
 from ..targets.plan_entry import is_rounding_remainder, snapshot_min_seconds
 from .battery import Additions
@@ -579,6 +579,11 @@ class LocalSearchScheduler(PriorityScheduler):
         # committed visits are already excluded from visit_candidates.
         for request in self._by_obsid.values():
             request.skipped.clear()
+        # An activity that may begin late is held where the priority-first
+        # plan held it. Left where it was reserved, at its latest, a snapshot
+        # the plan placed after it would be decoded before it, and the
+        # activity and every snapshot after it would then land later.
+        self._settle_from(block.entry for block in self._greedy_timeline)
         # Released at their priority-first times, the snapshots decode to
         # the priority-first plan; moves release them one at a time.
         start = self._decode(
@@ -671,8 +676,9 @@ class LocalSearchScheduler(PriorityScheduler):
 
         return requests
 
-    def _settle_from(self, plan: Plan) -> None:
-        """Hold each fixed block that may begin late where ``plan`` held its
+    def _settle_from(self, plan: Iterable[PlanEntry]) -> None:
+        """Hold each fixed block that may begin late where ``plan``, a plan
+        or its entries, held its
         activity, within the block's reservation, and reserve it there: the
         plan's science around the activity then decodes at its own times,
         before and after the block as the plan had it. The fixed blocks

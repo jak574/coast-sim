@@ -299,3 +299,41 @@ class TestSeedActivityReservations:
             if 20000 <= int(e.obsid) < 20100 and e.collection_begin is not None
         }
         assert len(dispatched) >= 20
+
+
+class TestProgramPlanIsDecoded:
+    """Local search and CP-SAT start from the priority-first plan as the
+    decoder reproduces it. The program scenario has activities that may
+    begin late, and the decoding lost a tenth of the plan there."""
+
+    @staticmethod
+    def _started(hours: int) -> LocalSearchScheduler:
+        scenario = program(TLE, hours=hours)
+        config = scenario.make_config()
+        scheduler = LocalSearchScheduler(
+            config,
+            scenario.make_targets(config),
+            scenario.begin,
+            scenario.end,
+            activities=scenario.activities,
+            time_limit=0,
+        )
+        scheduler._start_from_priority_plan()
+        return scheduler
+
+    @pytest.mark.parametrize("hours", [24, 48])
+    def test_the_decoded_plan_scores_what_the_priority_plan_does(
+        self, hours: int
+    ) -> None:
+        scheduler = self._started(hours)
+        assert scheduler.start_score == pytest.approx(scheduler.initial_score)
+
+    def test_no_block_begins_before_the_block_before_it_ends(self) -> None:
+        """A visit moved later to make room for a snapshot ends later. The
+        activity after it, which may begin late, begins when the visit now
+        ends, not where it was held before the move."""
+        scheduler = self._started(48)
+        timeline = scheduler._greedy_timeline
+        for before, block in zip(timeline, timeline[1:]):
+            assert float(block.entry.begin) >= before.end - 1e-6
+            assert block.ready >= before.end - 1e-6
