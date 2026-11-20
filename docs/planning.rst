@@ -402,6 +402,10 @@ Some entries are limited in how they move:
 * A cadence target's visit never moves earlier than it was. It also moves no later
   than leaves its next visit a cadence after it, so the target's visits stay a
   cadence apart.
+* A cadence visit that stays where it is keeps the start of its slew as well. A
+  snapshot placed before the visit can make the slew into it longer. The slew is
+  then found again, and it may start no earlier than it did. A snapshot that would
+  need the slew to start earlier is not placed there.
 * A visit in a window of its own moves only if it is the target's latest.
 * A cadence visit placed at the opening of its visibility window is otherwise an
   anchor that nothing can precede, since a slew into it from another attitude would

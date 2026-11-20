@@ -4,8 +4,6 @@ it; the visits stay a cadence apart."""
 
 from unittest.mock import patch
 
-import pytest
-
 from conops.benchmark.scenarios import program
 from conops.common import ObsType
 from conops.ditl import DITL
@@ -56,16 +54,6 @@ class TestSuccessorShift:
         _, _, _, fixed = _plan(disable_moves=True)
         assert _science_hours(fixed) < _science_hours(plan) - 0.5
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "A visit's slew is found again when a snapshot is placed before "
-            "it. A longer slew from the new predecessor starts earlier, and "
-            "that start is not checked against the cadence: target 30000's "
-            "second visit starts its slew 30 s less than a cadence after the "
-            "first visit's collection ends."
-        ),
-    )
     def test_the_visits_stay_a_cadence_apart(self) -> None:
         config, _, _, plan = _plan()
         cadence = config.observation_categories.get_category(30000).cadence_seconds
@@ -94,3 +82,33 @@ class TestSuccessorShift:
         assert ditl.calc()
         assert ditl.validate_plan_matches_execution() == []
         assert any(e.obstype == ObsType.ACTIVITY for e in ditl.plan)
+
+
+def test_a_visit_reslewed_after_an_insertion_keeps_its_spacing() -> None:
+    """Three days of the program with every activity: a snapshot placed
+    before a cadence visit makes the slew into the visit longer. The slew
+    still starts no earlier than it did, so every visit's slew starts at
+    least a cadence after the target's previous visit ended. Two visits
+    once started 55 s and 109 s too soon here."""
+    scenario = program(TLE, hours=72)
+    config = scenario.make_config()
+    plan = PriorityScheduler(
+        config,
+        scenario.make_targets(config),
+        scenario.begin,
+        scenario.end,
+        activities=scenario.activities,
+    ).schedule()
+    cadence = config.observation_categories.get_category(30000).cadence_seconds
+    assert cadence is not None
+    visits: dict[int, list[tuple[float, float]]] = {}
+    for e in plan:
+        if 30000 <= int(e.obsid) < 30010 and e.collection_end is not None:
+            visits.setdefault(int(e.obsid), []).append(
+                (float(e.begin), float(e.collection_end))
+            )
+    assert sum(len(spans) for spans in visits.values()) > 30
+    for spans in visits.values():
+        spans.sort()
+        for (_, end), (begin, _) in zip(spans, spans[1:]):
+            assert begin >= end + cadence - 1e-6

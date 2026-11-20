@@ -663,6 +663,8 @@ class PriorityScheduler:
         """For each request for allocated time, by id, the request for the
         rest of its target's exposure."""
         self._planned_visits: dict[int, list[_Block]] = defaultdict(list)
+        self._cadences: dict[int, float] = {}
+        """The cadence of each request that has one, by obsid."""
         """Cadence visits placed so far, by obsid. Allocated time can place
         a later visit first, so a visit is spaced from these on both sides."""
         self._refitting: _Block | None = None
@@ -2388,6 +2390,11 @@ class PriorityScheduler:
         # Allocated time is worth its request's value plus the bonus.
         self._allocated_factor = 1.0 + self.allocation_bonus
         requests.sort(key=self._rank, reverse=True)
+        self._cadences = {
+            int(request.target.obsid): request.cadence
+            for request in requests
+            if request.cadence is not None
+        }
         return requests
 
     def _entry_visibility(self, entry: PlanEntry) -> None:
@@ -2637,7 +2644,13 @@ class PriorityScheduler:
         hold is the same for every attitude the block could take. Where it
         is before ``earliest``, no slew can start, so the safe hold
         attitudes are not searched.
+
+        A cadence visit already on the timeline keeps its slew start as the
+        earliest it may start (see :meth:`_cadence_floor`).
         """
+        floor = self._cadence_floor(block)
+        if floor is not None:
+            earliest = max(earliest, floor)
         idle_limit = self._idle_limit(pred, earliest, block.ready)
         slew = self._connect_to(pred, block, earliest, attitude_in, idle_limit)
         if (
@@ -2661,6 +2674,24 @@ class PriorityScheduler:
                 if slew is not None:
                     break
         return slew
+
+    def _cadence_floor(self, block: _Block) -> float | None:
+        """The earliest the slew into a cadence visit already on the
+        timeline may start when the slew is found again: where it starts
+        now. None for any other block.
+
+        The visit was placed with its slew starting at least a cadence after
+        the request's previous visit ended. A snapshot placed before it can
+        make the slew into it longer, and a slew that still arrives when the
+        visit begins then starts earlier. Starting no earlier than it did
+        keeps the visit's spacing, as a visit moved later keeps it (see
+        :meth:`_fit_delaying_run`).
+        """
+        if block.is_fixed or block.slew is None:
+            return None
+        if int(block.entry.obsid) not in self._cadences:
+            return None
+        return float(block.slew.slewstart)
 
     def _connect_to(
         self,
