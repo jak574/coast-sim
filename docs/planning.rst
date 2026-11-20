@@ -1619,6 +1619,18 @@ plans`_). While one chunk is
 solved, the part of the incumbent that comes after the chunk, its continuation, is left
 unchanged.
 
+Each chunk is solved against the incumbent as it then stands. After a chunk is kept,
+every snapshot of the incumbent is released where the decoder placed it, so the
+snapshots of the next chunk, its continuation, the time the model may use and the
+solver's hint all come from the current plan. A kept chunk that places more science
+than the plan had moves the plan after it later, and the chunks after it are bounded
+by where that plan now is.
+
+A request with a cadence has one further bound. A visit placed in a chunk ends at
+least a cadence before that request's next visit in the continuation. Without this
+bound the decoder would have to move that next visit later to keep the cadence, and
+every snapshot after it with it.
+
 A chunk's model may also use up to one further chunk of empty time, where there is some
 before the unchanged incumbent continuation. This look-ahead lets a flexible
 observation move to after an observation whose visibility window is closing, so that
@@ -1740,7 +1752,10 @@ The decoded order is kept if, followed by the rest of the incumbent, it scores h
 than the incumbent does from the same point. It is also kept where the two score the
 same and its science is no later, comparing deadline science first and then all
 science. Otherwise, or if the solver found no solution in its time, the incumbent's
-snapshots for the chunk are kept. The next chunk is solved from where the kept
+snapshots for the chunk are kept. Where the decoded order has a snapshot shorter than
+``ss_min`` whose full snapshot the decoder could not place after it, the order is
+decoded once more without that short snapshot, and that decoding is the one compared.
+The next chunk is solved from where the kept
 snapshots leave the spacecraft. Every plan therefore executes as planned and is never
 worse than the priority-first plan. ``solver_chunks_used`` shows which chunks kept the
 solver's snapshots.
@@ -1802,7 +1817,13 @@ Using the CP-SAT scheduler
   every run, whatever the machine's speed. The wall-clock limit still applies. Set
   it, with ``workers`` 1 and ``seed``, for runs that repeat exactly;
 * ``chunk``: length of each chunk (default three hours);
-* ``workers``: CP-SAT search workers (default 8);
+* ``workers``: CP-SAT search workers (default 8). With several workers CP-SAT runs
+  tree searches and neighbourhood searches side by side. With one worker it runs a
+  single tree search, which seldom improves on the hint within a chunk's budget, so
+  the scheduler sets the search up differently: it branches on the values of the best
+  solution found so far, and a chunk whose model has no delivered-share terms is
+  searched by neighbourhood searches only, run in turn in a fixed order so that the
+  search still repeats exactly. Such a chunk does not report ``OPTIMAL``;
 * ``max_candidates``: candidates per chunk at most (default 40), those of the
   incumbent first, then in priority order. A chunk's model grows with the square of
   its candidates, and a search of a few seconds improves a small model more than a

@@ -278,6 +278,7 @@ class LocalSearchScheduler(PriorityScheduler):
         self._by_obsid = {}
         self._window_repaired = False
         self._recovered_window: _PendingWindow | None = None
+        self._kept_priority_plan = False
 
     def schedule(self) -> Plan:
         """Build the priority-first plan, then search for a better one, within
@@ -334,6 +335,7 @@ class LocalSearchScheduler(PriorityScheduler):
             plan = self._plan_within_momentum(self._plan_once)
             plan = self._refine_settled_plan(plan)
             plan = self._augment_selected_plan(plan)
+            plan = self._prefer_filled_priority_plan(plan)
         except ActivitySchedulingError:
             if incumbent is None:
                 raise
@@ -828,11 +830,50 @@ class LocalSearchScheduler(PriorityScheduler):
             self.score = best_score
             self._set_unplaced(best.final.remaining)
             timeline = best.final.timeline
+            self._kept_priority_plan = False
         else:
             self.score = self.initial_score
             timeline = self._greedy_timeline
+            self._kept_priority_plan = True
 
         return self._finish(timeline)
+
+    def _prefer_filled_priority_plan(self, plan: Plan) -> Plan:
+        """Return the priority-first plan with its idle time filled where
+        that scores more than the searched plan with its idle time filled.
+
+        :meth:`_finish_best` compares the searched plan with the
+        priority-first plan before :meth:`_augment_selected_plan` fills the
+        idle time of the one chosen. Filling can add more science to the
+        priority-first plan than to a searched plan that scored only a little
+        more, so the comparison is repeated here between the two filled
+        plans. The priority-first plan is finished, rebuilt around settled
+        activities and filled on a copy of the scheduler, from copies of its
+        blocks, and replaces the searched plan only with a higher score.
+        """
+        if self._kept_priority_plan or not plan.entries or not self._by_obsid:
+            return plan
+        trial = copy(self)
+        trial.log = DITLLog()
+        trial.score = self.initial_score
+        filled = trial._finish(
+            [self._copy_for_reconnection(block) for block in self._greedy_timeline]
+        )
+        filled = trial._refine_settled_plan(filled)
+        filled = trial._augment_selected_plan(filled)
+        if trial.score <= self.score:
+            return plan
+        self.score = trial.score
+        self.timeline, self.plan = trial.timeline, filled
+        self.unplaced = trial.unplaced
+        self._kept_priority_plan = True
+        self.log.add_events(trial.log.events)
+        self._log(
+            self.ctx.ustart,
+            "Kept the priority-first plan: with its idle time filled it scores "
+            "more than the searched plan with its idle time filled",
+        )
+        return filled
 
     @staticmethod
     def _science_key(block: _Block) -> tuple[tuple[object, ...], ...]:

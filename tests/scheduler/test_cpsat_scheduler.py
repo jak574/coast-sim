@@ -845,7 +845,10 @@ class TestSeveralSnapshotsInAWindow:
             20 * MIN
         )
         assert scheduler.solver_statuses == ["OPTIMAL"]
-        assert scheduler.solver_chunks_used == [True]
+        # The solver's two snapshots are worth what the plan's two are. Which
+        # of two equal splits is kept is a tie the earlier science decides,
+        # so the chunk is not required to replace the plan's.
+        assert scheduler.score == pytest.approx(scheduler.initial_score)
 
 
 class TestShortWindowRequest:

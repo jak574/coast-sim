@@ -82,6 +82,11 @@ class _Verdict(Enum):
     """The wait at the block's attitude fails; earlier starts only lengthen it."""
 
 
+_BLOCK_ENERGY_MEMO_SIZE = 20000
+"""The most blocks whose battery additions are kept between timeline
+totals; the memo is emptied when it holds more."""
+
+
 class _Block(BaseModel):
     """One commanded activity on the timeline, with the slew that reaches it."""
 
@@ -142,6 +147,21 @@ class _Block(BaseModel):
     def arrival(self) -> float:
         assert self.slew is not None
         return float(self.slew.slewend)
+
+
+class _BlockEnergy(NamedTuple):
+    """A block's battery addition as last found, with what it was found from."""
+
+    block: _Block
+    entry: PlanEntry
+    slew: Slew | None
+    gspass: Pass | None
+    values: tuple[object, ...]
+    """The entry's begin, slew time, end, attitude and hold start, and the
+    block's end, when the addition was found."""
+    addition: Addition
+    segment: int
+    """The ledger segment the addition starts in."""
 
 
 class StartState(BaseModel):
@@ -558,6 +578,34 @@ class PriorityScheduler:
         ] = {}
         """Candidate entries' visibility windows (see :meth:`_entry_visibility`)."""
         self._sequence_pointings: dict[_StepPointingKey, Pointing] = {}
+        self._science_hold_memo: tuple[
+            SchedulingContext | None,
+            dict[tuple[Attitude, float, float], float | None],
+        ] = (None, {})
+        """First science violations already found by the context given, by
+        body attitude and span (see :meth:`_first_science_violation`)."""
+        self._slew_path_memo: tuple[
+            SchedulingContext | None, dict[tuple[object, ...], float | None]
+        ] = (None, {})
+        """First slew violations already found by the context given, by the
+        slew's endpoints, timing and mode (see :meth:`_first_slew_violation`)."""
+        self._block_energy_memo: tuple[
+            BatteryLedger | None, dict[int, _BlockEnergy]
+        ] = (None, {})
+        """Each block's battery addition and segment from the ledger given,
+        by the block's id, with the block and the values the addition was
+        found from (see :meth:`_block_energy`)."""
+        self._idle_energy_memo: tuple[
+            BatteryLedger | None,
+            dict[tuple[Attitude, float, float], tuple[Addition | None, int]],
+        ] = (None, {})
+        """Each idle hold's battery addition and segment from the ledger
+        given, by attitude and span (see :meth:`_idle_energy`)."""
+        self._peaks_memo: (
+            tuple[BatteryLedger, Sequence[Additions], list[float]] | None
+        ) = None
+        """The battery peaks of the energy last asked about, with the ledger
+        that gave them (see :meth:`_energy_peaks`)."""
         self.start_momentum_eci_n_m_s = (
             tuple(float(v) for v in start_momentum_eci_n_m_s)
             if start_momentum_eci_n_m_s is not None
@@ -1316,6 +1364,75 @@ class PriorityScheduler:
             drive_state=self.start_drive_state,
         )
 
+    def _first_science_violation(
+        self, entry: PlanEntry, attitude: Attitude, begin: float, end: float
+    ) -> float | None:
+        """The context's first science violation, found once per attitude and span.
+
+        For an entry that does not move, has no eclipse restriction and is
+        checked at the body attitude, the context's answer depends only on
+        the attitude and the grid steps in ``[begin, end)``, so it is kept
+        per context and returned for the same arguments. Any other entry is
+        passed to the context every time.
+        """
+        if (
+            entry.moves
+            or entry.forbids_eclipse() is True
+            or entry.uses_mounted_attitude()
+        ):
+            return self.ctx.first_science_violation(entry, attitude, begin, end)
+        ctx, memo = self._science_hold_memo
+        if ctx is not self.ctx:
+            memo = {}
+            self._science_hold_memo = (self.ctx, memo)
+        key = (attitude, float(begin), float(end))
+        if key in memo:
+            return memo[key]
+        violation = self.ctx.first_science_violation(entry, attitude, begin, end)
+        memo[key] = violation
+        return violation
+
+    def _first_slew_violation(self, slew: Slew, mode: ACSMode) -> float | None:
+        """The context's first slew violation, found once per slew and mode.
+
+        A slew's path is fixed by its endpoints, start, rate fraction and
+        the kind and target it was built for, so the answer is kept per
+        context under those and returned for an equal slew.
+        """
+        ctx, memo = self._slew_path_memo
+        if ctx is not self.ctx:
+            memo = {}
+            self._slew_path_memo = (self.ctx, memo)
+        key = (
+            slew.startra,
+            slew.startdec,
+            slew.startroll,
+            slew.endra,
+            slew.enddec,
+            slew.endroll,
+            slew.slewstart,
+            slew.slewend,
+            slew.obstype,
+            slew.obsid,
+            slew.rate_fraction,
+            mode,
+        )
+        if key in memo:
+            return memo[key]
+        violation = self.ctx.first_slew_violation(slew, mode)
+        memo[key] = violation
+        return violation
+
+    def _energy_peaks(self, energy: Sequence[Additions]) -> list[float]:
+        """The battery's peak in each segment for ``energy``, walked once
+        when the same energy is asked about again straight after."""
+        memo = self._peaks_memo
+        if memo is not None and memo[0] is self._battery and memo[1] is energy:
+            return memo[2]
+        peaks = self._battery.peaks(energy)
+        self._peaks_memo = (self._battery, energy, peaks)
+        return peaks
+
     def _timeline_energy(self, timeline: Sequence[_Block]) -> tuple[Additions, ...]:
         """What a timeline draws from the battery, by segment, every span at the
         attitude the spacecraft holds through it: each block over its slew and
@@ -1330,22 +1447,95 @@ class PriorityScheduler:
             if self._origin is not None
             else self.ctx.initial_attitude(self.ctx.ustart)
         )
-
-        def add(addition: Addition | None) -> None:
-            if addition is not None:
-                planned[ledger.segment(addition.begin)].append(addition)
+        uend = self.ctx.uend
+        block_energy = self._block_energy
+        idle_energy = self._idle_energy
 
         for block in sorted(timeline, key=lambda b: float(b.entry.begin)):
             begin = float(block.entry.begin)
             if begin > cursor:
-                add(ledger.hold_addition(held, ACSMode.IDLE, cursor, begin))
-            addition = self._block_addition(block)
-            add(addition)
-            cursor = max(cursor, addition.end)
+                idle, segment = idle_energy(held, cursor, begin)
+                if idle is not None:
+                    planned[segment].append(idle)
+            addition, segment = block_energy(block)
+            planned[segment].append(addition)
+            if addition.end > cursor:
+                cursor = addition.end
             held = block.attitude_out
-        if self.ctx.uend > cursor:
-            add(ledger.hold_addition(held, ACSMode.IDLE, cursor, self.ctx.uend))
+        if uend > cursor:
+            idle, segment = idle_energy(held, cursor, uend)
+            if idle is not None:
+                planned[segment].append(idle)
         return tuple(tuple(sorted(group)) for group in planned)
+
+    def _idle_energy(
+        self, held: Attitude, begin: float, end: float
+    ) -> tuple[Addition | None, int]:
+        """What idling at ``held`` over a span draws from the battery, and
+        the segment it starts in: the ledger's hold addition, asked for once
+        per ledger for each attitude and span."""
+        ledger = self._battery
+        owner, memo = self._idle_energy_memo
+        if owner is not ledger:
+            memo = {}
+            self._idle_energy_memo = (ledger, memo)
+        key = (held, begin, end)
+        found = memo.get(key)
+        if found is None:
+            addition = ledger.hold_addition(held, ACSMode.IDLE, begin, end)
+            found = (
+                addition,
+                ledger.segment(addition.begin) if addition is not None else 0,
+            )
+            memo[key] = found
+        return found
+
+    def _block_energy(self, block: _Block) -> tuple[Addition, int]:
+        """A block's battery addition (see :meth:`_block_addition`) and the
+        segment it starts in, asked of the ledger once while the block is
+        unchanged.
+
+        The ledger's addition is fixed by the entry, its slew and the times,
+        attitude and hold start on the entry and block. The answer is kept
+        with those, and used again only for the same block object with the
+        same entry and slew objects and equal values; a visit's block is
+        asked for every time.
+        """
+        if block.steps:
+            addition = self._block_addition(block)
+            return addition, self._battery.segment(addition.begin)
+        ledger = self._battery
+        owner, memo = self._block_energy_memo
+        if owner is not ledger or len(memo) > _BLOCK_ENERGY_MEMO_SIZE:
+            memo = {}
+            self._block_energy_memo = (ledger, memo)
+        entry = block.entry
+        values = (
+            entry.begin,
+            entry.slewtime,
+            entry.end,
+            entry.ra,
+            entry.dec,
+            entry.roll,
+            entry.activity_hold_begin,
+            block.end,
+        )
+        found = memo.get(id(block))
+        if (
+            found is not None
+            and found.block is block
+            and found.entry is entry
+            and found.slew is block.slew
+            and found.gspass is block.gspass
+            and found.values == values
+        ):
+            return found.addition, found.segment
+        addition = self._block_addition(block)
+        segment = ledger.segment(addition.begin)
+        memo[id(block)] = _BlockEnergy(
+            block, entry, block.slew, block.gspass, values, addition, segment
+        )
+        return addition, segment
 
     def _block_addition(self, block: _Block) -> Addition:
         """What a block draws from the battery over its slew and hold, with the
@@ -1382,7 +1572,8 @@ class PriorityScheduler:
 
     def _charged_energy(self, timeline: Sequence[_Block]) -> tuple[Additions, ...]:
         """A timeline's energy with the charges its full forecast requires."""
-        return self._timeline_energy(self._charged_timeline(list(timeline)))
+        charged, energy = self._charged_with_energy(list(timeline))
+        return energy if energy is not None else self._timeline_energy(charged)
 
     def _block_additions(self, block: _Block) -> list[tuple[int, RecorderAmount]]:
         """Each science step's data in its store and contact segment."""
@@ -2529,7 +2720,7 @@ class PriorityScheduler:
     ) -> "_Verdict":
         """Check a slew into ``block`` and the wait at its attitude before it starts."""
         mode = ACSMode.PASS if block.is_pass else ACSMode.SLEWING
-        if self.ctx.first_slew_violation(slew, mode) is not None:
+        if self._first_slew_violation(slew, mode) is not None:
             return _Verdict.SLEW_NOT_ALLOWED
         if block.is_pass:
             # After the ingress slew, ACS idles on the track until contact.
@@ -2560,7 +2751,7 @@ class PriorityScheduler:
             needed = self._visibility_needed_at(slew)
             if not block.entry.visible(needed, needed):
                 return _Verdict.SLEW_NOT_ALLOWED
-            wait_violation = self.ctx.first_science_violation(
+            wait_violation = self._first_science_violation(
                 block.entry, target, slew.slewend, block.ready
             )
         return _Verdict.OK if wait_violation is None else _Verdict.WAIT_NOT_ALLOWED
@@ -2831,7 +3022,7 @@ class PriorityScheduler:
         entry.visibility()
         # The slew in only reaches the attitude; the lock must also hold it for
         # its whole setup, collection and cleanup budget.
-        violation = self.ctx.first_science_violation(
+        violation = self._first_science_violation(
             entry, attitude, block.ready, self.ctx.ceil_step(block.end)
         )
         if violation is not None:
@@ -3356,7 +3547,7 @@ class PriorityScheduler:
             segment = self._battery.segment(addition.begin)
             limit = self._battery.limit
             assert limit is not None
-            excess = max(self._battery.peaks(trial)[segment:]) - limit
+            excess = max(self._energy_peaks(trial)[segment:]) - limit
             later = self._battery.time_to_fit(
                 self._charged_energy(timeline), addition, until, excess
             )
@@ -3394,7 +3585,7 @@ class PriorityScheduler:
         limit = self._battery.limit
         if limit is None:
             return True
-        return all(peak <= limit + 1e-9 for peak in self._battery.peaks(energy))
+        return all(peak <= limit + 1e-9 for peak in self._energy_peaks(energy))
 
     def _can_delay(self, index: int) -> bool:
         """Whether the last gap search failed only because of what follows
@@ -4080,7 +4271,7 @@ class PriorityScheduler:
     ) -> _Block | None:
         """Check a snapshot's slew and observation, shortening it to fit if needed."""
         entry = block.entry
-        if self.ctx.first_slew_violation(slew, ACSMode.SLEWING) is not None:
+        if self._first_slew_violation(slew, ACSMode.SLEWING) is not None:
             return None
         self._entry_visibility(entry)
         needed = self._visibility_needed_at(slew)
@@ -4089,7 +4280,7 @@ class PriorityScheduler:
         if block.steps:
             # Each step's hold was checked when the visit was built.
             return block
-        violation = self.ctx.first_science_violation(
+        violation = self._first_science_violation(
             entry, block.attitude_in, slew.slewend, self.ctx.ceil_step(float(entry.end))
         )
         if violation is None:
@@ -4217,7 +4408,7 @@ class PriorityScheduler:
                         )
                 if float(step_slew.slewend) > self.ctx.uend:
                     return None
-                if self.ctx.first_slew_violation(step_slew, ACSMode.SLEWING):
+                if self._first_slew_violation(step_slew, ACSMode.SLEWING):
                     return None
                 cursor = float(step_slew.slewend)
                 if step.setup:
@@ -4234,7 +4425,7 @@ class PriorityScheduler:
             if end > self.ctx.uend or not pointing.visible(step_begin, step_end):
                 return None
             if (
-                self.ctx.first_science_violation(
+                self._first_science_violation(
                     pointing, step_attitude, step_begin, self.ctx.ceil_step(end)
                 )
                 is not None
@@ -4418,7 +4609,7 @@ class PriorityScheduler:
         limit = self._battery.limit
         assert limit is not None
         return max(
-            0.0, max(self._battery.peaks(self._timeline_energy(timeline))) - limit
+            0.0, max(self._energy_peaks(self._timeline_energy(timeline))) - limit
         )
 
     def _replace_charge(
@@ -4457,10 +4648,19 @@ class PriorityScheduler:
         connection; shortening retains a verified feasible endpoint even when
         drive behaviour makes charge duration non-monotonic.
         """
-        if not self._battery.active or self._within_level(
-            self._timeline_energy(timeline)
-        ):
-            return list(timeline)
+        return self._charged_with_energy(timeline)[0]
+
+    def _charged_with_energy(
+        self, timeline: Sequence[_Block]
+    ) -> tuple[list[_Block], tuple[Additions, ...] | None]:
+        """The charged timeline (see :meth:`_charged_timeline`), with its
+        energy where the timeline needed no charge and its energy was
+        therefore already totalled for that check; None otherwise."""
+        if not self._battery.active:
+            return list(timeline), None
+        energy = self._timeline_energy(timeline)
+        if self._within_level(energy):
+            return list(timeline), energy
         charged = self._all_charge_timeline(timeline)
         excess = self._charge_excess(charged)
         preserved = {b.entry.obsid for b in timeline if b.is_charge}
@@ -4499,7 +4699,7 @@ class PriorityScheduler:
                 else:
                     lower = stop + self.ctx.step_size
             charged = best
-        return charged
+        return charged, None
 
     def _all_charge_timeline(self, timeline: Sequence[_Block]) -> list[_Block]:
         """Generate geometry-feasible candidates in the idle sunlit stretches.
@@ -4670,7 +4870,7 @@ class PriorityScheduler:
             obstype=ObsType.CHARGE,
             obsid=self._next_charge_obsid,
         )
-        if self.ctx.first_slew_violation(slew, ACSMode.SLEWING) is not None:
+        if self._first_slew_violation(slew, ACSMode.SLEWING) is not None:
             return None
         hold_begin = self.ctx.ceil_step(float(slew.slewend))
         latest = self.ctx.floor_step(span_end - ledger.slew_allowance)
