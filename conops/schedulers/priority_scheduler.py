@@ -2441,9 +2441,20 @@ class PriorityScheduler:
         held, through the block or on through the idle time to the block
         after it, the block searches safe hold attitudes with a validated
         ingress instead.
+
+        The latest slew start at which ``pred``'s attitude is still safe to
+        hold is the same for every attitude the block could take. Where it
+        is before ``earliest``, no slew can start, so the safe hold
+        attitudes are not searched.
         """
-        slew = self._connect_to(pred, block, earliest, attitude_in)
-        if slew is None and block.follows and attitude_in is None:
+        idle_limit = self._idle_limit(pred, earliest, block.ready)
+        slew = self._connect_to(pred, block, earliest, attitude_in, idle_limit)
+        if (
+            slew is None
+            and block.follows
+            and attitude_in is None
+            and idle_limit >= earliest
+        ):
             mode = block.entry.activity_mode
             for target in self.ctx.idle_hold_candidates(
                 self._start_attitude(pred, earliest), block.ready
@@ -2455,7 +2466,7 @@ class PriorityScheduler:
                     is not None
                 ):
                     continue
-                slew = self._connect_to(pred, block, earliest, target)
+                slew = self._connect_to(pred, block, earliest, target, idle_limit)
                 if slew is not None:
                     break
         return slew
@@ -2466,10 +2477,12 @@ class PriorityScheduler:
         block: _Block,
         earliest: float,
         attitude_in: Attitude | None,
+        idle_limit: float,
     ) -> Slew | None:
         """Find the slew into ``block`` after ``pred`` to ``attitude_in``, or to
         the block's own attitude, or, for a block that follows, the attitude
-        it is at."""
+        it is at. ``idle_limit`` is the latest step the slew can start while
+        ``pred``'s attitude stays safe (see :meth:`_idle_limit`)."""
         if block.is_pass:
             obstype = ObsType.GSP
         elif block.is_charge:
@@ -2478,13 +2491,10 @@ class PriorityScheduler:
             obstype = ObsType.IDLE
         else:
             obstype = ObsType.PPT
-        idle_limit = self._idle_limit(pred, earliest, block.ready)
-
-        start = self.ctx.floor_step(block.ready)
+        # Every start is a grid step, so the first one to try is the last
+        # step at or before both the block's ready time and the idle limit.
+        start = self.ctx.floor_step(min(block.ready, idle_limit))
         while start >= earliest:
-            if start > idle_limit:
-                start -= self.ctx.step_size
-                continue
             if attitude_in is not None:
                 target = attitude_in
             elif block.follows:
