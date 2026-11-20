@@ -129,7 +129,25 @@ class TestProgramScenario:
         categories = {c.name for c in config.observation_categories.categories}
         assert categories == {"Deep fields", "Campaign", "Monitoring", "Pool"}
         campaign = [t for t in targets if t.sequence is not None]
-        assert len(campaign) == 6 and all(len(t.visit_windows) == 2 for t in campaign)
+        assert len(campaign) == 15 and all(len(t.visit_windows) == 2 for t in campaign)
+        # A visit is one unbroken observation: each target is placed where
+        # every visit window holds a visibility window long enough for it.
+        timing = config.observation_categories.get_category(20000).observation_timing
+        assert timing is not None
+        for target in campaign:
+            assert target.sequence is not None
+            needed = (
+                sum(step.duration_seconds for step in target.sequence.steps)
+                + timing.setup_seconds
+                + timing.cleanup_seconds
+            )
+            target.visibility()
+            for visit in target.visit_windows:
+                assert any(
+                    max(w0, visit.start) <= visit.deadline
+                    and w1 - max(w0, visit.start) >= needed
+                    for w0, w1 in target.windows
+                )
         assert not config.observation_categories.get_category(20000).interruptible
         assert (
             config.observation_categories.get_category(10000).observation_timing
@@ -253,3 +271,31 @@ class TestSeedActivityReservations:
             if block.is_activity:
                 assert block.ready == held[block.entry.obsid]
         assert scheduler._decode(list(start.sequence)).final.score == start.final.score
+
+    def test_the_planner_and_dispatch_place_campaign_visits(self) -> None:
+        """Every campaign visit is a sequence of four steps. The scenario
+        once asked for visits longer than any visibility window of the
+        orbit, and none was ever placed."""
+        from conops.benchmark.contenders import dispatch
+        from conops.schedulers import PriorityScheduler
+
+        scenario = program(TLE, hours=48)
+        config = scenario.make_config()
+        plan = PriorityScheduler(
+            config,
+            scenario.make_targets(config),
+            scenario.begin,
+            scenario.end,
+            activities=scenario.activities,
+        ).schedule()
+        planned = {
+            (int(e.obsid), e.visit) for e in plan if 20000 <= int(e.obsid) < 20100
+        }
+        assert len(planned) >= 20
+        flown = dispatch().simulate(scenario).simulation.plan
+        dispatched = {
+            (int(e.obsid), e.visit)
+            for e in flown
+            if 20000 <= int(e.obsid) < 20100 and e.collection_begin is not None
+        }
+        assert len(dispatched) >= 20
