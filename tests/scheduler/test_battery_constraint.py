@@ -816,3 +816,34 @@ class TestValidator:
         mismatches = ditl.validate_plan_matches_execution()
         assert mismatches
         assert all("charge" in m.message for m in mismatches)
+
+
+def test_a_candidate_is_checked_with_the_generation_along_its_slew() -> None:
+    """The battery check prices a candidate snapshot as the plan stores it
+    once placed: with its slew, and so with what the panels generate along
+    the slew. Checked without the slew, the candidate was counted as
+    drawing slewing power with no generation."""
+    priced: list[tuple[float, float]] = []
+
+    class Capture(PriorityScheduler):
+        def _trial_timeline(self, timeline, index, block, succ, succ_slew):  # type: ignore[no-untyped-def]
+            # The energy the check counts for the candidate, and the energy
+            # the same block is stored with once its slew is recorded.
+            checked = sum(self._block_addition(block).deltas)
+            assert block.slew is not None
+            stored = self._copy_for_reconnection(block)
+            self._apply_slew(stored, block.slew)
+            priced.append((checked, sum(self._block_addition(stored).deltas)))
+            return super()._trial_timeline(timeline, index, block, succ, succ_slew)
+
+    config = _battery_config(SIDE, level=0.9)
+    Capture(
+        config,
+        _targets(config),
+        BEGIN,
+        BEGIN + timedelta(hours=HOURS),
+        step_size=STEP,
+    ).schedule()
+    assert len(priced) > 20
+    for checked, stored in priced:
+        assert checked == pytest.approx(stored)

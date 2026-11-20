@@ -3568,13 +3568,19 @@ class PriorityScheduler:
             - self._battery.slew_allowance
         )
         for _ in range(_BATTERY_RETRIES + 1):
-            block, _, succ_slew = candidate
+            block, slew, succ_slew = candidate
+            # The candidate's slew is recorded on it only when it is placed.
+            # It is priced here on a copy that has the slew, so the check
+            # counts the panels' generation along the slew, as the energy
+            # stored once the snapshot is placed does.
+            priced = self._copy_for_reconnection(block)
+            self._apply_slew(priced, slew)
             trial = self._charged_energy(
-                self._trial_timeline(timeline, index, block, succ, succ_slew)
+                self._trial_timeline(timeline, index, priced, succ, succ_slew)
             )
             if self._within_level(trial):
                 return candidate
-            addition = self._block_addition(block)
+            addition = self._block_addition(priced)
             segment = self._battery.segment(addition.begin)
             limit = self._battery.limit
             assert limit is not None
