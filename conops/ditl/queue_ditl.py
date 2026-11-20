@@ -4720,7 +4720,11 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def _science_deadline_inputs(self, current_time: float) -> _ScienceDeadlineInputs:
         """Calculate deadline inputs that are stable during one queue fetch."""
-        openings = getattr(self.queue, "request_openings", None)
+        # The queue computed these for the fetch under way; a queue without
+        # the saved copy, such as a test double's, computes them now.
+        openings = getattr(self.queue, "openings_at", None)
+        if not callable(openings):
+            openings = getattr(self.queue, "request_openings", None)
         requests = openings(current_time) if callable(openings) else None
         return _ScienceDeadlineInputs(
             simulation_end=self._simulation_end_deadline(),
@@ -5136,6 +5140,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
         was_done = rejected_ppt.done
         rejected_ppt.done = True
+        self._forget_request_openings()
         self.ppt = None
 
         if self._temporary_rejected_ppts is not None:
@@ -5160,6 +5165,7 @@ class QueueDITL(DITLMixin, DITLStats):
                 ra, dec = pointing[:2]
         self._temporary_rejected_ppts = []
         self._retry_ppt_fetch_requested = False
+        self._forget_request_openings()
         try:
             while True:
                 self._retry_ppt_fetch_requested = False
@@ -5178,6 +5184,14 @@ class QueueDITL(DITLMixin, DITLStats):
                 rejected_ppt.done = was_done
             self._temporary_rejected_ppts = None
             self._retry_ppt_fetch_requested = False
+            self._forget_request_openings()
+
+    def _forget_request_openings(self) -> None:
+        """Have the queue compute its request openings afresh: a target's
+        state is about to change, or has."""
+        forget = getattr(self.queue, "forget_openings", None)
+        if callable(forget):
+            forget()
 
     def _recorder_room_gb(
         self, utime: float, ra: float, dec: float, roll: float
@@ -5278,44 +5292,56 @@ class QueueDITL(DITLMixin, DITLStats):
                 for p in passes
             ]
 
+        # What each contact adds and removes does not depend on what is
+        # added now, so it is worked out once: the housekeeping of the wait
+        # before the contact, what the ingress slew adds to that, the
+        # housekeeping during the contact, and what the contact downlinks.
+        changes: list[tuple[float, float, float, float]] = []
+        cursor = utime
+        for begin, end, gspass, downlink in contacts:
+            span = whole_steps(begin - cursor, step)
+            waiting = config.housekeeping_while_waiting(span)
+            slewing = 0.0
+            if gspass is not None:
+                ingress = min(
+                    span,
+                    whole_steps(
+                        self._pass_ingress_seconds(gspass, cursor, ra, dec, roll),
+                        step,
+                    ),
+                )
+                # The ingress is an upper bound: a PASS rate below the
+                # waiting rate is not credited with a saving over it.
+                slewing = max(
+                    0.0,
+                    config.housekeeping_generated(ingress, mode=ACSMode.PASS)
+                    - config.housekeeping_while_waiting(ingress),
+                )
+            contact = whole_steps(end - begin, step)
+            during = config.housekeeping_while_waiting(contact)
+            if gspass is not None:
+                during = max(
+                    during,
+                    config.housekeeping_generated(contact, mode=ACSMode.PASS),
+                )
+            changes.append((waiting, slewing, during, downlink))
+            cursor = end
+        after_last = config.housekeeping_while_waiting(
+            whole_steps(self.uend - cursor, step)
+        )
+
         def highest(extra: float) -> float:
             """The most the recorder holds from now to the run's end with
             ``extra`` Gb added now."""
             volume = volume_now + extra
             worst = volume
-            cursor = utime
-            for begin, end, gspass, downlink in contacts:
-                span = whole_steps(begin - cursor, step)
-                volume += config.housekeeping_while_waiting(span)
-                if gspass is not None:
-                    ingress = min(
-                        span,
-                        whole_steps(
-                            self._pass_ingress_seconds(gspass, cursor, ra, dec, roll),
-                            step,
-                        ),
-                    )
-                    # The ingress is an upper bound: a PASS rate below the
-                    # waiting rate is not credited with a saving over it.
-                    volume += max(
-                        0.0,
-                        config.housekeeping_generated(ingress, mode=ACSMode.PASS)
-                        - config.housekeeping_while_waiting(ingress),
-                    )
+            for waiting, slewing, during, downlink in changes:
+                volume += waiting
+                volume += slewing
                 worst = max(worst, volume)
-                contact = whole_steps(end - begin, step)
-                during = config.housekeeping_while_waiting(contact)
-                if gspass is not None:
-                    during = max(
-                        during,
-                        config.housekeeping_generated(contact, mode=ACSMode.PASS),
-                    )
                 volume += during
                 volume = max(0.0, volume - downlink)
-                cursor = end
-            volume += config.housekeeping_while_waiting(
-                whole_steps(self.uend - cursor, step)
-            )
+            volume += after_last
             return max(worst, volume)
 
         headroom = limit - RECORDER_ROOM_TOLERANCE_GB

@@ -98,6 +98,8 @@ class TargetQueue:
         self._due_requests: list[Pointing] = []
         """The requests whose protected start had come when the openings
         were computed."""
+        self._openings: list[tuple[float, float, int]] | None = None
+        """The openings last computed, until :meth:`forget_openings`."""
         self.log = log
         # Optional weight to penalize long slews when selecting next target
         self.slew_distance_weight = config.targets.slew_distance_weight
@@ -602,6 +604,9 @@ class TargetQueue:
 
     def _group_bounds(self, target: Pointing) -> tuple[float | None, float | None]:
         """The target's group window; none for a test double's merit model."""
+        groups = getattr(self.merit_model, "groups", None)
+        if isinstance(groups, ObservationGroups) and not groups.groups:
+            return None, None
         bounds = getattr(self.merit_model, "group_bounds", None)
         result = bounds(target) if callable(bounds) else None
         if isinstance(result, tuple) and len(result) == _BOUNDS_PAIR:
@@ -912,7 +917,22 @@ class TargetQueue:
             openings.append((protected, value, int(other.obsid)))
             self._requests_by_obsid[int(other.obsid)] = other
         openings.sort()
-        return openings
+        self._openings = openings
+        return list(openings)
+
+    def openings_at(self, utime: float) -> list[tuple[float, float, int]]:
+        """The request openings after ``utime`` (see
+        :meth:`request_openings`): those last computed, where they were
+        computed at ``utime`` and not forgotten since, else computed now.
+        The caller forgets them (:meth:`forget_openings`) when it changes a
+        target, so that one fetch does not compute the same openings twice."""
+        if self._openings is not None and self._opening_utime == utime:
+            return list(self._openings)
+        return self.request_openings(utime)
+
+    def forget_openings(self) -> None:
+        """Compute the request openings afresh the next time they are asked for."""
+        self._openings = None
 
     def _due_request_to_wait_for(
         self,
