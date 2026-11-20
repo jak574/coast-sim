@@ -2588,9 +2588,12 @@ without this section uses the default, which is queue dispatch.
   ``neighborhood`` and ``history_length``. ``seed`` defaults to ``random_seed``.
   The priority scheduler uses ``random_seed`` to break ties.
 * CP-SAT settings, which apply to ``cp_sat`` only: ``solver_time_limit``,
-  ``solver_deterministic_time``, ``chunk_seconds``, ``workers`` and
-  ``max_candidates``. For runs that repeat exactly, set
+  ``solver_deterministic_time``, ``chunk_seconds``, ``workers``,
+  ``max_candidates`` and ``local_search_first``. For runs that repeat exactly, set
   ``solver_deterministic_time`` together with ``workers: 1`` and a ``seed``.
+  ``local_search_first: true`` runs the local search before the CP-SAT chunks, which
+  then start from the searched plan; give the search a budget with ``time_limit`` or
+  ``max_iterations``.
 * ``replanning`` (:class:`~conops.config.ReplanSettings`): Settings for
   ``rolling`` mode. They are ``horizon_seconds`` (default one day),
   ``replan_interval_seconds`` (default 12 hours), ``commit_lead_time_seconds``

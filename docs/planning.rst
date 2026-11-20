@@ -1824,6 +1824,12 @@ Using the CP-SAT scheduler
   solution found so far, and a chunk whose model has no delivered-share terms is
   searched by neighbourhood searches only, run in turn in a fixed order so that the
   search still repeats exactly. Such a chunk does not report ``OPTIMAL``;
+* ``local_search_first``: run the local search before the chunks are solved, not
+  after (default ``False``). The local search runs for ``time_limit`` seconds or
+  ``max_iterations`` changes from the priority-first plan, and the chunks are then
+  solved from the searched plan, which is their hint and the plan each chunk has to
+  match or beat. With the default order the chunks start from the priority-first
+  plan and the local search follows them;
 * ``max_candidates``: candidates per chunk at most (default 40), those of the
   incumbent first, then in priority order. A chunk's model grows with the square of
   its candidates, and a search of a few seconds improves a small model more than a

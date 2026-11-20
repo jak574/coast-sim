@@ -1458,6 +1458,10 @@ class CpSatScheduler(LocalSearchScheduler):
     3. Any remaining ``time_limit`` is spent improving the result by local
        search (see :class:`~conops.schedulers.LocalSearchScheduler`).
 
+    With ``local_search_first`` the local search of step 3 runs before the
+    chunks of step 2 instead, from the priority-first plan, and the chunks
+    are solved from its result.
+
     The plan returned is never worse than the priority-first plan;
     :attr:`solver_chunks_used` shows where the solver improved on it,
     :attr:`solver_statuses` CP-SAT's status for each chunk and
@@ -1481,6 +1485,10 @@ class CpSatScheduler(LocalSearchScheduler):
             chunk's model grows with the square of its candidates, and a
             search of a few seconds improves a small model more than a large
             one; raise it together with ``solver_time_limit``.
+        local_search_first: Run the local search, for ``time_limit`` seconds
+            or ``max_iterations`` changes, before the chunks are solved, not
+            after. The chunks then start from the searched plan, which is
+            their hint and the plan they have to match or beat.
     """
 
     scheduler_name = "cp_sat"
@@ -1498,6 +1506,7 @@ class CpSatScheduler(LocalSearchScheduler):
         workers: int = 8,
         max_candidates: int = 40,
         time_limit: float = 0.0,
+        local_search_first: bool = False,
         **options: object,
     ) -> None:
         super().__init__(
@@ -1521,6 +1530,7 @@ class CpSatScheduler(LocalSearchScheduler):
         self.chunk = chunk
         self.workers = workers
         self.max_candidates = max_candidates
+        self.local_search_first = local_search_first
         self.solver_statuses: list[str] = []
         """CP-SAT's final status for each chunk, such as OPTIMAL or FEASIBLE."""
         self.solver_limits: list[str] = []
@@ -1559,13 +1569,19 @@ class CpSatScheduler(LocalSearchScheduler):
 
     def _plan_once(self) -> Plan:
         start = self._start_from_priority_plan()
+        if self.local_search_first:
+            # The search's result is the plan the chunks start from.
+            start = self._search(self._repair_window(start))
+        started_at = self._objective(start.final)
         began = time.perf_counter()
         solved = self._solve(start)
         self.solver_seconds = time.perf_counter() - began
         self.solver_score = self._objective(solved.final)
-        candidate = solved if self.solver_score >= self.start_score else start
+        candidate = solved if self.solver_score >= started_at else start
         candidate = self._repair_window(candidate)
-        best = self._best = self._search(candidate)
+        if not self.local_search_first:
+            candidate = self._search(candidate)
+        best = self._best = candidate
         return self._finish_best(best)
 
     # ── Chunks ───────────────────────────────────────────────────────────
