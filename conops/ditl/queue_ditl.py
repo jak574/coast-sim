@@ -2179,24 +2179,14 @@ class QueueDITL(DITLMixin, DITLStats):
 
     def _ppt_deadline(self, target: Pointing | None = None) -> float | None:
         """The latest time the observation may begin collecting: its visit
-        window's deadline for a visit, else the target's deadline."""
+        window's deadline for a visit, else the target's deadline, and no
+        later than its group's."""
         ppt = self.ppt if target is None else target
         if ppt is None:
             return None
-        if (
-            self._sequence is not None
-            and self._sequence.index == 0
-            and ppt.obsid == self._sequence.parent.obsid
-        ):
-            # The first step is admitted in place of its parent. Its exact
-            # ingress must still meet the visit's latest collection start.
-            # Subsequent steps belong to the already admitted whole visit.
-            return self._sequence.parent.current_deadline
-        current = getattr(ppt, "current_deadline", None)
-        if not isinstance(current, (int, float)):
-            current = getattr(ppt, "deadline", None)
-        deadline = float(current) if isinstance(current, (int, float)) else None
-        # Its group's window deadline applies as its own does.
+        deadline = self._own_deadline(ppt)
+        # Its group's window deadline applies as its own does, to the first
+        # step of a sequence visit as to any other observation.
         obsid = getattr(ppt, "obsid", None)
         # A test double's observation has no obsid to look a group up by.
         group = (
@@ -2210,6 +2200,22 @@ class QueueDITL(DITLMixin, DITLStats):
                 group_deadline if deadline is None else min(deadline, group_deadline)
             )
         return deadline
+
+    def _own_deadline(self, ppt: Pointing) -> float | None:
+        """:meth:`_ppt_deadline` without the target's group."""
+        if (
+            self._sequence is not None
+            and self._sequence.index == 0
+            and ppt.obsid == self._sequence.parent.obsid
+        ):
+            # The first step is admitted in place of its parent. Its exact
+            # ingress must still meet the visit's latest collection start.
+            # Subsequent steps belong to the already admitted whole visit.
+            return self._sequence.parent.current_deadline
+        current = getattr(ppt, "current_deadline", None)
+        if not isinstance(current, (int, float)):
+            current = getattr(ppt, "deadline", None)
+        return float(current) if isinstance(current, (int, float)) else None
 
     def _next_activity_begin(
         self, after: float, *, protected_visit: bool = False

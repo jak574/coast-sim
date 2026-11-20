@@ -206,3 +206,41 @@ class TestGroupDeadline:
             assert float(collected[0].collection_begin) > deadline
         else:
             assert collected == []
+
+    def test_a_sequence_visits_first_step_is_held_to_the_groups_deadline(
+        self,
+    ) -> None:
+        """The first step of a sequence visit is admitted in place of the
+        visit, with the visit's own deadline. Its group's deadline, where
+        that is earlier, applies to it too."""
+        from conops.ditl.queue_ditl import _SequenceRun
+        from conops.targets import ObservationSequence, SequenceStep
+
+        config = _config(HOURS)
+        own, grouped = T0 + 2 * HOUR, T0 + HOUR
+        target = Pointing(
+            config=config,
+            obsid=1,
+            name="visit",
+            ra=PATCH[0][0],
+            dec=PATCH[0][1],
+            merit=90.0,
+            deadline=own,
+            sequence=ObservationSequence(
+                steps=[
+                    SequenceStep(name="A", duration_seconds=10 * MIN),
+                    SequenceStep(name="B", duration_seconds=10 * MIN),
+                ]
+            ),
+        )
+        ditl = _dispatch(config, [target])
+        parent = next(t for t in ditl.queue.targets if int(t.obsid) == 1)
+        ditl._sequence = _SequenceRun(parent=parent, index=0, begun=T0)
+        first_step = parent.step_pointing(0)
+        assert ditl._ppt_deadline(first_step) == own
+
+        config.observation_groups = ObservationGroups(
+            groups=[ObservationGroup(name="bin", members=[1], window_deadline=grouped)]
+        )
+        ditl.merit_model = type(ditl.merit_model)(config)
+        assert ditl._ppt_deadline(first_step) == grouped
