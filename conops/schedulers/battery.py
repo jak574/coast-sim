@@ -60,6 +60,9 @@ MIN_CHARGE_SECONDS = 300.0
 
 
 _EXCESS_TOLERANCE_WH = 1e-9
+_WALK_MEMO_SIZE = 2_000_000
+"""The most walked additions a ledger keeps (see
+:meth:`BatteryLedger._walked`); the memo is emptied when it holds more."""
 """An excess over the battery limit below this many watt-hours is none."""
 
 
@@ -182,6 +185,11 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         """Additions by entry identity and the fields they depend on: a
         scheduler re-slews entries as it places others before them, and reads
         a timeline's additions again each time."""
+        self._walk_memo: dict[
+            tuple[int, float], tuple[tuple[float, ...], float, float]
+        ] = {}
+        """The peak and end level of an addition's deltas walked from a
+        level, with the deltas, by their identity and that level."""
         self._charger = EmergencyCharging(config, log=DITLLog())
         self.recharge_floor = float(config.battery.planning_recharge_deficit_wh)
         """The deficit generation is not counted below: a plan never assumes
@@ -810,9 +818,8 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
                     idle_peak, level = self._idle(level, cursor, addition.begin)
                     peak = max(peak, idle_peak)
                 deltas, angles = self.driven_deltas(addition, angles)
-                for delta in deltas:
-                    level = self._after(level, delta)
-                    peak = max(peak, level)
+                inner, level = self._walked(deltas, level)
+                peak = max(peak, inner)
                 cursor = max(cursor, addition.end)
             if self.bounds[k + 1] > cursor:
                 idle_peak, level = self._idle(level, cursor, self.bounds[k + 1])
@@ -821,6 +828,30 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
             peaks.append(peak)
             levels.append(level)
         return peaks, levels
+
+    def _walked(self, deltas: tuple[float, ...], level: float) -> tuple[float, float]:
+        """Walk an addition's ``deltas`` from ``level``: the highest level
+        reached after any of them (minus infinity for no deltas) and the
+        level after the last.
+
+        The result depends only on the deltas and the level, so it is kept
+        for both. A scheduler totals a timeline again after each change to
+        it, and every addition before the change is then reached at the same
+        level as the time before. The deltas are held with the result, which
+        keeps their identity from being given to another tuple.
+        """
+        key = (id(deltas), level)
+        found = self._walk_memo.get(key)
+        if found is not None and found[0] is deltas:
+            return found[1], found[2]
+        peak = -np.inf
+        for delta in deltas:
+            level = self._after(level, delta)
+            peak = max(peak, level)
+        if len(self._walk_memo) >= _WALK_MEMO_SIZE:
+            self._walk_memo.clear()
+        self._walk_memo[key] = (deltas, peak, level)
+        return peak, level
 
     def first_over_limit(self, planned: Sequence[Additions]) -> float | None:
         """The first time the deficit exceeds the limit, or None if it never does."""

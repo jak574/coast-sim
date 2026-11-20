@@ -1444,6 +1444,14 @@ def _attitude_scope_value(scope: str | Enum) -> str:
     return scope
 
 
+def attitude_constraint_scope_values(scopes: Sequence[str | Enum]) -> list[str]:
+    """The scopes as their values, in order and without repeats: what
+    :func:`attitude_constraint_name_for_scopes` checks one after another. A
+    caller that checks many times with the same scopes resolves them once
+    with this and calls :func:`attitude_constraint_name_for_scope` itself."""
+    return _attitude_scope_values(scopes)
+
+
 def _attitude_scope_values(scopes: Sequence[str | Enum]) -> list[str]:
     values: list[str] = []
     for scope in scopes:

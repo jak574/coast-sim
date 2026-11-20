@@ -21,7 +21,11 @@ from ..common.enums import SlewAlgorithm
 from ..common.numerics import MIN_SAMPLES
 from ..common.vector import attitude_to_quat
 from ..config import AttitudeControlSystem, MissionConfig
-from ..config.constraint import attitude_constraint_name_for_scopes
+from ..config.constraint import (
+    attitude_constraint_name_for_scope,
+    attitude_constraint_name_for_scopes,
+    attitude_constraint_scope_values,
+)
 from ..config.observation_timing import ObservationTiming, timing_for
 from ..ditl.ditl_log import DITLLog
 from ..simulation.acs import ACS
@@ -406,9 +410,29 @@ class SchedulingContext:
             return self._hold_cache[key]
         violation = None
         times = [float(utime) for utime in self.steps(begin, end)]
-        with self.config.constraint.held_over(times):
+        # The mode's scopes are the same at every step, so they are resolved
+        # once. Each step is then checked scope by scope, in the order
+        # attitude_violation checks them.
+        constraint = self.config.constraint
+        scopes = attitude_constraint_scope_values(
+            self.config.attitude_constraint_scopes_for_mode(mode)
+        )
+        ra, dec, roll = attitude
+        with constraint.held_over(times):
             for utime in times:
-                if self.attitude_violation(attitude, utime, mode) is not None:
+                if any(
+                    attitude_constraint_name_for_scope(
+                        constraint,
+                        scope,
+                        ra,
+                        dec,
+                        utime,
+                        target_roll=roll,
+                        acs_mode=mode,
+                    )
+                    is not None
+                    for scope in scopes
+                ):
                     violation = utime
                     break
         self._hold_cache[key] = violation
