@@ -470,6 +470,23 @@ science's attitude, and the science after it slews from there. After tracking a
 moving target, the handoff uses the final resting attitude after braking, so the
 activity does not command a return to the body's arrival position.
 
+That applies where the activity begins soon after the science before it ends: within
+the time the longest slew takes. Where more idle time than that lies between them, the
+planners hold the activity at a safe hold attitude instead, and slew to it from the
+science before. The attitude is found once for each activity, as the first of the
+safe-hold candidates listed below that can be held, idle and in the activity's mode,
+wherever the activity may be held. This rule is for an activity that follows science.
+An activity after another fixed block holds what that block holds, and a thruster dump
+holds the attitude the spacecraft is at.
+
+The reason is that several activities in a row, with idle time between them, would
+otherwise hold one target's attitude for all the hours they span, and the block after
+them would have to be reached from it. Science placed hours earlier would then decide
+whether a later visit can be reached at all, and a plan of several days would have
+long stretches in which no snapshot can be placed. With the rule, the attitude that
+such a run of activities holds does not depend on the science placed before the idle
+time.
+
 This limits what can be placed before an activity. A snapshot whose attitude cannot
 be held through the block must leave time for a safe ingress slew. A snapshot from
 which the activity, or the block after the activity, cannot be reached is not placed

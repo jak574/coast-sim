@@ -82,6 +82,9 @@ class _Verdict(Enum):
     """The wait at the block's attitude fails; earlier starts only lengthen it."""
 
 
+_SAFE_HOLD_CANDIDATES = 50
+"""The most attitudes tried for an activity's safe hold (see
+:meth:`PriorityScheduler._safe_hold`)."""
 _BLOCK_ENERGY_MEMO_SIZE = 20000
 """The most blocks whose battery additions are kept between timeline
 totals; the memo is emptied when it holds more."""
@@ -663,6 +666,14 @@ class PriorityScheduler:
         """For each request for allocated time, by id, the request for the
         rest of its target's exposure."""
         self._planned_visits: dict[int, list[_Block]] = defaultdict(list)
+        self._safe_holds: dict[int, Attitude | None] = {}
+        """The safe hold attitude of each activity that follows, by the
+        activity's obsid (see :meth:`_safe_hold`)."""
+        self._slew_bound = float(
+            Slew.duration_upper_bound(config.spacecraft_bus.attitude_control)
+        )
+        """The longest a slew takes: an activity that begins later than this
+        after the block before it has time to be reached elsewhere."""
         self._cadences: dict[int, float] = {}
         """The cadence of each request that has one, by obsid."""
         """Cadence visits placed so far, by obsid. Allocated time can place
@@ -2647,11 +2658,34 @@ class PriorityScheduler:
 
         A cadence visit already on the timeline keeps its slew start as the
         earliest it may start (see :meth:`_cadence_floor`).
+
+        A block that follows holds the attitude of ``pred`` only where it
+        begins too soon after ``pred`` ends for a slew elsewhere. With time
+        for one, it is held at its safe hold attitude (see
+        :meth:`_safe_hold`). The attitude a block that follows holds is then
+        the same whatever science is placed, hours before it, on the far
+        side of idle time, and the block after it stays reachable.
         """
         floor = self._cadence_floor(block)
         if floor is not None:
             earliest = max(earliest, floor)
         idle_limit = self._idle_limit(pred, earliest, block.ready)
+        if (
+            block.follows
+            and attitude_in is None
+            and pred is not None
+            # After science only: a block after a fixed block holds what
+            # that block holds, and a dump is a hold at the attitude the
+            # spacecraft is at.
+            and not pred.is_fixed
+            and not block.entry.desaturation
+            and self._would_begin(block, pred) - pred.end > self._slew_bound
+        ):
+            safe = self._safe_hold(block)
+            if safe is not None:
+                held = self._connect_to(pred, block, earliest, safe, idle_limit)
+                if held is not None:
+                    return held
         slew = self._connect_to(pred, block, earliest, attitude_in, idle_limit)
         if (
             slew is None
@@ -2674,6 +2708,53 @@ class PriorityScheduler:
                 if slew is not None:
                     break
         return slew
+
+    def _would_begin(self, block: _Block, pred: _Block) -> float:
+        """When a following ``block`` begins after ``pred``: where it is,
+        or, for one that may begin late, where it settles after ``pred``
+        (see :meth:`_settle_block`)."""
+        activity = block.activity
+        if activity is None:
+            return block.ready
+        begin = max(
+            activity.begin,
+            self.ctx.ceil_step(self.ctx.ustart),
+            self.ctx.ceil_step(pred.end),
+        )
+        return min(begin, self._reserved_ready(block))
+
+    def _safe_hold(self, block: _Block) -> Attitude | None:
+        """One attitude a following block can hold wherever it is settled,
+        idle or in its own mode; None where none of the first candidates
+        can be held. Found once for each activity."""
+        if not block.is_activity or block.entry.obsid is None:
+            return None
+        key = int(block.entry.obsid)
+        if key in self._safe_holds:
+            return self._safe_holds[key]
+        # An activity that may begin late is held anywhere from its start to
+        # the end of its reservation; any other, where it is.
+        activity = block.activity
+        if activity is not None:
+            begin = max(activity.begin, self.ctx.ceil_step(self.ctx.ustart))
+            end = self._activity_end(activity, self._reserved_ready(block))
+        else:
+            begin, end = block.ready, block.end
+        end = self.ctx.ceil_step(end)
+        mode = block.entry.activity_mode
+        found: Attitude | None = None
+        candidates = self.ctx.idle_hold_candidates(
+            self.ctx.initial_attitude(begin), begin
+        )
+        for _, target in zip(range(_SAFE_HOLD_CANDIDATES), candidates):
+            if (
+                self.ctx.first_hold_violation(target, begin, end, ACSMode.IDLE) is None
+                and self.ctx.first_hold_violation(target, begin, end, mode) is None
+            ):
+                found = target
+                break
+        self._safe_holds[key] = found
+        return found
 
     def _cadence_floor(self, block: _Block) -> float | None:
         """The earliest the slew into a cadence visit already on the

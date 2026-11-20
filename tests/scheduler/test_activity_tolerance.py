@@ -253,7 +253,13 @@ class TestActivityAfterActivity:
 
     def _check(self, plan: Plan | list, second: ScheduledActivity) -> None:
         window, cal = _activities(plan)
-        assert float(window.begin) == BLOCK_START
+        # The window is held from its start; a plan may slew to it before.
+        held_from = (
+            window.activity_hold_begin
+            if window.activity_hold_begin is not None
+            else float(window.begin)
+        )
+        assert held_from == BLOCK_START
         assert float(window.end) == self.WINDOW.end
         assert float(cal.begin) == self.WINDOW.end
         assert float(cal.end) - float(cal.begin) == pytest.approx(BLOCK)

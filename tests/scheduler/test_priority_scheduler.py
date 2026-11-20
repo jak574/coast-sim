@@ -1217,14 +1217,32 @@ class TestFillingTimeBeforeAFollowingActivity:
         ditl = _execute(self._config(), scheduler.plan, self.HOURS, 60)
         assert ditl.validate_plan_matches_execution() == []
 
-    def test_without_the_move_the_time_before_stays_empty(self) -> None:
+    def test_without_the_move_less_of_the_time_before_is_filled(self) -> None:
+        """Without the move the short target stays right after the
+        maintenance, reached from the attitude the maintenance holds. The
+        long target is still placed before the maintenance, where the idle
+        time that leaves is enough for a slew: the maintenance is then held
+        at its safe hold attitude, not the long target's, and one snapshot
+        fewer fits before it."""
         with patch.object(
             PriorityScheduler, "_fit_delaying_successors", return_value=None
         ):
             scheduler = self._plan()
         science = _science(scheduler.plan)
-        assert not [e for e in science if float(e.end) <= T0 + 4 * HOUR]
-        assert [int(e.obsid) for e in science if int(e.obsid) in (1, 2)][:1] == [1]
+        before = [e for e in science if float(e.end) <= T0 + 4 * HOUR]
+        assert [int(e.obsid) for e in before] == [2, 2]
+        maintenance = next(e for e in scheduler.plan if e.name == "Maintenance")
+        assert maintenance.slewtime > 0
+        assert maintenance.activity_hold_begin == T0 + 4 * HOUR
+        last = max(before, key=lambda e: float(e.end))
+        assert (float(maintenance.ra), float(maintenance.dec)) != pytest.approx(
+            (float(last.ra), float(last.dec))
+        )
+        after = [e for e in science if float(e.begin) >= float(maintenance.end)]
+        assert int(after[0].obsid) == 1
+        assert not any(e.description.startswith("Moved ") for e in scheduler.log.events)
+        ditl = _execute(self._config(), scheduler.plan, self.HOURS, 60)
+        assert ditl.validate_plan_matches_execution() == []
 
 
 class TestCandidateVisibility:

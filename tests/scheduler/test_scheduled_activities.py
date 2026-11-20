@@ -13,6 +13,7 @@ from conops.config import MissionConfig, StoredMomentumConfig, ThrusterDumpConfi
 from conops.config.scheduler import SchedulerMode
 from conops.ditl import RollingHorizonDITL
 from conops.schedulers import LocalSearchScheduler, PriorityScheduler, SchedulingContext
+from conops.simulation.slew import Slew
 from conops.targets import (
     ACTIVITY_OBSID,
     Plan,
@@ -87,24 +88,33 @@ def _check_execution(ditl) -> None:
 
 
 def _check_following(plan: Plan | list, config: MissionConfig) -> None:
-    """Each activity entry holds the attitude of the entry before it, with
-    no slew of its own, and IDLE can hold that attitude through it."""
+    """Each activity entry follows the entry before it. Where it begins
+    within the longest slew of that entry's end, it holds that entry's
+    attitude with no slew of its own. Where there is time for a slew, it
+    is reached by one and held at another attitude. IDLE can hold the
+    attitude through it either way."""
     entries = sorted(plan, key=lambda e: float(e.begin))
     ctx = SchedulingContext(config, BEGIN, END, step_size=STEP)
+    bound = Slew.duration_upper_bound(config.spacecraft_bus.attitude_control)
     for index, entry in enumerate(entries):
         if entry.obstype != ObsType.ACTIVITY:
             continue
-        assert entry.slewtime == 0 and entry.slewdist == 0
         attitude = (float(entry.ra), float(entry.dec), float(entry.roll))
+        held_from = float(entry.activity_hold_begin)
         if index > 0:
             before = entries[index - 1]
             assert before.obstype != ObsType.ACTIVITY
-            assert attitude == pytest.approx(
-                (float(before.ra), float(before.dec), float(before.roll))
-            )
+            inherited = (float(before.ra), float(before.dec), float(before.roll))
+            if held_from - float(before.end) > bound:
+                assert entry.slewtime > 0
+                assert float(entry.begin) + entry.slewtime <= held_from
+                assert attitude != pytest.approx(inherited)
+            else:
+                assert entry.slewtime == 0 and entry.slewdist == 0
+                assert attitude == pytest.approx(inherited)
         assert (
             ctx.first_hold_violation(
-                attitude, float(entry.begin), float(entry.end), ACSMode.IDLE
+                attitude, held_from, float(entry.end), ACSMode.IDLE
             )
             is None
         )
@@ -208,10 +218,11 @@ class TestPlanning:
         assert ditl.validate_plan_matches_execution() == []
         _check_execution(ditl)
 
-    def test_an_activity_takes_the_attitude_of_what_precedes_it(self) -> None:
-        """The science before each activity ends at the block with no slew
-        back to a reserved attitude: the activity holds the attitude that
-        science leaves, and the science after it slews from there."""
+    def test_an_activity_follows_the_science_before_it(self) -> None:
+        """Science is placed up to each activity, less a snapshot that did
+        not fit. That leaves more idle time than a slew takes, so each
+        activity is held at its safe hold attitude, the same one, and the
+        science after it slews from there."""
         config = _config(HOURS)
         scheduler = PriorityScheduler(
             config, _targets(config), BEGIN, END, step_size=STEP, activities=ACTIVITIES
@@ -219,9 +230,13 @@ class TestPlanning:
         plan = scheduler.schedule()
         _check_following(plan, config)
         entries = sorted(plan, key=lambda e: float(e.begin))
+        held = {
+            (float(e.ra), float(e.dec), float(e.roll)) for e in _activities(entries)
+        }
+        assert len(held) == 1
         for activity in ACTIVITIES:
             entry = next(e for e in entries if e.name == activity.name)
-            assert float(entry.begin) == activity.begin
+            assert entry.activity_hold_begin == activity.begin
             before = entries[entries.index(entry) - 1]
             # Science right up to the block, less a snapshot that did not fit.
             assert float(before.end) <= activity.begin
@@ -480,7 +495,11 @@ class TestPartialRun:
         ditl._add_activity_data = Mock(wraps=ditl._add_activity_data)
         assert ditl.calc()
         [entry] = _activities(ditl.plan)
-        assert (float(entry.begin), float(entry.end)) == (
+        # The hold, which a slew to the activity's attitude may precede.
+        held_from = max(float(entry.begin) + entry.slewtime, T0 + 2 * HOUR)
+        if entry.activity_hold_begin is not None:
+            held_from = max(float(entry.activity_hold_begin), T0 + 2 * HOUR)
+        assert (held_from, float(entry.end)) == (
             T0 + max(2, hold_begin) * HOUR,
             T0 + min(3, hold_end) * HOUR,
         )

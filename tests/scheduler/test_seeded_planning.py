@@ -301,6 +301,37 @@ class TestSeedActivityReservations:
         assert len(dispatched) >= 20
 
 
+def test_a_plan_of_three_days_fills_every_day() -> None:
+    """The program's calibrations and maintenance inherit their attitude.
+    Several in a row once held one target's attitude for the hours they
+    spanned, the block after them could be reached from no other, and a plan
+    of three days placed 7 hours of science on its first day. Each is now
+    held at a safe hold attitude where idle time comes before it, and every
+    day holds about as much as a plan of one day does."""
+    hours = 72
+    scenario = program(TLE, hours=hours)
+    config = scenario.make_config()
+    plan = PriorityScheduler(
+        config,
+        scenario.make_targets(config),
+        scenario.begin,
+        scenario.end,
+        activities=scenario.activities,
+    ).schedule()
+    start = scenario.begin.timestamp()
+    per_day = [0.0] * (hours // 24)
+    for entry in plan:
+        if (
+            entry.collection_begin is None
+            or entry.collection_end is None
+            or not 10000 <= int(entry.obsid) < 1_000_000
+        ):
+            continue
+        day = int((float(entry.collection_begin) - start) // 86400)
+        per_day[day] += float(entry.collection_end) - float(entry.collection_begin)
+    assert min(per_day) > 12 * 3600
+
+
 class TestProgramPlanIsDecoded:
     """Local search and CP-SAT start from the priority-first plan as the
     decoder reproduces it. The program scenario has activities that may
