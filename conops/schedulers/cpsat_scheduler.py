@@ -703,6 +703,17 @@ class _ChunkModel:
                 literal = model.new_bool_var(f"arc{i}_{j}")
                 arcs.append((i, j, literal))
                 self.arc_literals[(i, j)] = literal
+                if before.optional and not after.optional:
+                    # The decoder starts the slew from a new snapshot into
+                    # the fixed block after it on a simulation step, so the
+                    # snapshot ends by the last step from which the block is
+                    # still reached. Without this the model fits a snapshot
+                    # the decoder then places after the block instead.
+                    ingress = 0 if after.inherits_attitude else minimum_slew
+                    model.add(
+                        arrival[i] + before.overhead + collection[i]
+                        <= _floor(after.arrival[1] - ingress, step)
+                    ).only_enforce_if(literal)
                 # An ingress waits for its predecessor to finish, without
                 # imposing a new-snapshot grid on an already settled task.
                 slew_start = self._slew_start(j)
@@ -1477,8 +1488,9 @@ class CpSatScheduler(LocalSearchScheduler):
             same point every run whatever the machine's speed; the wall-clock
             limit still applies. Set it, with ``workers`` 1 and ``seed``, for
             runs that repeat exactly.
-        chunk: Spacing of the horizon's solve boundaries. Each model may use
-            up to one further chunk of empty time before the incumbent tail.
+        chunk: Spacing of the horizon's solve boundaries (an hour and a half
+            by default). Each model may use up to one further chunk of empty
+            time before the incumbent tail.
         workers: CP-SAT search workers.
         max_candidates: Candidate snapshots in a chunk's model at most, those
             of the priority-first plan first, then in priority order. A
@@ -1502,7 +1514,7 @@ class CpSatScheduler(LocalSearchScheduler):
         *,
         solver_time_limit: float = 20.0,
         solver_deterministic_time: float | None = None,
-        chunk: timedelta = timedelta(hours=3),
+        chunk: timedelta = timedelta(hours=1.5),
         workers: int = 8,
         max_candidates: int = 40,
         time_limit: float = 0.0,
@@ -2698,7 +2710,7 @@ class CpSatScheduler(LocalSearchScheduler):
                 # only newly selected snapshots need a step-aligned departure.
                 next_task = tasks[next_pass]
                 ingress = 0 if next_task.inherits_attitude else int(slews[k, next_pass])
-                latest_slew = next_task.arrival[0] - ingress
+                latest_slew = _floor(next_task.arrival[0] - ingress, step)
                 ends_by = min(ends_by, latest_slew)
             least = task.collection[0]
             if k in whole_only and task.whole is not None:
@@ -2841,3 +2853,8 @@ def _next_due_bound(task: _Task) -> int:
 def _ceil(seconds: int, step: int) -> int:
     """Round seconds up to a whole number of steps."""
     return -(-seconds // step) * step
+
+
+def _floor(seconds: int, step: int) -> int:
+    """Round seconds down to a whole number of steps."""
+    return seconds // step * step

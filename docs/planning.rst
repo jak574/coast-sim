@@ -1616,7 +1616,7 @@ scheduler already had. The subsections below describe each part in turn.
 Chunks and candidates
 ^^^^^^^^^^^^^^^^^^^^^
 
-The horizon advances in consecutive ``chunk`` lengths (three hours by default). The plan
+The horizon advances in consecutive ``chunk`` lengths (an hour and a half by default). The plan
 the scheduler holds at any moment is called the incumbent here. It starts as the
 priority-first plan, or as a decoded seed that scores higher (see `Starting from other
 plans`_). While one chunk is
@@ -1746,6 +1746,10 @@ feasible solution. Each chunk finishes before the incumbent's next slew and
 leaves to the incumbent the exposure it collects later, so the rest of the incumbent
 can always follow whatever the solver chooses.
 
+A new snapshot placed before a fixed block, such as a pass or an activity, ends by the
+last simulation step from which that block is still reached, because the scheduler
+starts the slew into the block on a step.
+
 The model approximates slews in two ways. Each target's roll is chosen before solving.
 With a thermal settling table, each slew settles for the change it makes to the Sun's
 direction in the body frame, with the Sun where it is at the chunk's origin. Because of
@@ -1820,7 +1824,8 @@ Using the CP-SAT scheduler
   take, shared across the chunks. With this limit the search ends at the same point
   every run, whatever the machine's speed. The wall-clock limit still applies. Set
   it, with ``workers`` 1 and ``seed``, for runs that repeat exactly;
-* ``chunk``: length of each chunk (default three hours);
+* ``chunk``: length of each chunk (default an hour and a half). The search budget is
+  shared across the chunks, so shorter chunks each get less of it;
 * ``workers``: CP-SAT search workers (default 8). With several workers CP-SAT runs
   tree searches and neighbourhood searches side by side. With one worker it runs a
   single tree search, which seldom improves on the hint within a chunk's budget, so

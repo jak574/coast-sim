@@ -598,6 +598,8 @@ class TestCadenceLateness:
             BEGIN,
             BEGIN + timedelta(hours=hours),
             solver_time_limit=3.0,
+            # One chunk for the whole horizon, so one proposal holds every visit.
+            chunk=timedelta(hours=hours),
             workers=1,
             seed=1,
             include_passes=False,
@@ -779,6 +781,8 @@ class TestSeveralSnapshotsInAWindow:
             BEGIN,
             BEGIN + timedelta(hours=2),
             solver_time_limit=5.0,
+            # One chunk for the two hours.
+            chunk=timedelta(hours=2),
             workers=1,
             seed=1,
         )

@@ -124,6 +124,8 @@ def test_cpsat_holds_a_remainder_of_the_priority_plan() -> None:
         scenario.end,
         solver_deterministic_time=4.0,
         workers=1,
+        # Two chunks of three hours, each holding one of the two remainders.
+        chunk=timedelta(hours=3),
     )
     plan = scheduler.schedule()
     ss_min = {int(t.obsid): float(t.ss_min) for t in targets}
