@@ -1,4 +1,5 @@
-from .acs import AttitudeControlSystem, SlewRequirement, ThermalSettlingStep
+from .acs import AttitudeControlSystem, ThermalSettlingStep
+from .activity_attitude import ActivityAttitude
 from .battery import Battery
 from .communications import (
     AntennaPointing,
@@ -75,13 +76,13 @@ from .surfaces import (
     telescope_surfaces,
 )
 from .targets import TargetConfig
-from .thermal import Heater
+from .thermal import Heater, ThermalCoupling, ThermalNetwork, ThermalNode
 from .visualization import VisualizationConfig
 
 __all__ = [
+    "ActivityAttitude",
     "AntennaPointing",
     "AttitudeControlSystem",
-    "SlewRequirement",
     "ThermalSettlingStep",
     "AttitudeConstraintScope",
     "BandCapability",
@@ -110,6 +111,9 @@ __all__ = [
     "GroundStation",
     "GroundStationRegistry",
     "Heater",
+    "ThermalCoupling",
+    "ThermalNetwork",
+    "ThermalNode",
     "Instrument",
     "ConcurrencyRules",
     "InstrumentMode",

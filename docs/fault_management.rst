@@ -4,18 +4,19 @@ Fault Management
 Overview
 --------
 
-The Fault Management system provides extensible monitoring and response capabilities for spacecraft operations. It monitors configured parameters against yellow and red thresholds, tracks time spent in each fault state, and can automatically trigger safe mode when critical (RED) conditions occur.
+Fault management watches the spacecraft's state during a simulation and responds when something goes out of limits. It compares configured telemetry parameters against a yellow (warning) threshold and a red (critical) threshold, records how long each parameter spends in each state, and can put the spacecraft into safe mode when a red condition occurs.
 
 Key Features
 ------------
 
-* **Multi-parameter monitoring**: Track multiple spacecraft parameters simultaneously
-* **Configurable thresholds**: Set yellow (warning) and red (critical) limits for each parameter
-* **Spacecraft red limit constraints**: Define health and safety pointing constraints with time-based safe mode triggering
-* **Bidirectional thresholds**: Support for both "below" and "above" threshold types
-* **Time tracking**: Accumulate duration spent in yellow and red states, or in constraint violations
-* **Automatic safe mode**: Trigger irreversible safe mode on RED conditions or sustained constraint violations
-* **Schema-validated thresholds**: Threshold names must match predefined ``Housekeeping`` fields
+Fault management does the following:
+
+* It monitors any number of spacecraft parameters at once. Each parameter has a yellow (warning) limit and a red (critical) limit.
+* A threshold can be of the "below" type or the "above" type, depending on whether low or high values are the fault.
+* It checks spacecraft red limit constraints. These are health and safety pointing constraints, and they trigger safe mode after a set time in violation.
+* It accumulates the time spent in the yellow and red states, and the time spent in constraint violations.
+* It triggers safe mode on a red condition or a sustained constraint violation. Safe mode is irreversible.
+* It validates threshold names: each must match a predefined ``Housekeeping`` field.
 
 Configuration
 -------------
@@ -23,7 +24,7 @@ Configuration
 Programmatic Configuration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Create and configure fault management using the ``FaultManagement`` class:
+Create and configure fault management using the ``FaultManagement`` class. A parameter threshold is added with ``add_threshold`` and a red limit constraint with ``add_red_limit_constraint``. Both are described in the sections that follow.
 
 .. code-block:: python
 
@@ -36,8 +37,8 @@ Create and configure fault management using the ``FaultManagement`` class:
 
    # Add parameter thresholds
    fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
-    fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
-    fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
+   fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
+   fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
 
    # Add mode-specific threshold (power usage only checked in SCIENCE mode)
    fm.add_threshold(
@@ -84,17 +85,24 @@ Each threshold requires:
   * ``"below"``: Fault triggered when value ≤ threshold (e.g., battery level)
   * ``"above"``: Fault triggered when value ≥ threshold (e.g., temperature, power)
 
+A threshold also accepts these optional settings:
+
+* ``acs_modes``: The ACS modes in which the threshold is checked (see the next section). By default it is checked in all modes.
+* ``triggers_safe_mode``: Whether a RED classification triggers safe mode. ``add_threshold`` defaults to ``True``. Set it to ``False`` for a threshold that should alert without triggering safe mode.
+* ``safe_mode_delay_seconds``: The continuous time in RED required before safe mode is triggered. The default of 0 triggers safe mode as soon as the parameter is RED.
+
 ACS Mode Filtering
 ^^^^^^^^^^^^^^^^^^
 
 Thresholds can be restricted to specific Attitude Control System (ACS) modes using the ``acs_modes`` parameter. This allows different fault policies for different operational modes.
 
 For example:
+
 - Only check high power draw during SCIENCE mode
 - Check recorder fill level in all modes except SAFE mode
 - Monitor battery level in all modes (default behavior)
 
-Programmatic Configuration with ACS Modes:
+The following example configures thresholds with ACS modes:
 
 .. code-block:: python
 
@@ -121,7 +129,7 @@ Programmatic Configuration with ACS Modes:
        yellow=0.8,
        red=0.95,
        direction="above",
-       acs_modes=[ACSMode.SCIENCE, ACSMode.SLEW, ACSMode.SETTLE]
+       acs_modes=[ACSMode.SCIENCE, ACSMode.SLEWING, ACSMode.PASS]
    )
 
 Valid threshold names are the predefined ``Housekeeping`` fields. Commonly used fields include:
@@ -131,12 +139,13 @@ Valid threshold names are the predefined ``Housekeeping`` fields. Commonly used 
 * ``panel_illumination``
 * ``recorder_fill_fraction`` / ``recorder_alert``
 * ``sun_angle_deg`` / ``earth_angle_deg`` / ``moon_angle_deg``
-* ``star_tracker_functional_count`` — trackers not in a soft constraint zone; automatically configured when star trackers are present
-* ``star_tracker_hard_violations`` — trackers inside a HARD_KEEPOUT zone; automatically configured when star trackers are present
-* ``radiator_hard_violations`` — radiators violating a hard keepout constraint; automatically configured when radiators are present
-* ``telescope_hard_violations`` — 0/1 flag for telescope hard constraint; automatically configured when a telescope hard constraint exists
+* ``star_tracker_functional_count``: the number of trackers not in a soft constraint zone. Its threshold is configured automatically when star trackers are present.
+* ``star_tracker_hard_violations``: the number of trackers inside a HARD_KEEPOUT zone. Its threshold is configured automatically when star trackers are present.
+* ``radiator_hard_violations``: the number of radiators violating a hard keepout constraint. Its threshold is configured automatically when radiators are present.
+* ``telescope_hard_violations``: a 0/1 flag for the telescope hard constraint. Its threshold is configured automatically when a telescope hard constraint exists.
 
 During fault checking, the current ACS mode is determined from:
+
 1. ``housekeeping.acs_mode`` (preferred)
 2. ``acs.acsmode`` (fallback)
 
@@ -145,7 +154,7 @@ Thresholds are only evaluated when the current mode is in the ``acs_modes`` list
 Spacecraft Red Limit Constraints
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-In addition to threshold-based monitoring, you can define spacecraft-level red limit constraints for health and safety. These are typically looser than instrument constraints (which are optimized for data quality) and exist purely to protect spacecraft hardware.
+In addition to threshold-based monitoring, you can define spacecraft-level red limit constraints for health and safety. A red limit constraint is a pointing constraint, such as a minimum angle from the Sun, that the spacecraft should not violate for longer than a set time. These constraints are typically looser than instrument constraints, which are optimized for data quality. They exist purely to protect spacecraft hardware.
 
 Red limit constraints can be added programmatically:
 
@@ -207,8 +216,8 @@ Creating Fault Management
 
    # Add thresholds programmatically
    fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
-    fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
-    fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
+   fm.add_threshold("power_usage", yellow=450.0, red=500.0, direction="above")
+   fm.add_threshold("recorder_fill_fraction", yellow=0.8, red=0.95, direction="above")
 
    # Add mode-specific threshold
    fm.add_threshold(
@@ -287,7 +296,7 @@ Get accumulated time in each fault state and constraint violation statistics:
    #         "red_seconds": 0.0,
    #         "current": "yellow"
    #     },
-    #     "power_usage": {
+   #     "power_usage": {
    #         "yellow_seconds": 45.0,
    #         "red_seconds": 30.0,
    #         "current": "red"
@@ -298,7 +307,7 @@ Get accumulated time in each fault state and constraint violation statistics:
    # {
    #     "spacecraft_sun_limit": {
    #         "in_violation": False,
-   #         "total_violation_seconds": 180.0,
+   #         "red_seconds": 180.0,
    #         "continuous_violation_seconds": 0.0
    #     }
    # }
@@ -326,7 +335,7 @@ To separate threshold-based and constraint-based statistics:
 Integration with QueueDITL
 --------------------------
 
-The fault management system is automatically integrated into the ``QueueDITL`` simulation loop when configured. It checks parameters after each power update:
+When fault management is configured, the ``QueueDITL`` simulation loop runs it automatically. It checks parameters after each power update:
 
 .. code-block:: python
 
@@ -334,12 +343,13 @@ The fault management system is automatically integrated into the ``QueueDITL`` s
    from conops.ditl import QueueDITL
 
    # Load config with fault_management section
-   config = MissionConfig.from_json("config_with_fault_management.json")
+   config = MissionConfig.from_json_file("config_with_fault_management.json")
 
    # Initialize defaults (adds battery_level, recorder_fill_fraction,
    # star_tracker_functional_count, star_tracker_hard_violations,
-   # radiator_hard_violations, and telescope_hard_violations
-   # thresholds if not already present)
+   # ppt_unavailable, radiator_hard_violations, and
+   # telescope_hard_violations thresholds if not already present).
+   # MissionConfig also runs this itself when it is created or loaded.
    config.init_fault_management_defaults()
 
    # Run simulation
@@ -353,25 +363,26 @@ The fault management system is automatically integrated into the ``QueueDITL`` s
 Safe Mode Behavior
 ------------------
 
-When ``safe_mode_on_red`` is ``true`` (default), any parameter reaching RED state **or** any red limit constraint exceeding its time threshold will:
+Safe mode is triggered by either of two conditions: a parameter reaching the RED state, or a red limit constraint exceeding its time threshold. The trigger only acts when ``safe_mode_on_red`` is ``true``, which is the default.
 
-1. **Set flag**: The ``safe_mode_requested`` flag is set to ``True``
-2. **DITL checks flag**: The QueueDITL loop detects the flag and enqueues an ``ENTER_SAFE_MODE`` command
-3. **Irreversible operation**: Safe mode cannot be exited once entered
-4. **Sun pointing**: Spacecraft points solar panels at Sun for maximum power
-5. **Command queue cleared**: All pending commands are discarded
-6. **Emergency power**: System operates in minimal power configuration
+Safe mode is then entered in two steps:
+
+1. The ``safe_mode_requested`` flag is set to ``True``.
+2. The QueueDITL loop detects the flag and enqueues an ``ENTER_SAFE_MODE`` command.
+
+Once the spacecraft is in safe mode:
+
+* Safe mode cannot be exited. The operation is irreversible.
+* The spacecraft points its solar panels at the Sun for maximum power.
+* The command queue is cleared, so all pending commands are discarded.
+* The system operates in a minimal power configuration.
 
 Red Limit Constraint Triggering
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Red limit constraints track **continuous** violation time. The constraint must be violated continuously for the entire ``time_threshold_seconds`` duration before safe mode is triggered. If the constraint is satisfied (even briefly), the continuous violation counter resets to zero.
+Red limit constraints track continuous violation time. The constraint must be violated continuously for the entire ``time_threshold_seconds`` duration before safe mode is triggered. If the constraint is satisfied, even briefly, the continuous violation counter resets to zero.
 
-This allows for:
-
-* **Transient violations**: Brief constraint violations during slews or maneuvers
-* **Grace periods**: Reasonable allowance for operational flexibility
-* **Critical protection**: Sustained violations that could cause hardware damage trigger safe mode
+Counting continuous time means that a brief violation during a slew or maneuver does not trigger safe mode, which gives operations a reasonable grace period. A sustained violation that could cause hardware damage does trigger it.
 
 Set ``time_threshold_seconds`` to ``null`` to create monitoring-only constraints that track violations but never trigger safe mode.
 
@@ -380,15 +391,22 @@ Star Tracker Monitoring
 
 The ACS exposes two separate star-tracker telemetry fields:
 
-* ``star_tracker_functional_count``: ``num_trackers - soft_violation_count``. Decreases when a tracker
-  enters a **soft** constraint zone (degraded pointing quality). Hard violations do **not** affect this count.
-* ``star_tracker_hard_violations``: Count of trackers inside a **HARD_KEEPOUT** zone. Always non-negative;
-  a non-zero value means a tracker is in a health-and-safety exclusion region.
+* ``star_tracker_functional_count``: ``num_trackers - soft_violation_count``. It decreases when a tracker
+  enters a soft constraint zone, where pointing quality is degraded. Hard violations do not affect this count.
+* ``star_tracker_hard_violations``: Count of trackers inside a HARD_KEEPOUT zone. It is always non-negative,
+  and a non-zero value means a tracker is in a health-and-safety exclusion region.
 
 ``init_fault_management_defaults()`` adds both thresholds automatically when star trackers are configured.
-To override the hard-violation policy (e.g. to trigger a safehold instead of just alerting), add your
-threshold before calling ``init_fault_management_defaults()`` — the default is skipped when the name
-already exists:
+You can override the hard-violation policy, for example to trigger a safehold instead of just alerting.
+To do so, add your threshold before calling ``init_fault_management_defaults()``. The default is skipped
+when a threshold of that name already exists.
+
+The ``star_tracker_functional_count`` threshold is treated differently. You can supply your own threshold
+of that name to set its limits and ACS modes, but ``init_fault_management_defaults()`` always sets its
+``triggers_safe_mode`` to ``False``. A value of ``True`` that you supply is overridden, so this threshold
+alerts and never triggers safe mode.
+
+The following example overrides the hard-violation policy:
 
 .. code-block:: python
 
@@ -426,7 +444,7 @@ JSON configuration equivalent:
          }
      }
 
-The threshold values ``yellow=0.5`` and ``red=0.5`` work because violations is an integer: ``0 < 0.5``
+The threshold values ``yellow=0.5`` and ``red=0.5`` work because the violation count is an integer: ``0 < 0.5``
 (nominal) and ``1 >= 0.5`` (RED). Setting yellow and red to the same value means any violation goes
 straight to RED without a separate YELLOW warning.
 
@@ -435,14 +453,15 @@ Radiator and Telescope Hard Monitoring
 
 The same pattern applies to the other hard keepout families:
 
-* ``radiator_hard_violations``: Count of radiators inside a hard keepout zone. Added automatically
-  when radiators are configured (``has_radiators``).
-* ``telescope_hard_violations``: 0 or 1 — whether the telescope hard constraint is currently violated.
-  Added automatically when a telescope hard constraint exists in the payload configuration.
+* ``radiator_hard_violations``: Count of radiators inside a hard keepout zone. Its threshold is added
+  automatically when radiators are configured (``has_radiators``).
+* ``telescope_hard_violations``: 0 or 1, according to whether the telescope hard constraint is currently
+  violated. Its threshold is added automatically when a telescope hard constraint exists in the payload
+  configuration.
 
-Both use identical threshold parameters to ``star_tracker_hard_violations``: ``direction="above"``,
-``yellow=red=0.5``, ``triggers_safe_mode=False``. Add your own threshold before calling
-``init_fault_management_defaults()`` to override (e.g. to enable a safehold):
+Both default thresholds use the same parameters as the ``star_tracker_hard_violations`` default:
+``direction="above"``, ``yellow=red=0.5``, ``triggers_safe_mode=False``. To override one, for example to
+enable a safehold, add your own threshold before calling ``init_fault_management_defaults()``:
 
 .. code-block:: python
 
@@ -458,35 +477,33 @@ Both use identical threshold parameters to ``star_tracker_hard_violations``: ``d
 Example Configuration File
 ---------------------------
 
-Complete example configurations are available in:
+A complete example configuration is available in ``examples/example_config.json``, and the same
+configuration with comments in ``examples/example_config.yaml``. Its ``fault_management`` section has both
+thresholds and a red limit constraint.
 
-* ``examples/example_config_with_fault_management.json`` - Threshold-based monitoring
-* ``examples/example_config_with_red_limits.json`` - Red limit constraints
-* ``examples/example_spacecraft_red_limits.py`` - Programmatic red limit configuration
+The thresholds include:
 
-The threshold-based example demonstrates monitoring of:
+* ``battery_level``: Warning at 60%, critical at 50%
+* ``recorder_fill_fraction``: Warning at 70%, critical at 90%
+* ``star_tracker_functional_count``, ``star_tracker_hard_violations`` and ``radiator_hard_violations``:
+  monitoring only, with ``triggers_safe_mode`` set to ``false``
 
-* **battery_level**: Warning at 50%, critical at 40%
-* **power_usage**: Warning at 450W, critical at 500W
-* **recorder_fill_fraction**: Warning at 80%, critical at 95%
+The red limit constraint is:
 
-The red limit example demonstrates spacecraft health and safety constraints:
-
-* **spacecraft_sun_limit**: 30° exclusion zone, 5 minute threshold (thermal protection)
-* **spacecraft_earth_limit**: 10° exclusion zone, 10 minute threshold (stray light protection)
+* ``Sun Avoidance``: 20° exclusion zone around the Sun outside umbral eclipse, 2 minute threshold
 
 Event Log
 ---------
 
-All significant fault management transitions are recorded in an in-memory ``events`` list on ``FaultManagementRun``.
+All significant fault management transitions are recorded in an in-memory ``events`` list on ``FaultManagementRun``. Each entry is a ``FaultEvent`` with these fields:
 
-``FaultEvent`` fields:
+* ``utime``: Unix timestamp (float)
+* ``event_type``: One of ``threshold_transition``, ``constraint_violation``, ``operational_fault``, ``safe_mode_trigger``, ``momentum_capacity``
+* ``name``: Threshold / constraint name
+* ``cause``: Human-readable description
+* ``metadata``: Optional contextual dict. The keys vary by event and may include the current value, thresholds, RA/Dec and violation durations.
 
-* ``utime`` – Unix timestamp (float)
-* ``event_type`` – One of ``threshold_transition``, ``constraint_violation``, ``safe_mode_trigger``
-* ``name`` – Threshold / constraint name
-* ``cause`` – Human-readable description
-* ``metadata`` – Optional contextual dict (subset of keys; may include current value, thresholds, RA/Dec, violation durations)
+An ``operational_fault`` event records a discrete failure that the simulation reports, such as a failure of attitude execution. It has no threshold, and it requests safe mode under the same ``safe_mode_on_red`` policy as a RED threshold. A ``momentum_capacity`` event records the reaction wheels reaching their momentum capacity, and a second one records the wheels being unloaded. It does not request safe mode (see :doc:`momentum`).
 
 Example:
 
@@ -506,16 +523,24 @@ Filtering events:
 Run ownership and migration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``config.fault_management`` contains only thresholds, red-limit constraints, and
-the global response policy. Runtime fields (``states``, ``events``, and
-``safe_mode_requested``) belong to ``FaultManagementRun``, not mission YAML/JSON.
-Remove those fields from older configuration files; save fault reports separately.
+Fault management is split into a policy and a report. The policy is
+``config.fault_management``, which contains only thresholds, red-limit constraints,
+and the global response policy. The report is a ``FaultManagementRun``, which holds
+the runtime fields produced by one run: ``states``, ``events``, and
+``safe_mode_requested``. The runtime fields are not part of the mission YAML/JSON.
+If an older configuration file contains them, remove them, and save fault reports
+separately.
 
-Both DITL implementations allocate a fresh report at each ``calc()`` call.
-The ACS and simulation share that report as ``ditl.fault_management``; prior
-reports remain in ``ditl.fault_runs``, including reports from failed executions.
-Each has a unique ``run_id``, so reruns covering identical dates are distinct.
-Policies are copied at run start: later config edits cannot rewrite old reports.
+Both DITL implementations allocate a fresh report at each ``calc()`` call:
+
+* The ACS and simulation share that report as ``ditl.fault_management``.
+* Prior reports remain in ``ditl.fault_runs``, including reports from failed
+  executions.
+* Each report has a unique ``run_id``, so reruns covering identical dates are
+  distinct.
+* Policies are copied at run start, so later config edits cannot rewrite old
+  reports.
+
 Do not clear historical events to start another run.
 
 .. code-block:: python
@@ -527,32 +552,34 @@ Do not clear historical events to start another run.
     assert first.run_id != second.run_id
     reports = {run.run_id: run.model_dump(mode="json") for run in ditl.fault_runs}
 
-For separate simulation objects sharing a config, each owns its own report list;
-collect their reports explicitly when comparing runs. Fault plots accept a
-``FaultManagementRun``, e.g. ``plot_fault_management_timeline(first)``.
+When separate simulation objects share a config, each simulation owns its own
+report list. Collect their reports explicitly when comparing runs. Fault plots
+accept a ``FaultManagementRun``, e.g. ``plot_fault_management_timeline(first)``.
 
-A subsequent ``calc()`` resets ACS execution state (including the SAFE latch,
-pending commands and maneuvers) and execution telemetry. Its initial attitude is
-the previously executed attitude. This is not a full scenario replay: battery,
-recorder and target-consumption state are not reset. Construct a new simulation
-with fresh scenario inputs when an identical initial physical state is required.
-Within a run, SAFE remains irreversible.
+A subsequent ``calc()`` on the same simulation resets the ACS execution state,
+which includes the SAFE latch, pending commands and maneuvers. It also resets the
+execution telemetry. Its initial attitude is the previously executed attitude.
+This is not a full scenario replay, because battery, recorder and
+target-consumption state are not reset. Construct a new simulation with fresh
+scenario inputs when an identical initial physical state is required. Within a
+run, SAFE remains irreversible.
 
-API migration: replace reads/evaluation on ``config.fault_management`` with
-``ditl.fault_management``. Standalone callers use ``policy.new_run()`` once
-per execution and retain the returned report; do not call it on every timestep.
+Code that read or evaluated faults on ``config.fault_management`` should be
+changed to use ``ditl.fault_management``. Standalone callers, which run fault
+management without a DITL, call ``policy.new_run()`` once per execution and retain
+the returned report. Do not call ``new_run()`` on every timestep.
 
 Housekeeping Schema and New Metrics
 -----------------------------------
 
 Threshold names must match predefined ``Housekeeping`` fields.
 
-If you need to monitor a new metric, first add it to the ``Housekeeping`` model in code, then add thresholds for that new field. Arbitrary extra fields in ``Housekeeping(...)`` are not accepted.
+To monitor a new metric, first add it to the ``Housekeeping`` model in code, and then add thresholds for the new field. Arbitrary extra fields in ``Housekeeping(...)`` are not accepted.
 
 API Reference
 -------------
 
-See :mod:`conops.fault_management` for detailed API documentation.
+See :mod:`conops.config.fault_management` for detailed API documentation.
 
 Best Practices
 --------------
@@ -560,31 +587,31 @@ Best Practices
 Threshold-Based Monitoring
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* **Yellow before Red**: Set yellow thresholds as early warnings before critical limits
-* **Test thresholds**: Validate threshold values don't cause premature safe mode triggers
-* **Monitor statistics**: Review accumulated yellow/red time after simulations
-* **Battery monitoring**: Always include battery_level monitoring for power-critical missions
+* Set each yellow threshold so that it gives an early warning before the critical limit.
+* Test the threshold values to check that they don't cause premature safe mode triggers.
+* Review the accumulated yellow and red time after simulations.
+* Always include ``battery_level`` monitoring for power-critical missions.
 
 Red Limit Constraints
 ^^^^^^^^^^^^^^^^^^^^^^
 
-* **Looser than science constraints**: Red limits should be less restrictive than instrument constraints
-* **Hardware protection focus**: Design constraints around thermal limits, detector saturation, etc.
-* **Appropriate time thresholds**: Allow transient violations during normal operations (slews, etc.)
-* **Test time thresholds**: Verify thresholds don't trigger during routine maneuvers
-* **Use monitoring mode**: Set ``time_threshold_seconds: null`` to track violations without triggering safe mode
+* Make red limits less restrictive than instrument (science) constraints.
+* Design the constraints around hardware protection: thermal limits, detector saturation, etc.
+* Choose time thresholds that allow transient violations during normal operations (slews, etc.).
+* Test the time thresholds to verify that they don't trigger during routine maneuvers.
+* To track violations without triggering safe mode, use monitoring mode by setting ``time_threshold_seconds: null``.
 
 ACS Mode Filtering
 ^^^^^^^^^^^^^^^^^^^
 
-* **Mode-appropriate monitoring**: Use ``acs_modes`` to check parameters only when they matter operationally
-* **Operational focus**: Monitor high power usage during SCIENCE mode when needed
-* **Data safety**: Check recorder fill limits in operational modes where data accumulation matters
-* **Power monitoring**: Monitor battery levels in all modes (power is always critical)
-* **Test mode transitions**: Verify thresholds behave correctly during mode changes
+* Use ``acs_modes`` to check parameters only in the modes where they matter operationally.
+* Monitor high power usage during SCIENCE mode when needed.
+* Check recorder fill limits in the operational modes where data accumulation matters.
+* Monitor battery levels in all modes, because power is always critical.
+* Verify that thresholds behave correctly during mode changes.
 
 General
 ^^^^^^^
 
-* **Safe mode policy**: Consider setting ``safe_mode_on_red: false`` for analysis runs where you want to observe fault behavior without intervention
-* **Separate concerns**: Use thresholds for subsystem health (battery, power, recorder fill), red limits for pointing safety
+* Consider setting ``safe_mode_on_red: false`` for analysis runs where you want to observe fault behavior without intervention.
+* Use thresholds for subsystem health (battery, power, recorder fill) and red limits for pointing safety.

@@ -95,7 +95,14 @@ class Housekeeping(BaseModel):
         default=None,
         ge=0,
         allow_inf_nan=False,
-        description="Useful science collection in the timestep starting at this timestamp; excludes setup and teardown",
+        description=(
+            "Collection in the timestep starting at this timestamp; excludes setup "
+            "and teardown. Calibration collection is identified by calibration=True"
+        ),
+    )
+    calibration: bool = Field(
+        default=False,
+        description="Whether the active observation step collects calibration rather than science",
     )
     panel_illumination: float | None = Field(
         default=None, description="Solar panel illumination fraction (0-1)"
@@ -222,6 +229,20 @@ class Housekeeping(BaseModel):
     )
     radiator_heat_dissipation_w: float | None = Field(
         default=None, description="Total estimated radiator heat dissipation in watts"
+    )
+    radiator_temperatures_k: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "Temperature in Kelvin of each radiator that has a thermal mass, "
+            "by radiator name; None where no radiator has one"
+        ),
+    )
+    thermal_node_temperatures_k: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "Temperature in Kelvin of each interior thermal node, by node "
+            "name; None where none is configured"
+        ),
     )
     sun_body_vector: list[float] | None = Field(
         default=None,
@@ -538,6 +559,16 @@ class HousekeepingList(list[Housekeeping]):
     def radiator_heat_dissipation_w(self) -> list[float | None]:
         """Get radiator heat dissipation estimates from all housekeeping records."""
         return [hk.radiator_heat_dissipation_w for hk in self]
+
+    @property
+    def radiator_temperatures_k(self) -> list[dict[str, float] | None]:
+        """Get per-radiator temperatures from all housekeeping records."""
+        return [hk.radiator_temperatures_k for hk in self]
+
+    @property
+    def thermal_node_temperatures_k(self) -> list[dict[str, float] | None]:
+        """Get interior thermal node temperatures from all housekeeping records."""
+        return [hk.thermal_node_temperatures_k for hk in self]
 
     @property
     def sun_body_vector(self) -> list[list[float] | None]:

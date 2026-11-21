@@ -11,7 +11,13 @@ from ..config import MissionConfig
 from ..ditl.ditl_mixin import DITLMixin
 from ..ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
 from ..targets import Pointing, ScheduledActivity
-from .metrics import Collection, cadence_error, program_shares, visit_starts
+from .metrics import (
+    Collection,
+    cadence_error,
+    dynamic_science_value,
+    program_shares,
+    visit_starts,
+)
 
 
 class TOOSpec(BaseModel):
@@ -76,10 +82,14 @@ class BenchmarkResult(BaseModel):
 
     contender: str
     scenario: str
+    calibration_hours: float = 0.0
+    """Executed collection in calibration steps, excluded from science metrics."""
     science_hours: float = 0.0
     """Science collected, to the second."""
     weighted_science: float = 0.0
-    """Science seconds times the merit of the target observed."""
+    """Science seconds weighted by original input merits, a fixed-value diagnostic."""
+    dynamic_science: float | None = None
+    """Science seconds weighted by each executed entry's dynamic value; None if unmeasured."""
     slewing_hours: float = 0.0
     """Time in each ACS mode, sampled at simulation steps. A step in which a
     slew ends and collection starts counts as slewing, so mode hours and
@@ -128,6 +138,9 @@ def run_benchmark(
         began = time.perf_counter()
         try:
             run = contender.simulate(scenario)
+            measured = _measure(
+                contender.name, scenario, run, time.perf_counter() - began
+            )
         except Exception as exc:  # report the failure and carry on
             results.append(
                 BenchmarkResult(
@@ -138,9 +151,7 @@ def run_benchmark(
                 )
             )
             continue
-        results.append(
-            _measure(contender.name, scenario, run, time.perf_counter() - began)
-        )
+        results.append(measured)
     return results
 
 
@@ -157,10 +168,13 @@ def _measure(
 
     records: list[Collection] = []
     collected: dict[int, float] = {}
-    science = weighted = 0.0
+    science = calibration = weighted = 0.0
     for record in simulation.telemetry.housekeeping:
         seconds = record.collection_seconds or 0.0
         if seconds <= 0 or record.obsid is None:
+            continue
+        if record.calibration:
+            calibration += seconds
             continue
         obsid = int(record.obsid)
         science += seconds
@@ -201,14 +215,18 @@ def _measure(
         contender=name,
         scenario=scenario.name,
         science_hours=science / 3600.0,
+        calibration_hours=calibration / 3600.0,
         weighted_science=weighted,
+        dynamic_science=dynamic_science_value(
+            simulation.telemetry.housekeeping, simulation.plan, simulation.step_size
+        ),
         slewing_hours=modes.count(ACSMode.SLEWING) * step_hours,
         idle_hours=modes.count(ACSMode.IDLE) * step_hours,
         pass_hours=modes.count(ACSMode.PASS) * step_hours,
         observations=sum(
             1
             for entry in simulation.plan
-            if entry_obstype(entry) in PLAN_SCIENCE_OBSTYPES
+            if entry_obstype(entry) in PLAN_SCIENCE_OBSTYPES and not entry.calibration
         ),
         too_response_seconds=responses,
         too_on_time=on_time,
@@ -237,7 +255,8 @@ def format_results(results: Sequence[BenchmarkResult]) -> str:
     headers = [
         "contender",
         "science h",
-        "weighted",
+        "dynamic value",
+        "fixed value",
         "slew h",
         "idle h",
         "obs",
@@ -266,6 +285,7 @@ def format_results(results: Sequence[BenchmarkResult]) -> str:
         row = [
             r.contender,
             f"{r.science_hours:.2f}",
+            "-" if r.dynamic_science is None else f"{r.dynamic_science:.3g}",
             f"{r.weighted_science:.3g}",
             f"{r.slewing_hours:.2f}",
             f"{r.idle_hours:.2f}",

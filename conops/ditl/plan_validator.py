@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..common import ACSMode, ObsType, angular_separation, unixtime2date
 from ..common.numerics import TIME_TOLERANCE_S
-from ..common.vector import attitude_to_quat
+from ..common.vector import attitude_to_quat, quaternion_attitude_delta
 from ..config import MissionConfig
 from ..simulation.passes import Pass
 from ..targets import Plan, PlanEntry
@@ -154,24 +154,6 @@ class PlanExecutionValidator:
         mismatches.extend(self.attitude_constraint_mismatches())
         mismatches.extend(self.unplanned_execution_mismatches())
         return mismatches
-
-    def slew_requirement_mismatches(self) -> list[PlanExecutionMismatch]:
-        """The plan's slews that take longer than their requirement class
-        allows, where the ACS configures slew requirement classes; empty
-        without them. Not part of :meth:`validate`: a report on the ACS
-        model against the requirements, not a plan-execution fault."""
-        from ..simulation.slew_requirements import check_plan
-
-        return [
-            PlanExecutionMismatch(
-                utime=violation.utime,
-                message=f"slew_requirement: {violation}",
-                obsid=violation.obsid,
-            )
-            for violation in check_plan(
-                self.plan, self.config.spacecraft_bus.attitude_control
-            )
-        ]
 
     def attitude_constraint_mismatches(self) -> list[PlanExecutionMismatch]:
         """Report samples whose attitude violated a constraint scoped to their mode.
@@ -542,19 +524,28 @@ class PlanExecutionValidator:
     ) -> list[PlanExecutionMismatch]:
         """Check that no science, contact or charge ran during an activity.
 
-        From the end of its slew to its end the spacecraft holds in ``IDLE``
-        mode, or in ``SAA`` mode where it crosses the SAA; a slew away under
-        idle safety is allowed.
+        The full stationary interval uses ACTIVITY (SAA allowed), DESAT for dumps,
+        or SAFE for recoverable safe holds. SAFE holds also retain their planned
+        quaternion. Unexpected safe mode violates other stationary holds; legacy
+        and flexible dispatch holds allow idle-safety recovery.
         """
         start = float(entry.begin) + max(0.0, float(entry.slewtime))
+        if entry.activity_hold_begin is not None:
+            start = max(start, entry.activity_hold_begin)
         end = float(entry.end)
         mismatches: list[PlanExecutionMismatch] = []
         if end <= start:
             return mismatches
-        # A thruster dump holds in DESAT; any other activity holds in IDLE.
-        expected = ACSMode.DESAT if entry.desaturation else ACSMode.IDLE
+        # SAFE engineering holds and DESAT dumps carry their own hold modes.
+        expected = entry.activity_mode
         wrong = {ACSMode.SCIENCE, ACSMode.PASS, ACSMode.CHARGING}
-        wrong.add(ACSMode.IDLE if entry.desaturation else ACSMode.DESAT)
+        wrong.update({ACSMode.IDLE, ACSMode.ACTIVITY, ACSMode.DESAT} - {expected})
+        if entry.safe_hold:
+            wrong.add(ACSMode.SAA)
+        if not entry.safe_hold and entry.activity_requires_stationary:
+            wrong.add(ACSMode.SAFE)
+        if entry.activity_requires_stationary:
+            wrong.add(ACSMode.SLEWING)
         for i in self._window_indices(start, end):
             mode = self._mode_at_index(i)
             if mode in wrong:
@@ -563,6 +554,19 @@ class PlanExecutionValidator:
                         entry, self.utime[i], mode, expected, "activity"
                     )
                 )
+            if entry.safe_hold:
+                error, _ = quaternion_attitude_delta(
+                    float(self.ra[i]),
+                    float(self.dec[i]),
+                    float(self.roll[i]),
+                    float(entry.ra),
+                    float(entry.dec),
+                    float(entry.roll),
+                )
+                if error > self._tolerance_deg():
+                    mismatches.append(
+                        self._pointing_mismatch(entry, self.utime[i], error, "activity")
+                    )
         return mismatches
 
     def _charge_entry_mismatches(

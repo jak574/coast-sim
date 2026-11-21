@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from enum import Enum, auto
+from math import inf, nextafter
 from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,7 +41,7 @@ from ..targets import (
 )
 from ..targets.activity import CHARGE_OBSID
 from ..targets.merit import MeritBreakdown, MeritModel
-from ..targets.plan_entry import snapshot_min_seconds
+from ..targets.plan_entry import is_rounding_remainder, snapshot_min_seconds
 from .allocator import AllocatedTime
 from .battery import MIN_CHARGE_SECONDS, Addition, Additions, Angles, BatteryLedger
 from .context import Attitude, SchedulingContext
@@ -52,8 +53,23 @@ from .recorder import RecorderAmount, RecorderLedgers, combine_amounts
 TrackingProfile = list[tuple[float, float, float]]
 
 
+_CHARGE_ENERGY_TOLERANCE_WH = 1e-9
+
 _MAX_DUMPS = 50
 """How many thruster dumps a plan reserves at most."""
+
+
+class ActivitySchedulingError(ValueError):
+    """A mandatory activity has no safe, reachable reservation in this plan."""
+
+    def __init__(self, activity: ScheduledActivity, reason: str) -> None:
+        self.activity = activity
+        self.reason = reason
+        super().__init__(
+            f"Mandatory activity {activity.name} ({activity.obsid}) cannot be reserved "
+            f"from {unixtime2date(activity.begin)} to its latest start "
+            f"{unixtime2date(activity.latest_start)}: {reason}"
+        )
 
 
 class _Verdict(Enum):
@@ -64,6 +80,14 @@ class _Verdict(Enum):
     """The slew itself cannot start then; another start time may work."""
     WAIT_NOT_ALLOWED = auto()
     """The wait at the block's attitude fails; earlier starts only lengthen it."""
+
+
+_SAFE_HOLD_CANDIDATES = 50
+"""The most attitudes tried for an activity's safe hold (see
+:meth:`PriorityScheduler._safe_hold`)."""
+_BLOCK_ENERGY_MEMO_SIZE = 20000
+"""The most blocks whose battery additions are kept between timeline
+totals; the memo is emptied when it holds more."""
 
 
 class _Block(BaseModel):
@@ -126,6 +150,21 @@ class _Block(BaseModel):
     def arrival(self) -> float:
         assert self.slew is not None
         return float(self.slew.slewend)
+
+
+class _BlockEnergy(NamedTuple):
+    """A block's battery addition as last found, with what it was found from."""
+
+    block: _Block
+    entry: PlanEntry
+    slew: Slew | None
+    gspass: Pass | None
+    values: tuple[object, ...]
+    """The entry's begin, slew time, end, attitude and hold start, and the
+    block's end, when the addition was found."""
+    addition: Addition
+    segment: int
+    """The ledger segment the addition starts in."""
 
 
 class StartState(BaseModel):
@@ -206,7 +245,9 @@ class _Request(BaseModel):
         or what remains where that is less and a snapshot has been placed,
         or the target has collected, before (see :func:`snapshot_min_seconds`)."""
         least = float(snapshot_min_seconds(self.target, self.step))
-        if self.placed_before and self.remaining >= self.step:
+        if self.placed_before and not is_rounding_remainder(
+            self.remaining, self.step, self.target.exporig
+        ):
             least = min(least, self.remaining)
         return least
 
@@ -265,16 +306,22 @@ class _Request(BaseModel):
             return own
         return group_deadline if own is None else min(own, group_deadline)
 
-    def open_visits(self, last_end: float | None, not_before: float) -> list[int]:
+    def open_visits(
+        self,
+        last_end: float | None,
+        not_before: float,
+        *,
+        after_visit: int | None = None,
+    ) -> list[int]:
         """The windows a visit may still go in, in order: the candidates not
         skipped, after the window of the visit that ended at ``last_end``,
         and still open at ``not_before``."""
         target = self.target
-        last = (
-            target.visit_index_at(last_end - target.per_visit_seconds)
-            if last_end is not None
-            else None
-        )
+        # Calibration and inter-step slews can extend a sequence beyond the
+        # next opening. Its recorded visit is authoritative when available.
+        last = after_visit
+        if last is None and last_end is not None:
+            last = target.visit_index_at(last_end - target.per_visit_seconds)
         return [
             k
             for k in self.visit_candidates
@@ -283,9 +330,17 @@ class _Request(BaseModel):
             and target.visit_windows[k].deadline >= not_before
         ]
 
-    def next_visit(self, last_end: float | None, not_before: float) -> int | None:
+    def next_visit(
+        self,
+        last_end: float | None,
+        not_before: float,
+        *,
+        after_visit: int | None = None,
+    ) -> int | None:
         """The window the next visit goes in, or None when none is left."""
-        return next(iter(self.open_visits(last_end, not_before)), None)
+        return next(
+            iter(self.open_visits(last_end, not_before, after_visit=after_visit)), None
+        )
 
 
 def program_shares(seconds: Mapping[str, float]) -> dict[str, float]:
@@ -312,6 +367,19 @@ class _Visit(NamedTuple):
     slews: list[Slew | None]
     attitude_out: Attitude
     end: float
+
+
+class _StepPointingKey(BaseModel):
+    """A sequence step's fixed geometry within one planning pass."""
+
+    model_config = ConfigDict(frozen=True)
+
+    obsid: int
+    index: int
+    visit: int | None
+    base: tuple[str, str]
+    roll: tuple[str | None, str | None]
+    instrument_name: str | None
 
 
 class _Move(NamedTuple):
@@ -408,6 +476,13 @@ class PriorityScheduler:
         reserved_visits: When observations scheduled outside this plan and not
             yet collected will finish collecting, by obsid; a cadence target's
             next visit waits for its cadence after them.
+        reserved_visit_windows: Last committed window index, by obsid, for
+            windowed visits still to collect outside this plan. Merged with
+            completed history so the same window cannot be placed again.
+            Preferred to inferring a window from ``reserved_visits`` when
+            calibration or inter-step slews extend a sequence. None uses
+            that time-based fallback; an empty mapping reserves no whole
+            window, allowing a pending cut attempt to be retried whole.
         held: Obsids of targets this plan does not place, though their
             science, collected and reserved, counts towards their programs'
             shares as every target's does.
@@ -456,6 +531,7 @@ class PriorityScheduler:
         start_state: StartState | None = None,
         reserved_seconds: Mapping[int, float] | None = None,
         reserved_visits: Mapping[int, float] | None = None,
+        reserved_visit_windows: Mapping[int, int] | None = None,
         held: Iterable[int] = (),
         successor_retries: int | None = 3,
         start_volume_gb: float | Mapping[str, float] | None = None,
@@ -482,6 +558,9 @@ class PriorityScheduler:
         """The thruster dumps this scheduler has reserved where its momentum
         forecast reached the level, in time order."""
         self._momentum_rejected: set[int] = set()
+        self._placing_groups = False
+        """Whether the requests being placed are those of consecutive
+        observation groups, which are placed before the others."""
         """Targets whose visit stores more than the wheels' capacity from
         empty, or whose slew asks more of them at the slowest configured
         rate: not planned."""
@@ -501,6 +580,35 @@ class PriorityScheduler:
             tuple[int, tuple[float, float] | None, float | None], list[list[float]]
         ] = {}
         """Candidate entries' visibility windows (see :meth:`_entry_visibility`)."""
+        self._sequence_pointings: dict[_StepPointingKey, Pointing] = {}
+        self._science_hold_memo: tuple[
+            SchedulingContext | None,
+            dict[tuple[Attitude, float, float], float | None],
+        ] = (None, {})
+        """First science violations already found by the context given, by
+        body attitude and span (see :meth:`_first_science_violation`)."""
+        self._slew_path_memo: tuple[
+            SchedulingContext | None, dict[tuple[object, ...], float | None]
+        ] = (None, {})
+        """First slew violations already found by the context given, by the
+        slew's endpoints, timing and mode (see :meth:`_first_slew_violation`)."""
+        self._block_energy_memo: tuple[
+            BatteryLedger | None, dict[int, _BlockEnergy]
+        ] = (None, {})
+        """Each block's battery addition and segment from the ledger given,
+        by the block's id, with the block and the values the addition was
+        found from (see :meth:`_block_energy`)."""
+        self._idle_energy_memo: tuple[
+            BatteryLedger | None,
+            dict[tuple[Attitude, float, float], tuple[Addition | None, int]],
+        ] = (None, {})
+        """Each idle hold's battery addition and segment from the ledger
+        given, by attitude and span (see :meth:`_idle_energy`)."""
+        self._peaks_memo: (
+            tuple[BatteryLedger, Sequence[Additions], list[float]] | None
+        ) = None
+        """The battery peaks of the energy last asked about, with the ledger
+        that gave them (see :meth:`_energy_peaks`)."""
         self.start_momentum_eci_n_m_s = (
             tuple(float(v) for v in start_momentum_eci_n_m_s)
             if start_momentum_eci_n_m_s is not None
@@ -517,6 +625,7 @@ class PriorityScheduler:
         self.step_size = step_size
         self.include_passes = include_passes
         self.locked = list(locked)
+        self._owned_locked: list[PlanEntry] | None = None
         self.log = log if log is not None else DITLLog()
         self.simulation_start = simulation_start
         self.simulation_end = simulation_end
@@ -528,6 +637,9 @@ class PriorityScheduler:
         self.start_state = start_state
         self.reserved_seconds = dict(reserved_seconds or {})
         self.reserved_visits = dict(reserved_visits or {})
+        self.reserved_visit_windows = (
+            None if reserved_visit_windows is None else dict(reserved_visit_windows)
+        )
         if successor_retries is not None and successor_retries < 0:
             raise ValueError("successor_retries must not be negative")
         self.successor_retries = successor_retries
@@ -554,14 +666,27 @@ class PriorityScheduler:
         """For each request for allocated time, by id, the request for the
         rest of its target's exposure."""
         self._planned_visits: dict[int, list[_Block]] = defaultdict(list)
+        self._safe_holds: dict[int, Attitude | None] = {}
+        """The safe hold attitude of each activity that follows, by the
+        activity's obsid (see :meth:`_safe_hold`)."""
+        self._slew_bound = float(
+            Slew.duration_upper_bound(config.spacecraft_bus.attitude_control)
+        )
+        """The longest a slew takes: an activity that begins later than this
+        after the block before it has time to be reached elsewhere."""
+        self._cadences: dict[int, float] = {}
+        """The cadence of each request that has one, by obsid."""
         """Cadence visits placed so far, by obsid. Allocated time can place
         a later visit first, so a visit is spaced from these on both sides."""
         self._refitting: _Block | None = None
         """A visit being placed again later, not spaced from itself."""
+        self._momentum_seed: Plan | None = None
+        """The preceding pass's plan, repaired around newly reserved dumps."""
         self._kept: list[_Block] = []
         """Science from the pass before that a pass planning on from a dump
         keeps where it stands (see :meth:`_keep_before`)."""
         self._kept_visits: dict[int, float] = {}
+        self._kept_visit_windows: dict[int, int] = {}
         """When each target's last kept visit finishes collecting."""
         self._resume_from: float | None = None
         """Where a pass planning on from a dump places from: the first slew
@@ -573,10 +698,6 @@ class PriorityScheduler:
     def schedule(self) -> Plan:
         """Build and return the plan, within the wheels' momentum where the
         configuration tracks it (see :meth:`_plan_within_momentum`)."""
-        self._momentum_cache: SpanCache = {}
-        """Spans of the timeline integrated for the momentum forecast, shared
-        by the passes of this plan: each pass changes the timeline only from
-        the dump it reserves onwards."""
         return self._plan_within_momentum(self._plan_once)
 
     def _plan_once(self) -> Plan:
@@ -595,7 +716,10 @@ class PriorityScheduler:
         activities (see :meth:`_keep_before`), so the plan before a dump is
         the plan that fills the wheels to it; a dump found earlier than one
         already reserved replaces that one and those after it, which the
-        next pass finds again if they are still needed. Without thrusters
+        next pass finds again if they are still needed. Optimizing planners
+        also repair the preceding pass's plan as another incumbent under the
+        new dumps; a changed priority order need not discard feasible science.
+        Without thrusters
         the forecast is logged where it passes the capacity, and the plan
         stands.
 
@@ -611,6 +735,13 @@ class PriorityScheduler:
         slowest, a dump goes before the observation where its slew fits from
         empty wheels, and the observation is not planned where it does not.
         """
+        # Every planner enters here, including those overriding schedule().
+        # Share exact integrations across this plan's momentum passes, then
+        # start fresh on the next schedule if configuration or state changed.
+        self._owned_locked = None
+        self._sequence_pointings.clear()
+        self._momentum_cache: SpanCache = {}
+        self._momentum_seed = None
         plan = build()
         forecast = self._momentum
         if forecast is None:
@@ -625,6 +756,7 @@ class PriorityScheduler:
                     # A changed speed can alter every later handoff.
                     self._kept = []
                     self._resume_from = None
+                    self._momentum_seed = plan
                     plan = build()
                     continue
                 if isinstance(capped, tuple):
@@ -650,13 +782,11 @@ class PriorityScheduler:
                             )
                             return plan
                         kept = [d for d in self.dumps if d.end <= begin]
-                        reserved = ScheduledActivity(
-                            name="Desaturation",
-                            begin=begin,
-                            duration_seconds=dump.duration_seconds,
-                            desaturation=True,
-                            obsid=DESATURATION_OBSID + len(kept),
+                        reserved = self._dump_activity(
+                            begin, DESATURATION_OBSID + len(kept)
                         )
+                        if reserved.end > self.ctx.uend:
+                            return plan
                         self.dumps = [*kept, reserved]
                         self._log(
                             begin,
@@ -665,18 +795,16 @@ class PriorityScheduler:
                             reserved.obsid,
                         )
                         self._keep_before(begin)
+                        self._momentum_seed = plan
                         plan = build()
                         continue
             if level is None:
                 self._log_forecast_past_capacity()
                 return plan
             assert dump is not None
-            # One pass reserves a dump for every crossing the forecast
-            # reaches, each found with the wheels unloaded at the dump before
-            # it, and the plan is built again once, from the first. The
-            # science after a dump moves a little when the plan is built
-            # with it, so the next pass checks the dumps against the plan
-            # as built and replaces any that no longer answer its forecast.
+            # Batch firings that fit existing idle holds without changing
+            # attitude. If a firing displaces selected work or changes the
+            # hold attitude, rebuild before forecasting later reservations.
             resume: float | None = None
             self._forecast_resets = []
             while len(self.dumps) < _MAX_DUMPS:
@@ -704,12 +832,12 @@ class PriorityScheduler:
                     )
                     break
                 kept = [d for d in self.dumps if d.end <= begin]
-                reserved = ScheduledActivity(
-                    name="Desaturation",
-                    begin=begin,
-                    duration_seconds=dump.duration_seconds,
-                    desaturation=True,
-                    obsid=DESATURATION_OBSID + len(kept),
+                reserved = self._dump_activity(begin, DESATURATION_OBSID + len(kept))
+                if reserved.end > self.ctx.uend:
+                    break
+                changes_timeline = dump.attitude.fixed_pointing is not None or any(
+                    float(block.entry.begin) < reserved.end and begin < block.end
+                    for block in self.timeline
                 )
                 self.dumps = [*kept, reserved]
                 self._log(
@@ -722,17 +850,47 @@ class PriorityScheduler:
                 if resume is None:
                     resume = begin
                 self._forecast_resets.append(reserved.end)
+                if changes_timeline:
+                    # Later dump times must follow the displaced work, rather
+                    # than preventing it from fitting at its new time.
+                    break
             self._forecast_resets = []
             if resume is None:
                 self._log_forecast_past_capacity()
                 return plan
             self._keep_before(resume)
+            self._momentum_seed = plan
             plan = build()
         self._log(
             self.ctx.uend,
             f"{_MAX_DUMPS} thruster dumps reserved; the plan may still fill the wheels",
         )
         return plan
+
+    def _dump_activity(self, begin: float, obsid: int) -> ScheduledActivity:
+        """Reserve a dump's firing after any configured ingress from ``begin``."""
+        dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
+        assert dump is not None
+        fixed = dump.attitude.fixed_pointing
+        if fixed is not None:
+            before = [b for b in self.timeline if b.end <= begin]
+            pred = before[-1] if before else self._origin
+            slew = self.ctx.slew(
+                self._start_attitude(pred, begin),
+                fixed,
+                begin,
+                obstype=ObsType.IDLE,
+                obsid=obsid,
+            )
+            begin = self.ctx.ceil_step(float(slew.slewend))
+        return ScheduledActivity(
+            name="Desaturation",
+            begin=begin,
+            duration_seconds=dump.duration_seconds,
+            desaturation=True,
+            obsid=obsid,
+            attitude=dump.attitude,
+        )
 
     def _block_of(self, obsid: int) -> _Block | None:
         """The science block of ``obsid`` on the timeline, if placed."""
@@ -826,7 +984,7 @@ class PriorityScheduler:
         crossing = forecast.first_crossing(self.timeline, capacity, demand=True)
         if crossing is not None:
             dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
-            reason = (
+            disposition = (
                 "with the dumps reserved"
                 if dump is not None
                 else "with no thrusters to dump it"
@@ -834,7 +992,7 @@ class PriorityScheduler:
             self._log(
                 crossing,
                 f"The plan's forecast reaches the {capacity} N m s capacity at "
-                f"{unixtime2date(crossing)} {reason}",
+                f"{unixtime2date(crossing)} {disposition}",
             )
 
     def _dump_placement(
@@ -1037,21 +1195,43 @@ class PriorityScheduler:
             )
 
         kept = {id(block.entry) for block in self._kept}
-        for entry in self.locked:
+        if self._owned_locked is None:
+            # Read caller edits at planning time; reconnect only owned copies.
+            self._owned_locked = [entry.model_copy() for entry in self.locked]
+        for entry in self._owned_locked:
             if id(entry) not in kept:
                 self._place_locked(entry)
+        # Mandatory holds reserve their windows before optional contacts;
+        # a contact can be acquired later or omitted when it cannot fit.
+        for activity in sorted([*self.activities, *self.dumps], key=lambda a: a.begin):
+            if (
+                activity.begin < self.ctx.uend
+                and activity.latest_start + activity.duration_seconds > self.ctx.ustart
+            ):
+                self._place_activity(activity)
         if self.include_passes:
             for gspass in self.ctx.predict_passes():
                 if gspass.requires_tracking:
                     self._place_pass(gspass)
-        for activity in sorted([*self.activities, *self.dumps], key=lambda a: a.begin):
-            if activity.begin < self.ctx.uend and activity.end > self.ctx.ustart:
-                self._place_activity(activity)
         # After the passes and activities, as the science was placed: each
         # kept block keeps its slew and re-slews what now follows it.
-        self._kept = [block for block in self._kept if self._insert_kept(block)]
+        retained = []
+        for block in self._kept:
+            if self._insert_kept(block):
+                retained.append(block)
+            else:
+                # A rejected retained block must be eligible for placement again,
+                # including the time before the previous momentum resume point.
+                self._resume_from = min(
+                    block.slew_start,
+                    self._resume_from
+                    if self._resume_from is not None
+                    else block.slew_start,
+                )
+        self._kept = retained
         kept = {id(block.entry) for block in self._kept}
         self._kept_visits = {}
+        self._kept_visit_windows = {}
         for block in self._kept:
             end = block.entry.collection_end
             if end is not None:
@@ -1059,6 +1239,10 @@ class PriorityScheduler:
                 self._kept_visits[obsid] = max(
                     self._kept_visits.get(obsid, float(end)), float(end)
                 )
+                if block.entry.visit is not None:
+                    self._kept_visit_windows[obsid] = max(
+                        self._kept_visit_windows.get(obsid, -1), block.entry.visit
+                    )
         self._locked_visits: dict[int, list[tuple[float, float]]] = defaultdict(list)
         """Locked and kept science visits by obsid: when each slew starts
         and its collection ends. Cadence visits are kept clear of them."""
@@ -1088,6 +1272,24 @@ class PriorityScheduler:
                     f"{limit:.2f} Gb from locked entries and housekeeping alone",
                 )
         self._energy = self._charged_energy(self.timeline)
+        self._place_consecutive_groups()
+
+    def _place_consecutive_groups(self) -> None:
+        """Place the requests of consecutive observation groups, before any
+        other science is planned.
+
+        A group needs time that holds no other science from its first
+        observation to its last, so its blocks are placed first and then
+        stay where they are: every planner plans the remaining science
+        around them (see :meth:`_open_gaps`).
+        """
+        if not self.config.observation_groups.consecutive:
+            return
+        self._placing_groups = True
+        try:
+            self._place_requests(self._with_allocated_time(self._requests()))
+        finally:
+            self._placing_groups = False
 
     def _recorder_ledger(self) -> RecorderLedgers:
         return RecorderLedgers(
@@ -1113,6 +1315,50 @@ class PriorityScheduler:
             *((s, -v) for s, v in self._ledger.ingress_additions(block.entry)),
         ]
 
+    def _fixed_data_changes(
+        self, before: Sequence[_Block], after: Sequence[_Block]
+    ) -> list[tuple[int, RecorderAmount]]:
+        """Data moved with activities and pass ingress, excluding new science."""
+
+        def events(
+            blocks: Sequence[_Block],
+        ) -> dict[int, list[tuple[int, RecorderAmount]]]:
+            result: dict[int, list[tuple[int, RecorderAmount]]] = {}
+            for block in blocks:
+                if block.is_activity:
+                    amounts = self._ledger.activity_additions(block.entry)
+                elif block.is_pass:
+                    amounts = list(self._ledger.ingress_additions(block.entry))
+                else:
+                    continue
+                result[int(block.entry.obsid)] = [(s, v) for s, v in amounts if v]
+            return result
+
+        old, new = events(before), events(after)
+        changes: list[tuple[int, RecorderAmount]] = []
+        for obsid in sorted(old.keys() | new.keys()):
+            prior, current = old.get(obsid, []), new.get(obsid, [])
+            if prior != current:
+                changes.extend((s, combine_amounts(0.0, v, -1.0)) for s, v in prior)
+                changes.extend(current)
+        return changes
+
+    def _following_data_changes(
+        self, pred: _Block, after: Sequence[_Block], slew: Slew | None
+    ) -> list[tuple[int, RecorderAmount]]:
+        """Preview resource changes along the following reconnection chain."""
+        affected: list[_Block] = []
+        for block in after:
+            affected.append(block)
+            if not block.follows:
+                break
+        # Most gaps have no data-bearing following hold or pass. Preserve that
+        # fast path without constructing another connected timeline.
+        if not self._fixed_data_changes([], affected):
+            return []
+        connected = self._reconnected(pred, after, slew)
+        return self._fixed_data_changes(after, connected)
+
     def _battery_ledger(self) -> BatteryLedger:
         """The battery over the horizon, charging in its idle sunlit time."""
         battery = self.config.battery
@@ -1131,6 +1377,75 @@ class PriorityScheduler:
             drive_state=self.start_drive_state,
         )
 
+    def _first_science_violation(
+        self, entry: PlanEntry, attitude: Attitude, begin: float, end: float
+    ) -> float | None:
+        """The context's first science violation, found once per attitude and span.
+
+        For an entry that does not move, has no eclipse restriction and is
+        checked at the body attitude, the context's answer depends only on
+        the attitude and the grid steps in ``[begin, end)``, so it is kept
+        per context and returned for the same arguments. Any other entry is
+        passed to the context every time.
+        """
+        if (
+            entry.moves
+            or entry.forbids_eclipse() is True
+            or entry.uses_mounted_attitude()
+        ):
+            return self.ctx.first_science_violation(entry, attitude, begin, end)
+        ctx, memo = self._science_hold_memo
+        if ctx is not self.ctx:
+            memo = {}
+            self._science_hold_memo = (self.ctx, memo)
+        key = (attitude, float(begin), float(end))
+        if key in memo:
+            return memo[key]
+        violation = self.ctx.first_science_violation(entry, attitude, begin, end)
+        memo[key] = violation
+        return violation
+
+    def _first_slew_violation(self, slew: Slew, mode: ACSMode) -> float | None:
+        """The context's first slew violation, found once per slew and mode.
+
+        A slew's path is fixed by its endpoints, start, rate fraction and
+        the kind and target it was built for, so the answer is kept per
+        context under those and returned for an equal slew.
+        """
+        ctx, memo = self._slew_path_memo
+        if ctx is not self.ctx:
+            memo = {}
+            self._slew_path_memo = (self.ctx, memo)
+        key = (
+            slew.startra,
+            slew.startdec,
+            slew.startroll,
+            slew.endra,
+            slew.enddec,
+            slew.endroll,
+            slew.slewstart,
+            slew.slewend,
+            slew.obstype,
+            slew.obsid,
+            slew.rate_fraction,
+            mode,
+        )
+        if key in memo:
+            return memo[key]
+        violation = self.ctx.first_slew_violation(slew, mode)
+        memo[key] = violation
+        return violation
+
+    def _energy_peaks(self, energy: Sequence[Additions]) -> list[float]:
+        """The battery's peak in each segment for ``energy``, walked once
+        when the same energy is asked about again straight after."""
+        memo = self._peaks_memo
+        if memo is not None and memo[0] is self._battery and memo[1] is energy:
+            return memo[2]
+        peaks = self._battery.peaks(energy)
+        self._peaks_memo = (self._battery, energy, peaks)
+        return peaks
+
     def _timeline_energy(self, timeline: Sequence[_Block]) -> tuple[Additions, ...]:
         """What a timeline draws from the battery, by segment, every span at the
         attitude the spacecraft holds through it: each block over its slew and
@@ -1145,22 +1460,95 @@ class PriorityScheduler:
             if self._origin is not None
             else self.ctx.initial_attitude(self.ctx.ustart)
         )
-
-        def add(addition: Addition | None) -> None:
-            if addition is not None:
-                planned[ledger.segment(addition.begin)].append(addition)
+        uend = self.ctx.uend
+        block_energy = self._block_energy
+        idle_energy = self._idle_energy
 
         for block in sorted(timeline, key=lambda b: float(b.entry.begin)):
             begin = float(block.entry.begin)
             if begin > cursor:
-                add(ledger.hold_addition(held, ACSMode.IDLE, cursor, begin))
-            addition = self._block_addition(block)
-            add(addition)
-            cursor = max(cursor, addition.end)
+                idle, segment = idle_energy(held, cursor, begin)
+                if idle is not None:
+                    planned[segment].append(idle)
+            addition, segment = block_energy(block)
+            planned[segment].append(addition)
+            if addition.end > cursor:
+                cursor = addition.end
             held = block.attitude_out
-        if self.ctx.uend > cursor:
-            add(ledger.hold_addition(held, ACSMode.IDLE, cursor, self.ctx.uend))
+        if uend > cursor:
+            idle, segment = idle_energy(held, cursor, uend)
+            if idle is not None:
+                planned[segment].append(idle)
         return tuple(tuple(sorted(group)) for group in planned)
+
+    def _idle_energy(
+        self, held: Attitude, begin: float, end: float
+    ) -> tuple[Addition | None, int]:
+        """What idling at ``held`` over a span draws from the battery, and
+        the segment it starts in: the ledger's hold addition, asked for once
+        per ledger for each attitude and span."""
+        ledger = self._battery
+        owner, memo = self._idle_energy_memo
+        if owner is not ledger:
+            memo = {}
+            self._idle_energy_memo = (ledger, memo)
+        key = (held, begin, end)
+        found = memo.get(key)
+        if found is None:
+            addition = ledger.hold_addition(held, ACSMode.IDLE, begin, end)
+            found = (
+                addition,
+                ledger.segment(addition.begin) if addition is not None else 0,
+            )
+            memo[key] = found
+        return found
+
+    def _block_energy(self, block: _Block) -> tuple[Addition, int]:
+        """A block's battery addition (see :meth:`_block_addition`) and the
+        segment it starts in, asked of the ledger once while the block is
+        unchanged.
+
+        The ledger's addition is fixed by the entry, its slew and the times,
+        attitude and hold start on the entry and block. The answer is kept
+        with those, and used again only for the same block object with the
+        same entry and slew objects and equal values; a visit's block is
+        asked for every time.
+        """
+        if block.steps:
+            addition = self._block_addition(block)
+            return addition, self._battery.segment(addition.begin)
+        ledger = self._battery
+        owner, memo = self._block_energy_memo
+        if owner is not ledger or len(memo) > _BLOCK_ENERGY_MEMO_SIZE:
+            memo = {}
+            self._block_energy_memo = (ledger, memo)
+        entry = block.entry
+        values = (
+            entry.begin,
+            entry.slewtime,
+            entry.end,
+            entry.ra,
+            entry.dec,
+            entry.roll,
+            entry.activity_hold_begin,
+            block.end,
+        )
+        found = memo.get(id(block))
+        if (
+            found is not None
+            and found.block is block
+            and found.entry is entry
+            and found.slew is block.slew
+            and found.gspass is block.gspass
+            and found.values == values
+        ):
+            return found.addition, found.segment
+        addition = self._block_addition(block)
+        segment = ledger.segment(addition.begin)
+        memo[id(block)] = _BlockEnergy(
+            block, entry, block.slew, block.gspass, values, addition, segment
+        )
+        return addition, segment
 
     def _block_addition(self, block: _Block) -> Addition:
         """What a block draws from the battery over its slew and hold, with the
@@ -1196,8 +1584,9 @@ class PriorityScheduler:
         return addition
 
     def _charged_energy(self, timeline: Sequence[_Block]) -> tuple[Additions, ...]:
-        """A timeline's energy with the charges its idle sunlit time holds."""
-        return self._timeline_energy(self._charged_timeline(list(timeline)))
+        """A timeline's energy with the charges its full forecast requires."""
+        charged, energy = self._charged_with_energy(list(timeline))
+        return energy if energy is not None else self._timeline_energy(charged)
 
     def _block_additions(self, block: _Block) -> list[tuple[int, RecorderAmount]]:
         """Each science step's data in its store and contact segment."""
@@ -1244,17 +1633,20 @@ class PriorityScheduler:
                 "step_size": self.ctx.step_size,
             },
         )
-        self._log_slew_requirements(self.plan)
+        self._log_requirements(self.plan)
         return self.plan
 
-    def _log_slew_requirements(self, plan: Plan) -> None:
-        """Say which of the plan's slews take longer than their requirement
-        class allows, where the ACS has a table; the plan stands."""
-        from ..simulation.slew_requirements import check_plan
+    def _log_requirements(self, plan: Plan) -> None:
+        """Log each violation of the mission's requirements that the plan
+        alone shows, such as a slew over its class's time. The plan is not
+        changed."""
+        from ..requirements import check_requirements
 
-        for violation in check_plan(plan, self.config.spacecraft_bus.attitude_control):
+        for violation in check_requirements(self.config, list(plan)).violations:
             self._log(
-                violation.utime, f"Slew requirement: {violation}", violation.obsid
+                violation.utime,
+                f"Requirement {violation.requirement}: {violation}",
+                violation.obsid,
             )
 
     def _place_requests(self, requests: Sequence[_Request]) -> None:
@@ -1266,15 +1658,22 @@ class PriorityScheduler:
         # The request for the rest of a target's exposure can start with none,
         # all of it allocated, and take allocated seconds that do not fit.
         active = [request for request in requests if request.wants_more]
+        self._group_needed: dict[str, float] = defaultdict(float)
+        """Exposure the requests of each consecutive group have to place."""
+        for request in active:
+            if request.group is not None and request.group.consecutive:
+                self._group_needed[request.group.name] += request.remaining
         order = {id(request): k for k, request in enumerate(requests)}
         placed = dict.fromkeys(order, 0)
         self._program_seconds = dict(self._delivered)
         """Science by program: collected, committed and planned so far."""
         self._cut_short: list[_Request] = []
         """Requests a move has cut short since the last placement."""
-        following: ObservationGroup | None = None
+        following: ObservationGroup | None = self._group_under_way(active)
         """A group that prefers contiguity whose target was just placed: its
-        other targets go next, as the queue follows a group in dispatch."""
+        other targets go next, as the queue follows a group in dispatch. A
+        consecutive group is followed until it has finished, and from the
+        start where it is already under way."""
         while active:
             shares = program_shares(self._program_seconds)
             pool = active
@@ -1284,6 +1683,14 @@ class PriorityScheduler:
                     pool = members
                 else:
                     following = None
+            # A member of a consecutive group waits for the members before it.
+            pool = [r for r in pool if self._members_turn(r, active)]
+            if not pool:
+                # Every remaining request follows a group member that this
+                # plan is not placing, so none of them can be placed.
+                self._drop_members_waiting(active)
+                following = None
+                continue
             # The original order breaks ties only; a merge can change value
             # even when completion-deficit balancing is disabled.
             request = max(
@@ -1299,6 +1706,9 @@ class PriorityScheduler:
                     request.next_visit(
                         self._last_visit.get(int(request.target.obsid)),
                         self.ctx.ustart,
+                        after_visit=self._last_visit_window.get(
+                            int(request.target.obsid)
+                        ),
                     ),
                     self.ctx,
                 )
@@ -1321,7 +1731,11 @@ class PriorityScheduler:
                 # Freeze the value the snapshot was selected at onto its entry,
                 # as dispatch does: a Target of Opportunity must beat it to
                 # interrupt the observation.
-                block.entry.merit = self._value(request, shares)
+                before = self._programs_before(self.timeline, float(block.entry.begin))
+                value = self._value(request, program_shares(before), block.entry)
+                for entry in block.steps or [block.entry]:
+                    entry.merit = value
+                block.entry.merit = value
                 collected = _collection_seconds(block)
                 request.remaining -= collected
                 request.placed_before = True
@@ -1329,7 +1743,8 @@ class PriorityScheduler:
                 self._record_visit(request, block)
                 following = (
                     request.group
-                    if request.group is not None and request.group.prefer_contiguous
+                    if request.group is not None
+                    and (request.group.prefer_contiguous or request.group.consecutive)
                     else None
                 )
                 if request.wants_more:
@@ -1337,7 +1752,24 @@ class PriorityScheduler:
             # By identity: a request for allocated time can equal the request
             # for the rest of its target's exposure field for field.
             active[:] = [r for r in active if r is not request]
+            unfinished = request.remaining >= max(
+                request.minimum_snapshot, self.ctx.step_size
+            )
             self._return_allocated_time(request, active, order)
+            if unfinished:
+                self._end_consecutive_group(request, active)
+
+        # Insertion order need not be chronological: an earlier gap can be
+        # filled after a future visit was selected. Refresh owned snapshots
+        # from their actual predecessors, preserving committed entries.
+        for block in self.timeline:
+            placed_request = self._movable.get(id(block))
+            if placed_request is None:
+                continue
+            before = self._programs_before(self.timeline, float(block.entry.begin))
+            value = self._value(placed_request, program_shares(before), block.entry)
+            for entry in [block.entry, *block.steps]:
+                entry.merit = value
 
         # Checked once all are placed: moving a snapshot later to make room
         # can cut short a request that was already finished.
@@ -1372,6 +1804,208 @@ class PriorityScheduler:
                     f"unplanned after {placed[id(request)]} snapshot(s)",
                     request.target.obsid,
                 )
+
+    def _consecutive_group(self, obsid: int) -> ObservationGroup | None:
+        """The consecutive observation group ``obsid`` is a member of, if any."""
+        group = self._merit_model.groups.group_of(obsid)
+        return group if group is not None and group.consecutive else None
+
+    def _members_turn(self, request: _Request, active: Sequence[_Request]) -> bool:
+        """Whether a request may be placed now as far as its group's order
+        goes: always, unless it is in a consecutive group and a member
+        before it still has exposure to collect."""
+        return self._waits_for(request, active) is None
+
+    def _waits_for(self, request: _Request, active: Sequence[_Request]) -> int | None:
+        """The first member of a consecutive group that ``request`` has to
+        follow and that is not finished, or None where it may be placed.
+
+        A member is finished when it has no exposure left once the science
+        on the timeline and the science committed outside it are counted.
+        An earlier member that still needs exposure blocks ``request`` even
+        when this plan is not placing that member (for example because it
+        cannot be observed in the horizon). Placing ``request`` would then
+        observe it out of order, so it is left for a later plan. A member
+        that is not among the scheduler's targets is ignored.
+        """
+        group = request.group
+        if group is None or not group.consecutive:
+            return None
+        position = group.members.index(int(request.target.obsid))
+        placing = {int(r.target.obsid) for r in active}
+        placed: dict[int, float] | None = None
+        for obsid in group.members[:position]:
+            if obsid in placing:
+                return obsid
+            target = self._targets_by_obsid.get(obsid)
+            if target is None or target.done:
+                continue
+            if placed is None:
+                placed = self._reserved_collection()
+            exptime = target.exptime if target.exptime is not None else target.ss_max
+            left = (
+                float(exptime)
+                - placed.get(obsid, 0.0)
+                - self.reserved_seconds.get(obsid, 0.0)
+            )
+            if left >= snapshot_min_seconds(target, self.ctx.step_size):
+                return obsid
+        return None
+
+    def _drop_members_waiting(self, active: list[_Request]) -> None:
+        """Remove each request whose consecutive group has an earlier member
+        that still needs exposure and is not being placed in this plan. Such
+        a request cannot be placed without breaking the group's order."""
+        placing = {int(r.target.obsid) for r in active}
+        waiting: dict[str, tuple[int, list[_Request]]] = {}
+        for request in active:
+            obsid = self._waits_for(request, active)
+            if obsid is None or obsid in placing or request.group is None:
+                continue
+            waiting.setdefault(request.group.name, (obsid, []))[1].append(request)
+        dropped = {id(r) for _, requests in waiting.values() for r in requests}
+        active[:] = [r for r in active if id(r) not in dropped]
+        for name, (obsid, requests) in waiting.items():
+            self._log(
+                self.ctx.ustart,
+                f"Consecutive group {name!r} waits for member {obsid}, which "
+                f"this plan does not place: members "
+                f"{sorted({int(r.target.obsid) for r in requests})} are not placed",
+                obsid,
+            )
+
+    def _group_under_way(self, active: Sequence[_Request]) -> ObservationGroup | None:
+        """A consecutive group that has begun and has members still to
+        place: one of its members has collected science, or has science
+        committed or kept on the timeline. Its remaining members are placed
+        before anything else."""
+        on_timeline = {
+            int(block.entry.obsid) for block in self.timeline if not block.is_fixed
+        }
+        begun = {
+            int(target.obsid)
+            for target in self.targets
+            if target.done
+            or target.collected_seconds > 0.0
+            or self.reserved_seconds.get(int(target.obsid), 0.0) > 0.0
+        }
+        for request in active:
+            group = request.group
+            if group is None or not group.consecutive:
+                continue
+            if any(obsid in on_timeline or obsid in begun for obsid in group.members):
+                return group
+        return None
+
+    def _end_consecutive_group(self, request: _Request, active: list[_Request]) -> None:
+        """End a consecutive group at a member that cannot be finished: the
+        members after it are not placed, since they follow it in order."""
+        group = request.group
+        if group is None or not group.consecutive:
+            return
+        obsid = int(request.target.obsid)
+        if any(int(r.target.obsid) == obsid for r in active):
+            return
+        dropped = [r for r in active if r.group is group]
+        if not dropped:
+            return
+        active[:] = [r for r in active if r.group is not group]
+        self._log(
+            self.ctx.ustart,
+            f"Consecutive group {group.name!r} ends at member {obsid}, which "
+            f"cannot be finished in this plan: members "
+            f"{sorted({int(r.target.obsid) for r in dropped})} are not placed",
+            obsid,
+        )
+
+    def _closed_gaps(self, timeline: Sequence[_Block]) -> frozenset[int]:
+        """The positions of ``timeline`` between the first and the last
+        block of a consecutive group, where no other science is placed."""
+        if not self.config.observation_groups.consecutive:
+            return frozenset()
+        spans: dict[str, tuple[int, int]] = {}
+        for index, block in enumerate(timeline):
+            if block.is_fixed:
+                continue
+            group = self._consecutive_group(int(block.entry.obsid))
+            if group is not None:
+                first, _ = spans.get(group.name, (index, index))
+                spans[group.name] = (first, index)
+        return frozenset(
+            index
+            for first, last in spans.values()
+            for index in range(first + 1, last + 1)
+        )
+
+    def _open_gaps(self, request: _Request) -> tuple[int, int, frozenset[int]]:
+        """The timeline positions a snapshot of ``request`` may be placed
+        at, as far as consecutive groups go: the first and last position,
+        and the positions between them that are closed.
+
+        No science of another target goes between the first and the last
+        block of a consecutive group. A member of such a group goes after
+        the group's last block and before the next science of another
+        target. The group's first block goes where the time before the next
+        science of another target is at least the exposure the group's
+        requests still have to place, or runs to the end of the horizon.
+        """
+        timeline = self.timeline
+        own = request.group if request.group is not None else None
+        if own is not None and not own.consecutive:
+            own = None
+        spans: dict[str, tuple[int, int]] = {}
+        own_members = set(own.members) if own is not None else set()
+        for index, block in enumerate(timeline):
+            if block.is_fixed:
+                continue
+            group = self._consecutive_group(int(block.entry.obsid))
+            if group is None:
+                continue
+            first, _ = spans.get(group.name, (index, index))
+            spans[group.name] = (first, index)
+        closed: set[int] = set()
+        for name, (first, last) in spans.items():
+            if own is None or name != own.name:
+                closed.update(range(first + 1, last + 1))
+        lowest, highest = 0, len(timeline)
+        if own is None:
+            return lowest, highest, frozenset(closed)
+        foreign = [
+            index
+            for index, block in enumerate(timeline)
+            if not block.is_fixed and int(block.entry.obsid) not in own_members
+        ]
+        if own.name in spans:
+            lowest = spans[own.name][1] + 1
+            highest = next((index for index in foreign if index >= lowest), highest)
+            return lowest, highest, frozenset(closed)
+        if self._begun_before_horizon(own):
+            return lowest, highest, frozenset(closed)
+        needed = self._group_needed.get(own.name, 0.0)
+        for index in range(len(timeline) + 1):
+            following = next((k for k in foreign if k >= index), None)
+            if following is None:
+                continue
+            pred = self._pred_at(index)
+            free_from = max(
+                self.ctx.ustart, pred.end if pred is not None else self.ctx.ustart
+            )
+            if float(timeline[following].entry.begin) - free_from < needed:
+                closed.add(index)
+        return lowest, highest, frozenset(closed)
+
+    def _begun_before_horizon(self, group: ObservationGroup) -> bool:
+        """Whether a member of ``group`` collected science before this plan."""
+        members = set(group.members)
+        return any(
+            int(target.obsid) in members
+            and (
+                target.done
+                or target.collected_seconds > 0.0
+                or self.reserved_seconds.get(int(target.obsid), 0.0) > 0.0
+            )
+            for target in self.targets
+        )
 
     def _reactivate_cut_short(
         self, active: list[_Request], order: Mapping[int, int]
@@ -1449,11 +2083,57 @@ class PriorityScheduler:
         into.whole = seconds <= float(into.target.ss_max)
         request.remaining = 0.0
 
-    def _value(self, request: _Request, shares: Mapping[str, float]) -> float:
-        """Value of a snapshot of ``request`` when the plan delivers ``shares``."""
+    def _value(
+        self,
+        request: _Request,
+        shares: Mapping[str, float],
+        entry: PlanEntry | None = None,
+    ) -> float:
+        """Snapshot value at its planned decision and preceding delivered shares.
+
+        Without an entry this is the horizon-origin ranking estimate. Once a
+        placement exists, urgency uses its own visit, visibility and slew start.
+        """
+        value = request.steady_value
+        urgency = request.merit.urgency
+        if entry is not None and self._merit_model.urgency_weight > 0:
+            if request.timed and request.visit != entry.visit:
+                request = request.model_copy(update={"visit": entry.visit})
+            windows = entry.windows or request.windows
+            collect = (
+                entry.collection_begin
+                if entry.collection_begin is not None
+                else float(entry.begin)
+            )
+            window = next((w for w in windows if w[0] <= collect < w[1]), None)
+            deadline = (
+                request.target.visit_windows[request.visit].deadline
+                if request.timed and request.visit is not None
+                else request.target.deadline
+            )
+            close = MeritModel.urgency_close(deadline, windows, window)
+            urgency = self._merit_model.urgency_weight * (
+                self._merit_model.urgency_factor(float(entry.begin), close)
+            )
+        if entry is not None:
+            # Replacing the origin urgency by subtraction can create a one-ULP
+            # advantage over dispatch for an identical decision. Rebuild the
+            # terms in the shared model's order, including allocation bonuses.
+            deficit = self._deficit_weight * MeritModel.completion_deficit(
+                request.category, shares
+            )
+            value = MeritBreakdown.sum_value_terms(
+                request.merit.base,
+                urgency,
+                self._merit_model.cadence_weight
+                if request.cadence is not None
+                else 0.0,
+                deficit,
+            )
+            return MeritBreakdown.allocated_value(value, request.value_factor)
         if not self._deficit_weight:
-            return request.steady_value
-        return request.steady_value + request.value_factor * self._deficit_weight * (
+            return value
+        return value + request.value_factor * self._deficit_weight * (
             MeritModel.completion_deficit(request.category, shares)
         )
 
@@ -1523,7 +2203,9 @@ class PriorityScheduler:
     def _record_visit(self, request: _Request, block: _Block) -> None:
         """Count a placed snapshot towards its program and the target's last visit."""
         entry = block.entry
-        seconds = entry.collection_seconds_between(entry.begin, entry.end)
+        # A sequence's composite span also contains calibration and slews.
+        # Science budgets and program shares count only its science steps.
+        seconds = _collection_seconds(block)
         program = request.category.program_name
         self._program_seconds[program] = (
             self._program_seconds.get(program, 0.0) + seconds
@@ -1543,12 +2225,20 @@ class PriorityScheduler:
                 self._last_visit.get(obsid, float("-inf")), float(entry.collection_end)
             )
             self._planned_visits[obsid].append(block)
+            if entry.visit is not None:
+                self._last_visit_window[obsid] = max(
+                    self._last_visit_window.get(obsid, -1), entry.visit
+                )
 
     # ── Requests ──────────────────────────────────────────────────────────
 
     def _requests(self) -> list[_Request]:
         """Return the requests in planning order: value, then a stable tie-break."""
+        # Each new pass starts from its own request metadata and configuration.
+        # Later placement attempts in this pass only read these pointings.
+        self._sequence_pointings.clear()
         merit_model = MeritModel(self.config)
+        self._merit_model = merit_model
         # Science committed outside this plan or locked into it will be
         # collected before what this plan places.
         reserved = self._reserved_collection()
@@ -1556,21 +2246,57 @@ class PriorityScheduler:
             reserved[obsid] += seconds
         seed = self.config.random_seed if self.config.random_seed is not None else 0
         self._delivered: dict[str, float] = {}
-        """Science already collected, by program."""
+        """Science collected before the horizon, including external commitments.
+
+        Science reserved inside this timeline belongs to exposure and budget
+        accounting immediately, but to delivered shares only after collection.
+        """
         self._category_seconds: dict[str, float] = {}
         """Science collected, committed and planned so far, by category, for
         the categories' time budgets."""
         self._group_seconds: dict[str, float] = {}
         """The same by observation group, for the groups' time budgets."""
         self._last_visit: dict[int, float] = {}
+        self._last_visit_window = dict(self._kept_visit_windows)
         """When each cadence target was last observed, collected or planned."""
         for target in self.targets:
             obsid = int(target.obsid)
+            if target.visit_windows and self.reserved_visit_windows is not None:
+                # An explicit empty history must stay empty in decoders too;
+                # elapsed time alone cannot complete a delayed cut attempt.
+                self._last_visit_window.setdefault(obsid, -1)
+            reserved_window = (
+                self.reserved_visit_windows.get(obsid)
+                if self.reserved_visit_windows is not None
+                else None
+            )
+            reserved_end = self.reserved_visits.get(obsid)
+            if (
+                reserved_window is None
+                and self.reserved_visit_windows is None
+                and reserved_end is not None
+                and target.visit_windows
+            ):
+                # Legacy callers give only an end time. A recorded window is
+                # authoritative: calibration and slews may cross later openings.
+                reserved_window = target.visit_index_at(
+                    reserved_end - target.per_visit_seconds
+                )
+            if reserved_window is not None:
+                self._last_visit_window[obsid] = max(
+                    self._last_visit_window.get(obsid, -1), reserved_window
+                )
+            if target.visits_done:
+                self._last_visit_window[obsid] = max(
+                    self._last_visit_window.get(obsid, -1), *target.visits_done
+                )
+            delivered = target.collected_seconds + self.reserved_seconds.get(obsid, 0.0)
+            if delivered > 0.0:
+                program = merit_model.category(target).program_name
+                self._delivered[program] = self._delivered.get(program, 0.0) + delivered
             seconds = target.collected_seconds + reserved.get(obsid, 0.0)
             if seconds > 0.0:
                 category = merit_model.category(target)
-                program = category.program_name
-                self._delivered[program] = self._delivered.get(program, 0.0) + seconds
                 self._category_seconds[category.name] = (
                     self._category_seconds.get(category.name, 0.0) + seconds
                 )
@@ -1586,6 +2312,10 @@ class PriorityScheduler:
                 index = target.visit_index_at(last_collection)
                 if index is not None and not target.visit_complete(index):
                     last_collection = None
+            if last_collection is not None and target.last_observation_cut:
+                # Nor is an observation cut short a visit to wait a cadence
+                # after: what it left is placed without that wait.
+                last_collection = None
             visits = [
                 t
                 for t in (
@@ -1617,16 +2347,25 @@ class PriorityScheduler:
                 # a committed visit's window, and not closed before the plan.
                 last = self._last_visit.get(int(target.obsid))
                 visited = set(target.visits_done)
-                if last is not None:
+                index = self._last_visit_window.get(int(target.obsid))
+                if (
+                    index is None
+                    and last is not None
+                    and self.reserved_visit_windows is None
+                ):
                     index = target.visit_index_at(last - target.per_visit_seconds)
-                    if index is not None:
-                        visited.update(range(index + 1))
+                if index is not None:
+                    visited.update(range(index + 1))
                 candidates = [
                     k
                     for k, window in enumerate(target.visit_windows)
                     if k not in visited and window.deadline >= self.ctx.ustart
                 ]
                 remaining = target.per_visit_seconds * len(candidates)
+            grouped = merit_model.groups.position(int(target.obsid)) is not None
+            if grouped != self._placing_groups:
+                # Consecutive groups are placed in a pass of their own.
+                continue
             if (
                 target.done
                 or int(target.obsid) in self.held
@@ -1662,6 +2401,11 @@ class PriorityScheduler:
         # Allocated time is worth its request's value plus the bonus.
         self._allocated_factor = 1.0 + self.allocation_bonus
         requests.sort(key=self._rank, reverse=True)
+        self._cadences = {
+            int(request.target.obsid): request.cadence
+            for request in requests
+            if request.cadence is not None
+        }
         return requests
 
     def _entry_visibility(self, entry: PlanEntry) -> None:
@@ -1687,7 +2431,9 @@ class PriorityScheduler:
                 # The target's own windows, computed once and kept with
                 # it from plan to plan: a candidate at its pointing, or
                 # along its track, has the same.
-                if not target.windows:
+                if not target.windows or target._visibility_key is not None:
+                    # A caller may have queried only part of this target's span.
+                    # The planner needs complete coverage for its existing API.
                     target.visibility()
                 windows = [list(w) for w in target.windows]
             else:
@@ -1822,6 +2568,41 @@ class PriorityScheduler:
             reserved[int(block.entry.obsid)] += _collection_seconds(block)
         return reserved
 
+    def _programs_before(
+        self, timeline: Sequence[_Block], utime: float
+    ) -> dict[str, float]:
+        """Delivered science at a decision, excluding future reservations.
+
+        Whole-plan exposure and budget reservations are kept separately. Only
+        non-calibration collection after this horizon's origin and before the
+        decision is added to its initial delivered history.
+        """
+        programs = dict(self._delivered)
+        self._add_program_collection(programs, timeline, utime)
+        return programs
+
+    def _add_program_collection(
+        self,
+        programs: dict[str, float],
+        timeline: Sequence[_Block],
+        utime: float,
+    ) -> None:
+        """Add only the supplied blocks' science collected before a decision."""
+        for block in timeline:
+            if block.is_fixed:
+                continue
+            seconds = sum(
+                entry.collection_seconds_between(self.ctx.ustart, utime)
+                for entry in block.steps or [block.entry]
+                if not entry.calibration
+            )
+            if seconds <= 0.0:
+                continue
+            program = self.config.observation_categories.get_category(
+                int(block.entry.obsid)
+            ).program_name
+            programs[program] = programs.get(program, 0.0) + seconds
+
     # ── Timeline neighbours and connections ──────────────────────────────
 
     def _pred_at(self, index: int) -> _Block | None:
@@ -1845,11 +2626,10 @@ class PriorityScheduler:
 
     def _idle_limit(self, pred: _Block | None, earliest: float, until: float) -> float:
         """Return the latest step a slew can start while ``pred``'s held attitude stays safe."""
-        if pred is None:
-            # Before its first command ACS keeps the initial attitude safe itself.
-            return until
+        # The first command also needs a known, safe origin. Autonomous idle
+        # recovery cannot be assumed to leave the pose used by this plan.
         violation = self.ctx.first_hold_violation(
-            pred.attitude_out, earliest, until, ACSMode.IDLE
+            self._start_attitude(pred, earliest), earliest, until, ACSMode.IDLE
         )
         return until if violation is None else violation
 
@@ -1868,15 +2648,131 @@ class PriorityScheduler:
         reached by a slew of no length to the attitude it is at, which it
         must then hold through its length; where that attitude cannot be
         held, through the block or on through the idle time to the block
-        after it, the block slews to the safe idle attitude of its start
-        instead, the one the simulation holds before its first command.
+        after it, the block searches safe hold attitudes with a validated
+        ingress instead.
+
+        The latest slew start at which ``pred``'s attitude is still safe to
+        hold is the same for every attitude the block could take. Where it
+        is before ``earliest``, no slew can start, so the safe hold
+        attitudes are not searched.
+
+        A cadence visit already on the timeline keeps its slew start as the
+        earliest it may start (see :meth:`_cadence_floor`).
+
+        A block that follows holds the attitude of ``pred`` only where it
+        begins too soon after ``pred`` ends for a slew elsewhere. With time
+        for one, it is held at its safe hold attitude (see
+        :meth:`_safe_hold`). The attitude a block that follows holds is then
+        the same whatever science is placed, hours before it, on the far
+        side of idle time, and the block after it stays reachable.
         """
-        slew = self._connect_to(pred, block, earliest, attitude_in)
-        if slew is None and block.follows and attitude_in is None:
-            slew = self._connect_to(
-                pred, block, earliest, self.ctx.initial_attitude(block.ready)
-            )
+        floor = self._cadence_floor(block)
+        if floor is not None:
+            earliest = max(earliest, floor)
+        idle_limit = self._idle_limit(pred, earliest, block.ready)
+        if (
+            block.follows
+            and attitude_in is None
+            and pred is not None
+            # After science only: a block after a fixed block holds what
+            # that block holds, and a dump is a hold at the attitude the
+            # spacecraft is at.
+            and not pred.is_fixed
+            and not block.entry.desaturation
+            and self._would_begin(block, pred) - pred.end > self._slew_bound
+        ):
+            safe = self._safe_hold(block)
+            if safe is not None:
+                held = self._connect_to(pred, block, earliest, safe, idle_limit)
+                if held is not None:
+                    return held
+        slew = self._connect_to(pred, block, earliest, attitude_in, idle_limit)
+        if (
+            slew is None
+            and block.follows
+            and attitude_in is None
+            and idle_limit >= earliest
+        ):
+            mode = block.entry.activity_mode
+            for target in self.ctx.idle_hold_candidates(
+                self._start_attitude(pred, earliest), block.ready
+            ):
+                if (
+                    self.ctx.first_hold_violation(
+                        target, block.ready, self.ctx.ceil_step(block.end), mode
+                    )
+                    is not None
+                ):
+                    continue
+                slew = self._connect_to(pred, block, earliest, target, idle_limit)
+                if slew is not None:
+                    break
         return slew
+
+    def _would_begin(self, block: _Block, pred: _Block) -> float:
+        """When a following ``block`` begins after ``pred``: where it is,
+        or, for one that may begin late, where it settles after ``pred``
+        (see :meth:`_settle_block`)."""
+        activity = block.activity
+        if activity is None:
+            return block.ready
+        begin = max(
+            activity.begin,
+            self.ctx.ceil_step(self.ctx.ustart),
+            self.ctx.ceil_step(pred.end),
+        )
+        return min(begin, self._reserved_ready(block))
+
+    def _safe_hold(self, block: _Block) -> Attitude | None:
+        """One attitude a following block can hold wherever it is settled,
+        idle or in its own mode; None where none of the first candidates
+        can be held. Found once for each activity."""
+        if not block.is_activity or block.entry.obsid is None:
+            return None
+        key = int(block.entry.obsid)
+        if key in self._safe_holds:
+            return self._safe_holds[key]
+        # An activity that may begin late is held anywhere from its start to
+        # the end of its reservation; any other, where it is.
+        activity = block.activity
+        if activity is not None:
+            begin = max(activity.begin, self.ctx.ceil_step(self.ctx.ustart))
+            end = self._activity_end(activity, self._reserved_ready(block))
+        else:
+            begin, end = block.ready, block.end
+        end = self.ctx.ceil_step(end)
+        mode = block.entry.activity_mode
+        found: Attitude | None = None
+        candidates = self.ctx.idle_hold_candidates(
+            self.ctx.initial_attitude(begin), begin
+        )
+        for _, target in zip(range(_SAFE_HOLD_CANDIDATES), candidates):
+            if (
+                self.ctx.first_hold_violation(target, begin, end, ACSMode.IDLE) is None
+                and self.ctx.first_hold_violation(target, begin, end, mode) is None
+            ):
+                found = target
+                break
+        self._safe_holds[key] = found
+        return found
+
+    def _cadence_floor(self, block: _Block) -> float | None:
+        """The earliest the slew into a cadence visit already on the
+        timeline may start when the slew is found again: where it starts
+        now. None for any other block.
+
+        The visit was placed with its slew starting at least a cadence after
+        the request's previous visit ended. A snapshot placed before it can
+        make the slew into it longer, and a slew that still arrives when the
+        visit begins then starts earlier. Starting no earlier than it did
+        keeps the visit's spacing, as a visit moved later keeps it (see
+        :meth:`_fit_delaying_run`).
+        """
+        if block.is_fixed or block.slew is None:
+            return None
+        if int(block.entry.obsid) not in self._cadences:
+            return None
+        return float(block.slew.slewstart)
 
     def _connect_to(
         self,
@@ -1884,10 +2780,12 @@ class PriorityScheduler:
         block: _Block,
         earliest: float,
         attitude_in: Attitude | None,
+        idle_limit: float,
     ) -> Slew | None:
         """Find the slew into ``block`` after ``pred`` to ``attitude_in``, or to
         the block's own attitude, or, for a block that follows, the attitude
-        it is at."""
+        it is at. ``idle_limit`` is the latest step the slew can start while
+        ``pred``'s attitude stays safe (see :meth:`_idle_limit`)."""
         if block.is_pass:
             obstype = ObsType.GSP
         elif block.is_charge:
@@ -1896,13 +2794,10 @@ class PriorityScheduler:
             obstype = ObsType.IDLE
         else:
             obstype = ObsType.PPT
-        idle_limit = self._idle_limit(pred, earliest, block.ready)
-
-        start = self.ctx.floor_step(block.ready)
+        # Every start is a grid step, so the first one to try is the last
+        # step at or before both the block's ready time and the idle limit.
+        start = self.ctx.floor_step(min(block.ready, idle_limit))
         while start >= earliest:
-            if start > idle_limit:
-                start -= self.ctx.step_size
-                continue
             if attitude_in is not None:
                 target = attitude_in
             elif block.follows:
@@ -1937,7 +2832,7 @@ class PriorityScheduler:
     ) -> "_Verdict":
         """Check a slew into ``block`` and the wait at its attitude before it starts."""
         mode = ACSMode.PASS if block.is_pass else ACSMode.SLEWING
-        if self.ctx.first_slew_violation(slew, mode) is not None:
+        if self._first_slew_violation(slew, mode) is not None:
             return _Verdict.SLEW_NOT_ALLOWED
         if block.is_pass:
             # After the ingress slew, ACS idles on the track until contact.
@@ -1947,7 +2842,16 @@ class PriorityScheduler:
                 self.ctx.ceil_step(block.ready),
                 ACSMode.IDLE,
             )
-        elif block.is_charge or block.is_activity:
+        elif block.is_activity:
+            wait_violation = self.ctx.first_hold_violation(
+                target, slew.slewend, self.ctx.ceil_step(block.ready), ACSMode.IDLE
+            )
+            if wait_violation is None:
+                mode = block.entry.activity_mode
+                wait_violation = self.ctx.first_hold_violation(
+                    target, block.ready, self.ctx.ceil_step(block.end), mode
+                )
+        elif block.is_charge:
             # A following block holds the attitude it is given through its
             # length too; a reserved one was checked when it was placed.
             until = block.end if block.follows else block.ready
@@ -1959,7 +2863,7 @@ class PriorityScheduler:
             needed = self._visibility_needed_at(slew)
             if not block.entry.visible(needed, needed):
                 return _Verdict.SLEW_NOT_ALLOWED
-            wait_violation = self.ctx.first_science_violation(
+            wait_violation = self._first_science_violation(
                 block.entry, target, slew.slewend, block.ready
             )
         return _Verdict.OK if wait_violation is None else _Verdict.WAIT_NOT_ALLOWED
@@ -1997,7 +2901,20 @@ class PriorityScheduler:
         placing it did. False, and the block is left out to be placed
         again, where what follows it cannot be reached from it."""
         assert block.slew is not None
-        index = self._insertion_index(block.ready)
+        # A previously inserted entry may have settled a sliding activity
+        # earlier. The retained slew must precede it even when arrival is
+        # after its current hold start; reconnecting settles the hold again.
+        index = self._insertion_index(block.slew_start)
+        if index > 0:
+            previous = self.timeline[index - 1]
+            if previous.is_activity and previous.ready == block.slew_start:
+                # A preceding retained observation can settle a sliding hold to
+                # exactly this start. Put this retained slew before the hold and
+                # reconnect it; placing it after would overlap the whole hold.
+                index -= 1
+        pred = self._pred_at(index)
+        if pred is not None and self.ctx.ceil_step(pred.end) > block.slew_start:
+            return False
         succ = self.timeline[index] if index < len(self.timeline) else None
         succ_slew = None
         if succ is not None:
@@ -2026,12 +2943,18 @@ class PriorityScheduler:
         A successor that is a contact adds what its slew generates to the
         recorder; once the ledger exists, that is kept current here.
         """
+        track_data = not self._reserving and getattr(self, "_ledger", None) is not None
+        previous = (
+            [
+                b.model_copy(update={"entry": b.entry.model_copy()})
+                for b in self.timeline
+                if b.is_activity or b.is_pass
+            ]
+            if track_data
+            else []
+        )
         self._apply_slew(block, slew)
         if succ is not None and succ_slew is not None:
-            if getattr(self, "_ledger", None) is not None:
-                self._volumes = self._ledger.add_all(
-                    self._volumes, self._ingress_deltas(succ, succ_slew)
-                )
             self._apply_slew(succ, succ_slew)
         self.timeline.insert(index, block)
         if succ is not None and succ.activity is not None:
@@ -2041,6 +2964,10 @@ class PriorityScheduler:
             self._reconnect_following(index)
         elif succ is not None and succ.follows:
             self._reconnect_following(index + 1)
+        if track_data:
+            self._volumes = self._ledger.add_all(
+                self._volumes, self._fixed_data_changes(previous, self.timeline)
+            )
         if not self._reserving:
             # While the fixed blocks are placed, the energy is taken once at
             # the end (see _reserve_fixed): nothing reads it in between.
@@ -2061,9 +2988,13 @@ class PriorityScheduler:
             entry.sun_vector_change_deg = float(slew.sun_vector_change_deg)
             entry.settle_seconds = float(slew.settle_seconds or 0.0)
         if block.activity is not None:
-            # A block that may begin late begins where it settled, not where
-            # a slew into it was timed: the settle owns its entry's times.
-            block.entry.begin = block.ready
+            # A stale zero-length connection has no ingress to reserve; move
+            # it to the settled hold. A real ingress keeps its earlier start.
+            if slew.slewtime == 0:
+                block.entry.begin = block.ready
+                block.slew = slew.model_copy(
+                    update={"slewstart": block.ready, "slewend": block.ready}
+                )
             block.entry.end = block.end
         if block.step_slews:
             block.step_slews[0] = slew
@@ -2132,7 +3063,7 @@ class PriorityScheduler:
                     f"The block after {pred.entry.obsid if pred else 'the start'} "
                     "cannot be reached from the attitude it follows"
                 )
-            copy = block.model_copy(update={"entry": block.entry.model_copy()})
+            copy = self._copy_for_reconnection(block)
             if slew is not None:
                 self._apply_slew(copy, slew)
             if index == 0 and copy.activity is not None:
@@ -2192,17 +3123,18 @@ class PriorityScheduler:
             return
         Plan(entries=[entry]).bind_runtime(self.config, self.ctx.ephem)
         attitude = entry.target_body_attitude()
+        rest, final_attitude = self.ctx.science_rest(entry)
         block = _Block(
             entry=entry,
             attitude_in=attitude,
-            attitude_out=attitude,
+            attitude_out=final_attitude,
             ready=float(entry.collection_begin) - self.ctx.setup_for(int(entry.obsid)),
-            end=float(entry.end),
+            end=rest,
         )
         entry.visibility()
         # The slew in only reaches the attitude; the lock must also hold it for
         # its whole setup, collection and cleanup budget.
-        violation = self.ctx.first_science_violation(
+        violation = self._first_science_violation(
             entry, attitude, block.ready, self.ctx.ceil_step(block.end)
         )
         if violation is not None:
@@ -2226,10 +3158,23 @@ class PriorityScheduler:
         has ended: at its start at the earliest and where it was reserved at
         the latest, for its length."""
         for index, block in enumerate(timeline):
-            if block.activity is None:
+            if not block.is_activity:
                 continue
             previous = timeline[index - 1] if index > 0 else None
             self._settle_block(block, previous.end if previous is not None else None)
+            mode = block.entry.activity_mode
+            violation = self.ctx.first_hold_violation(
+                block.attitude_out, block.ready, self.ctx.ceil_step(block.end), mode
+            )
+            if block.arrival > block.ready or violation is not None:
+                activity = block.activity or next(
+                    a
+                    for a in [*self.activities, *self.dumps]
+                    if a.obsid == block.entry.obsid
+                )
+                raise ActivitySchedulingError(
+                    activity, "the settled hold is unsafe or its ingress arrives late"
+                )
 
     def _settle_block(self, block: _Block, previous_end: float | None) -> None:
         """Hold a block that may begin late from ``previous_end``, where
@@ -2240,21 +3185,55 @@ class PriorityScheduler:
         activity = block.activity
         if activity is None:
             return
-        begin = activity.begin
+        begin = max(activity.begin, self.ctx.ceil_step(self.ctx.ustart))
         if previous_end is not None:
             begin = max(begin, self.ctx.ceil_step(previous_end))
+        if (
+            block.slew is not None
+            and block.slew.slewtime > 0
+            and (previous_end is None or float(block.slew.slewstart) >= previous_end)
+        ):
+            begin = max(begin, self.ctx.ceil_step(float(block.slew.slewend)))
         latest = block.latest_ready if block.latest_ready is not None else block.ready
         begin = min(begin, latest)
         block.ready = begin
-        block.end = min(begin + activity.duration_seconds, self.ctx.uend)
-        block.entry.begin = begin
+        block.end = self._activity_end(activity, begin)
+        if block.slew is not None and block.slew.slewtime == 0:
+            block.slew = block.slew.model_copy(
+                update={"slewstart": begin, "slewend": begin}
+            )
+        block.entry.begin = (
+            float(block.slew.slewstart)
+            if block.slew is not None and float(block.slew.slewend) <= begin
+            else begin
+        )
         block.entry.end = block.end
+        block.entry.activity_hold_begin = begin
+        block.entry.activity_hold_end = begin + activity.duration_seconds
+
+    def _activity_end(self, activity: ScheduledActivity, begin: float) -> float:
+        """Keep a reserved activity whole across an internal planning cutoff.
+
+        Its tail is committed with it by a rolling run. Only the physical run
+        and the ephemeris limit how far that hold can be executed and checked.
+        """
+        return min(
+            begin + activity.duration_seconds,
+            self.ctx.simulation_end.timestamp(),
+            self.ctx.ephem_end,
+        )
 
     def _activity_ready(self, activity: ScheduledActivity) -> float:
         """When an activity is reserved from: its latest start, or after
         each activity already on the timeline that is under way then, as
         one due while another is under way begins when that one ends."""
-        ready = activity.latest_start
+        physical_end = min(self.ctx.simulation_end.timestamp(), self.ctx.ephem_end)
+        latest_in_run = max(activity.begin, physical_end - activity.duration_seconds)
+        ready = min(activity.latest_start, latest_in_run)
+        if activity.begin < self.ctx.ustart <= activity.latest_start:
+            # With no earlier execution state, an open slide window starts
+            # a new whole hold at the partial run's beginning.
+            ready = self.ctx.ceil_step(self.ctx.ustart)
         for block in self.timeline:
             if (
                 block.is_activity
@@ -2269,19 +3248,18 @@ class PriorityScheduler:
 
         It holds the attitude of whatever precedes it: as reserved, the
         block before it or the start attitude, and later the science placed
-        before it (see :attr:`_Block.follows`). An attitude IDLE cannot hold
-        for the activity's length is not used; the plan then leaves the
-        activity out and says so.
+        before it (see :attr:`_Block.follows`). If that hold is unsafe, the
+        connection searches for a whole safe hold with a validated ingress
+        slew. An infeasible mandatory reservation raises explicitly.
         """
-        begin = max(activity.begin, self.ctx.ustart)
-        end = min(activity.end, self.ctx.uend)
-        # An activity under way at the plan's start put its data on the
-        # recorder when it began; its continuation here adds none.
-        continuation = activity.begin < self.ctx.ustart
-        activity = activity.model_copy(
-            update={"begin": begin, "duration_seconds": end - begin}
-        )
-        ready = self._activity_ready(activity)
+        run_begin = self.ctx.simulation_start.timestamp()
+        hold_begin = activity.hold_start_for_run(run_begin)
+        resumed = hold_begin < run_begin
+        if activity.latest_start < self.ctx.ustart and not resumed:
+            raise ActivitySchedulingError(
+                activity, "its start window closed before the committed plan ends"
+            )
+        ready = max(self._activity_ready(activity), self.ctx.ceil_step(self.ctx.ustart))
         if ready >= self.ctx.uend:
             # Its reservation would have no length inside the horizon: the
             # block is left out, as one that cannot be reached is, and the
@@ -2293,10 +3271,12 @@ class PriorityScheduler:
                 activity.obsid,
             )
             return
-        # Reserved within the horizon: a block that may begin late can end
-        # past it, and the plan holds it as far as the horizon goes.
-        end = min(ready + activity.duration_seconds, self.ctx.uend)
-        if ready > activity.latest_start:
+        # A reservation beginning within the horizon keeps its tail for the
+        # next rolling plan, bounded by the physical run and ephemeris end.
+        end = self._activity_end(activity, hold_begin if resumed else ready)
+        if end <= ready:
+            return
+        if ready > activity.latest_start and not resumed:
             self._log(
                 activity.begin,
                 f"Activity {activity.name} is due during another activity and "
@@ -2313,45 +3293,76 @@ class PriorityScheduler:
                 else self.ctx.initial_attitude(self.ctx.ustart)
             )
         )
-        mode = ACSMode.DESAT if activity.desaturation else ACSMode.IDLE
-        violation = self.ctx.first_hold_violation(
-            attitude, activity.begin, self.ctx.ceil_step(end), mode
-        )
-        if violation is not None:
-            self._log(
-                activity.begin,
-                f"Activity {activity.name} cannot hold its attitude in {mode.name} at "
-                f"{unixtime2date(violation)}; leaving it out",
-                activity.obsid,
-            )
-            return
+        mode = activity.hold_mode
+        fixed_attitude = activity.attitude.fixed_pointing
+        explicit = activity.attitude.kind != "inherited"
+        if fixed_attitude is not None:
+            attitude = fixed_attitude
         entry = activity.plan_entry(self.config, attitude)
-        if continuation:
+        entry.activity_requires_stationary = True
+        if resumed:
+            entry.begin = ready
             entry.fixed_data_gb = 0.0
+        entry.activity_hold_begin = hold_begin if resumed else ready
+        entry.activity_hold_end = entry.activity_hold_begin + activity.duration_seconds
         # An activity that may slide, or that waits for another, is reserved
         # from its latest start to its latest end, so science before it may
         # run into its window and nothing is placed where it may still be;
         # its entry begins after what precedes it, at its start at the
         # earliest, when the plan is finished.
-        late = activity.slides or ready > activity.latest_start
-        if late:
-            entry.end = end
+        late = (activity.slides or ready > activity.latest_start) and not resumed
+        entry.end = end
         block = _Block(
             entry=entry,
             attitude_in=attitude,
             attitude_out=attitude,
             ready=ready,
             end=end,
-            follows=True,
-            activity=activity if late else None,
+            follows=not explicit,
+            activity=activity if late and not explicit else None,
             latest_ready=ready if late else None,
         )
-        if not self._insert_fixed(block):
-            self._log(
-                activity.begin,
-                f"Activity {activity.name} cannot be reached; leaving it out",
-                activity.obsid,
+        if explicit:
+            earliest = self.ctx.ceil_step(max(activity.begin, self.ctx.ustart))
+            trial = (
+                self.ctx.floor_step(ready) if activity.slides and not resumed else ready
             )
+            failure = None
+            while not activity.slides or resumed or trial >= earliest:
+                block.ready = trial
+                block.end = self._activity_end(
+                    activity, hold_begin if resumed else trial
+                )
+                block.latest_ready = trial
+                block.entry.activity_hold_begin = hold_begin if resumed else trial
+                block.entry.activity_hold_end = (
+                    block.entry.activity_hold_begin + activity.duration_seconds
+                )
+                block.entry.end = block.end
+                try:
+                    for pose in self.ctx.activity_attitudes(activity, trial, block.end):
+                        block.attitude_in = block.attitude_out = pose
+                        block.entry.ra, block.entry.dec, block.entry.roll = pose
+                        if self._insert_fixed(block):
+                            return
+                except ValueError as exc:
+                    failure = exc
+                if not activity.slides or resumed:
+                    break
+                trial -= self.ctx.step_size
+            if failure is not None:
+                raise ActivitySchedulingError(activity, str(failure)) from failure
+            placed = False
+        else:
+            placed = self._insert_fixed(block)
+        if not placed:
+            error = ActivitySchedulingError(
+                activity,
+                f"no path-validated {mode.name} attitude holds for its full duration "
+                "and connects to the surrounding reservations",
+            )
+            self._log(activity.begin, str(error), activity.obsid)
+            raise error
 
     def _place_pass(self, gspass: Pass) -> None:
         """Reserve a ground pass at its earliest reachable acquisition step.
@@ -2456,7 +3467,14 @@ class PriorityScheduler:
         the next contact and after; it is never shortened to fit.
         """
         recorder_full = battery_low = False
-        for index in range(len(self.timeline) + 1):
+        lowest, highest, closed = (
+            self._open_gaps(request)
+            if self.config.observation_groups.consecutive
+            else (0, len(self.timeline), frozenset())
+        )
+        for index in range(lowest, min(highest, len(self.timeline)) + 1):
+            if index in closed:
+                continue
             pred = self._pred_at(index)
             succ = self.timeline[index] if index < len(self.timeline) else None
 
@@ -2473,7 +3491,9 @@ class PriorityScheduler:
                 # Include any change to the next tracking pass's ingress.
                 additions = [
                     *self._block_additions(block),
-                    *self._ingress_deltas(succ, succ_slew),
+                    *self._following_data_changes(
+                        block, self.timeline[index:], succ_slew
+                    ),
                 ]
                 if self._ledger.fits_all(self._volumes, additions):
                     full = False
@@ -2495,7 +3515,12 @@ class PriorityScheduler:
                     )
                     snapshot = min(float(request.target.ss_max), request.remaining)
                     capacity_end = self._ledger.science_retry_end(
-                        self._volumes,
+                        self._ledger.add_all(
+                            self._volumes,
+                            self._following_data_changes(
+                                block, self.timeline[index:], succ_slew
+                            ),
+                        ),
                         block.entry,
                         minimum,
                         self.ctx.floor_step(collection_begin),
@@ -2541,7 +3566,9 @@ class PriorityScheduler:
                 block, slew, succ_slew = charged
                 additions = [
                     *self._block_additions(block),
-                    *self._ingress_deltas(succ, succ_slew),
+                    *self._following_data_changes(
+                        block, self.timeline[index:], succ_slew
+                    ),
                 ]
                 if not self._ledger.fits_all(self._volumes, additions):
                     recorder_full = True
@@ -2622,17 +3649,23 @@ class PriorityScheduler:
             - self._battery.slew_allowance
         )
         for _ in range(_BATTERY_RETRIES + 1):
-            block, _, succ_slew = candidate
+            block, slew, succ_slew = candidate
+            # The candidate's slew is recorded on it only when it is placed.
+            # It is priced here on a copy that has the slew, so the check
+            # counts the panels' generation along the slew, as the energy
+            # stored once the snapshot is placed does.
+            priced = self._copy_for_reconnection(block)
+            self._apply_slew(priced, slew)
             trial = self._charged_energy(
-                self._trial_timeline(timeline, index, block, succ, succ_slew)
+                self._trial_timeline(timeline, index, priced, succ, succ_slew)
             )
             if self._within_level(trial):
                 return candidate
-            addition = self._block_addition(block)
+            addition = self._block_addition(priced)
             segment = self._battery.segment(addition.begin)
             limit = self._battery.limit
             assert limit is not None
-            excess = max(self._battery.peaks(trial)[segment:]) - limit
+            excess = max(self._energy_peaks(trial)[segment:]) - limit
             later = self._battery.time_to_fit(
                 self._charged_energy(timeline), addition, until, excess
             )
@@ -2670,7 +3703,7 @@ class PriorityScheduler:
         limit = self._battery.limit
         if limit is None:
             return True
-        return all(peak <= limit + 1e-9 for peak in self._battery.peaks(energy))
+        return all(peak <= limit + 1e-9 for peak in self._energy_peaks(energy))
 
     def _can_delay(self, index: int) -> bool:
         """Whether the last gap search failed only because of what follows
@@ -2700,6 +3733,9 @@ class PriorityScheduler:
         """
         request = self._movable.get(id(block))
         if request is None:
+            return False
+        if request.group is not None and request.group.consecutive:
+            # Its place among its group's blocks is fixed.
             return False
         if not request.timed:
             return True
@@ -2851,7 +3887,6 @@ class PriorityScheduler:
             return None
         additions = [
             *self._block_additions(new_block),
-            *self._ingress_deltas(after, after_slew),
         ]
         for move in moves:
             additions.extend(
@@ -2859,8 +3894,6 @@ class PriorityScheduler:
                 for s, v in self._block_additions(move.old_block)
             )
             additions.extend(self._block_additions(move.new_block))
-        if not self._ledger.fits_all(self._volumes, additions):
-            return None
         trial = [
             *self.timeline[:index],
             new_block,
@@ -2869,6 +3902,9 @@ class PriorityScheduler:
         ]
         if after is not None:
             trial.extend(self._reconnected(previous, self.timeline[end:], after_slew))
+        additions.extend(self._fixed_data_changes(self.timeline, trial))
+        if not self._ledger.fits_all(self._volumes, additions):
+            return None
         if not self._within_level(self._charged_energy(trial)):
             return None
         self._volumes = self._ledger.add_all(self._volumes, additions)
@@ -2880,6 +3916,12 @@ class PriorityScheduler:
             self._apply_slew(move.new_block, move.slew)
         if after is not None and after_slew is not None:
             self._apply_slew(after, after_slew)
+        if after is not None and after.activity is not None:
+            # An activity that may begin late follows the run where the run
+            # now ends. The trial above settled a copy of it; the block
+            # itself is settled here, or it would begin before the moved
+            # run has ended.
+            self._settle_block(after, previous.end)
 
         self.timeline[index:end] = [new_block, *led, *(m.new_block for m in moves)]
         if after is not None and after.follows:
@@ -3014,12 +4056,22 @@ class PriorityScheduler:
             target.step_pointing(0) if target.sequence is not None else target
         )
         while start <= search_end:
-            if not self.ctx.roll_allowed(arrival_pointing, start):
+            if (
+                target.sequence is not None
+                and self._minimum_sequence_end(target, timing, start)
+                > min(gap_end, horizon_end) + TIME_TOLERANCE_S
+            ):
+                # Even zero ingress and inter-step motion cannot fit. Later
+                # departures cannot recover the missing collection time.
+                return None
+            instrument_roll, roll_allowed = self.ctx.select_instrument_roll(
+                arrival_pointing, start
+            )
+            if not roll_allowed:
                 # The roll the target asks for is beyond the ACS limit from
                 # the power-optimal roll now; it may be within it later.
                 start += self.ctx.step_size
                 continue
-            instrument_roll = self.ctx.instrument_roll(arrival_pointing, start)
             attitude = arrival_pointing.target_body_attitude(instrument_roll, at=start)
             slew = self.ctx.slew(
                 self._start_attitude(pred, start),
@@ -3061,16 +4113,20 @@ class PriorityScheduler:
 
             collection_begin = float(slew.slewend) + timing.setup_seconds
             earliest_start = request.earliest_start
+            if (
+                earliest_start is not None
+                and 0.0 < earliest_start - collection_begin <= self.ctx.step_size
+            ):
+                # A command starts on a simulation step, but collection need
+                # not. Keep the feasible ingress and wait out the fraction
+                # of a step rather than delaying the entire observation.
+                # _check_snapshot validates the wait along with the hold.
+                collection_begin = earliest_start
             if earliest_start is not None and collection_begin < earliest_start:
-                # Start later by the shortfall, so collection begins at the
-                # earliest start if the slew takes as long. It need not: its
-                # duration changes with the instrument roll, so a longer slew
-                # there can leave this step too late for a deadline that an
-                # earlier step meets. So step back while the step before
-                # still begins collection by the earliest start. No earlier
-                # start can then do so: a slew's duration changes by far less
-                # than a step from one step to the next, so collection begins
-                # later the later the slew starts.
+                # Jump near the opening, retaining the preceding command
+                # step when its arrival leaves at most one step to wait.
+                # Slew duration can change with the roll at departure, so
+                # check earlier steps rather than trusting the estimate.
                 jump = max(
                     start + self.ctx.step_size,
                     self.ctx.ceil_step(start + earliest_start - collection_begin),
@@ -3081,14 +4137,38 @@ class PriorityScheduler:
                     and self._collection_begin_at(
                         target, pred, jump - self.ctx.step_size
                     )
-                    >= earliest_start
+                    >= earliest_start - self.ctx.step_size
                 ):
                     jump -= self.ctx.step_size
                 start = jump
                 continue
             deadline = request.deadline
+            # A later departure can have a shorter thermal settle, avoidance
+            # path, or return slew. Bound it independently of this attempt's
+            # actual duration. Automatic roll and moving pointings also change
+            # the arrival pose, so their safe motion lower bound here is zero.
+            minimum_slew = (
+                self._shortest_slew_seconds(self._start_attitude(pred, start), attitude)
+                if not arrival_pointing.moves and arrival_pointing.roll_deg is not None
+                else 0.0
+            )
+            next_collection_bound = (
+                start + self.ctx.step_size + minimum_slew + timing.setup_seconds
+            )
             if deadline is not None and collection_begin > deadline:
-                return None
+                if next_collection_bound > deadline + TIME_TOLERANCE_S:
+                    return None
+                start += self.ctx.step_size
+                continue
+            placement_end = min(gap_end, horizon_end)
+            if collection_begin > placement_end:
+                # No collection or return can start after this reservation.
+                # In particular, do not route a successor slew at a time
+                # beyond the ephemeris. A later, shorter ingress can still fit.
+                if next_collection_bound > placement_end + TIME_TOLERANCE_S:
+                    return None
+                start += self.ctx.step_size
+                continue
 
             visit: _Visit | None = None
             departure = attitude
@@ -3119,7 +4199,20 @@ class PriorityScheduler:
             if visit is not None:
                 # A visit runs whole or not at all.
                 if visit.end > latest_end:
-                    if succ is not None and latest_end < window[1]:
+                    assert target.sequence is not None
+                    minimum_visit = sum(
+                        step.duration_seconds for step in target.sequence.steps
+                    ) + sum(
+                        timing.setup_seconds
+                        for step in target.sequence.steps[1:]
+                        if step.setup
+                    )
+                    if (
+                        next_collection_bound
+                        + minimum_visit
+                        + timing.post_collection_seconds
+                        > min(gap_end, horizon_end) + TIME_TOLERANCE_S
+                    ):
                         return None
                     start += self.ctx.step_size
                     continue
@@ -3177,24 +4270,17 @@ class PriorityScheduler:
                 collection_end = min(collection_end, cadence_end)
 
             if not _long_enough(collection_end - collection_begin, ss_min):
-                if succ is not None and latest_end < window[1]:
-                    # Starting later only leaves less room before the successor.
-                    return None
-                # The room before the window closes, or the horizon ends,
-                # shrinks as the start moves on, while a later slew takes at
-                # least the direct slew with the least settle. Once not even
-                # that leaves the minimum snapshot, no later start in this
-                # window does: the next window is tried, if there is one.
+                # Use the successor's actual reservation, without subtracting
+                # this attempt's return slew: that slew can shorten later too.
+                # Stop only when even an optimistic later arrival cannot fit.
                 room = (
-                    latest_end
+                    min(window[1], gap_end, horizon_end)
                     - timing.post_collection_seconds
                     - timing.setup_seconds
                     - (start + self.ctx.step_size)
                 )
-                if room < ss_min + self._shortest_slew_seconds(
-                    self._start_attitude(pred, start), attitude
-                ):
-                    if latest_end < window[1]:
+                if room < ss_min + minimum_slew - TIME_TOLERANCE_S:
+                    if min(gap_end, horizon_end) <= window[1]:
                         return None
                     upcoming = [w[0] for w in request.windows if w[0] > window[1]]
                     if not upcoming:
@@ -3216,12 +4302,13 @@ class PriorityScheduler:
                 collection_begin,
                 collection_end,
             )
+            rest, final_attitude = self.ctx.science_rest(entry)
             block = _Block(
                 entry=entry,
                 attitude_in=attitude,
-                attitude_out=attitude,
+                attitude_out=final_attitude,
                 ready=collection_begin - timing.setup_seconds,
-                end=float(entry.end),
+                end=rest,
             )
             fitted = self._check_snapshot(block, slew, ss_min)
             if fitted is not None:
@@ -3240,6 +4327,23 @@ class PriorityScheduler:
             start += self.ctx.step_size
         return None
 
+    @staticmethod
+    def _minimum_sequence_end(
+        target: Pointing, timing: ObservationTiming, start: float
+    ) -> float:
+        """An optimistic end with no slew, settle, rounding wait or acquisition.
+
+        Round each addition down so the bound also holds when the executor's
+        repeated floating-point clock additions round below the exact sum.
+        """
+        assert target.sequence is not None
+        cursor = nextafter(start + timing.setup_seconds, -inf)
+        for index, step in enumerate(target.sequence.steps):
+            if index > 0 and step.setup:
+                cursor = nextafter(cursor + timing.setup_seconds, -inf)
+            cursor = nextafter(cursor + step.duration_seconds, -inf)
+        return nextafter(cursor + timing.post_collection_seconds, -inf)
+
     def _collection_begin_at(
         self, target: Pointing, pred: _Block | None, start: float
     ) -> float:
@@ -3254,15 +4358,26 @@ class PriorityScheduler:
         return float(slew.slewend) + self.ctx.setup_for(int(target.obsid))
 
     def _shortest_slew_seconds(self, start: Attitude, end: Attitude) -> float:
-        """The least a slew between two attitudes can take from any start:
-        the direct rotation with the least settle the ACS gives, the table's
-        first step or its settle time. A slew flown later cannot be shorter,
-        so the gap search stops stepping through a window once not even
-        this leaves room for a snapshot."""
+        """A conservative lower duration bound between fixed endpoint poses.
+
+        The fastest rate bounds any path, including per-axis routing; ignore
+        acceleration. The least settle includes the constant fallback used by
+        categories that skip the table, whose durations need not be monotonic.
+        Do not apply this pose-specific bound across changing rolls or tracks.
+        """
         acs = self.config.spacecraft_bus.attitude_control
-        distance, axis = quaternion_attitude_delta(*start, *end)
-        change = 0.0 if acs.thermal_settling else None
-        return float(scheduled_slew_time(acs.slew_time(distance, axis, change)))
+        distance, _ = quaternion_attitude_delta(*start, *end)
+        rate = (
+            max(acs.max_slew_rate_body)
+            if acs.max_slew_rate_body is not None
+            else acs.max_slew_rate
+        )
+        if distance <= 0 or rate <= 0:
+            return 0.0
+        settle = min(
+            [float(acs.settle_time), *(s.settle_seconds for s in acs.thermal_settling)]
+        )
+        return float(scheduled_slew_time(distance / rate + settle))
 
     def _visibility_needed_at(self, slew: Slew) -> float:
         """When a science target must be visible for ACS to fly ``slew`` to it.
@@ -3280,7 +4395,7 @@ class PriorityScheduler:
     ) -> _Block | None:
         """Check a snapshot's slew and observation, shortening it to fit if needed."""
         entry = block.entry
-        if self.ctx.first_slew_violation(slew, ACSMode.SLEWING) is not None:
+        if self._first_slew_violation(slew, ACSMode.SLEWING) is not None:
             return None
         self._entry_visibility(entry)
         needed = self._visibility_needed_at(slew)
@@ -3289,7 +4404,7 @@ class PriorityScheduler:
         if block.steps:
             # Each step's hold was checked when the visit was built.
             return block
-        violation = self.ctx.first_science_violation(
+        violation = self._first_science_violation(
             entry, block.attitude_in, slew.slewend, self.ctx.ceil_step(float(entry.end))
         )
         if violation is None:
@@ -3311,6 +4426,37 @@ class PriorityScheduler:
             return None
         block.end, block.attitude_out = rest
         return block
+
+    def _sequence_pointing(self, target: Pointing, index: int) -> Pointing:
+        """Reuse a step and its whole-ephemeris visibility for placement attempts.
+
+        Step indices keep different instruments, timing and modes separate even
+        when their names or pointings agree. Visits with their own geometry or
+        rolls remain distinct. The public factory still returns fresh pointings;
+        subclasses retain their custom factory behavior without this reuse.
+        """
+        if type(target) is not Pointing:
+            return target.step_pointing(index)
+        ra, dec = target.visit_base_pointing
+        roll, offset = target.visit_roll_request
+        key = _StepPointingKey(
+            obsid=int(target.obsid),
+            index=index,
+            visit=target.visit,
+            # Preserve exact coordinate values, including signed zero, in the
+            # fresh factory's serialized fields rather than merging equal floats.
+            base=(float(ra).hex(), float(dec).hex()),
+            roll=(
+                None if roll is None else float(roll).hex(),
+                None if offset is None else float(offset).hex(),
+            ),
+            instrument_name=target.instrument_name,
+        )
+        pointing = self._sequence_pointings.get(key)
+        if pointing is None:
+            pointing = target.step_pointing(index)
+            self._sequence_pointings[key] = pointing
+        return pointing
 
     def _visit(
         self,
@@ -3343,11 +4489,11 @@ class PriorityScheduler:
         previous = attitude
         previous_roll = instrument_roll
         limit = self.config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg
-        first_pointing = target.step_pointing(0)
+        first_pointing = self._sequence_pointing(target, 0)
         previous_optimum = self.ctx.optimum_roll(first_pointing, float(slew.slewstart))
         step_slew: Slew | None = slew
         for index, step in enumerate(sequence.steps):
-            pointing = target.step_pointing(index)
+            pointing = self._sequence_pointing(target, index)
             if index > 0:
                 # A step at the pointing of the one before keeps the
                 # power-optimal roll found there, so its own roll offset is
@@ -3386,7 +4532,7 @@ class PriorityScheduler:
                         )
                 if float(step_slew.slewend) > self.ctx.uend:
                     return None
-                if self.ctx.first_slew_violation(step_slew, ACSMode.SLEWING):
+                if self._first_slew_violation(step_slew, ACSMode.SLEWING):
                     return None
                 cursor = float(step_slew.slewend)
                 if step.setup:
@@ -3403,7 +4549,7 @@ class PriorityScheduler:
             if end > self.ctx.uend or not pointing.visible(step_begin, step_end):
                 return None
             if (
-                self.ctx.first_science_violation(
+                self._first_science_violation(
                     pointing, step_attitude, step_begin, self.ctx.ceil_step(end)
                 )
                 is not None
@@ -3451,6 +4597,7 @@ class PriorityScheduler:
                 ss_max=step.duration_seconds,
                 step=step.name,
                 calibration=not step.science,
+                visit=request.visit if request.timed else None,
             )
             entry.exptime = step.duration_seconds
             steps.append(entry)
@@ -3488,6 +4635,7 @@ class PriorityScheduler:
             merit=request.merit.value,
             ss_min=request.minimum_snapshot,
             ss_max=target.ss_max,
+            visit=request.visit if request.timed else None,
         )
         visit_entry.exptime = sequence.science_seconds
         return _Visit(visit_entry, steps, slews, previous, cursor)
@@ -3544,14 +4692,14 @@ class PriorityScheduler:
     def _plan_charging(self, timeline: list[_Block]) -> list[_Block]:
         """Put the charges a finished plan relies on into it.
 
-        Every placement was checked with the charges its idle sunlit time
-        holds (see :meth:`_charged_timeline`); this commits them: each charge
+        Every placement was checked with forecast-driven charges
+        (see :meth:`_charged_timeline`); this commits them: each charge
         goes into the plan, and the activity after it is re-slewed from the
         charging attitude.
         """
         if not self._battery.active:
             return timeline
-        charged = self._charged_timeline(timeline, commit=True)
+        charged = self._charged_timeline(timeline)
         for block in charged:
             if block.is_charge:
                 self._log(
@@ -3570,16 +4718,118 @@ class PriorityScheduler:
             )
         return charged
 
-    def _charged_timeline(
-        self, timeline: Sequence[_Block], commit: bool = False
-    ) -> list[_Block]:
-        """The timeline with a charge in every idle sunlit stretch one fits.
+    @staticmethod
+    def _copy_for_reconnection(block: _Block) -> _Block:
+        """Copy the mutable entries and slew list before speculative reconnection."""
+        return block.model_copy(
+            update={
+                "entry": block.entry.model_copy(),
+                "steps": [step.model_copy() for step in block.steps],
+                "step_slews": list(block.step_slews),
+            }
+        )
 
-        Between each pair of blocks, charges are chained through the sunlit
-        stretches of the idle time (see :meth:`_gap_charges`), and the block
-        after them is re-slewed from the last charging attitude. Unless
-        ``commit`` is set, that re-slew goes on a copy, so the timeline given
-        is not changed.
+    def _charge_excess(self, timeline: Sequence[_Block]) -> float:
+        limit = self._battery.limit
+        assert limit is not None
+        return max(
+            0.0, max(self._energy_peaks(self._timeline_energy(timeline))) - limit
+        )
+
+    def _replace_charge(
+        self, timeline: Sequence[_Block], index: int, replacement: _Block | None
+    ) -> list[_Block] | None:
+        """Remove/shorten a charge and validate its actual departure connection."""
+        pred = replacement or (timeline[index - 1] if index else self._origin)
+        after = timeline[index + 1 :]
+        if after:
+            chain = self._connect_chain(pred, after)
+            if chain is None:
+                return None
+            tail = self._reconnected(pred, after, chain[0][1])
+            # A following sliding activity may settle earlier on reconnection.
+            first = tail[0]
+            if first.is_activity and (
+                first.arrival > first.ready
+                or self.ctx.first_hold_violation(
+                    first.attitude_out,
+                    first.ready,
+                    self.ctx.ceil_step(first.end),
+                    first.entry.activity_mode,
+                )
+                is not None
+            ):
+                return None
+        else:
+            tail = []
+        return [*timeline[:index], *([replacement] if replacement else []), *tail]
+
+    def _charged_timeline(self, timeline: Sequence[_Block]) -> list[_Block]:
+        """Reserve charging only where the full forecast needs it.
+
+        Price actual ingress, departure and idle generation, with battery
+        saturation and finite drives. Removing a candidate must leave a safe
+        connection; shortening retains a verified feasible endpoint even when
+        drive behaviour makes charge duration non-monotonic.
+        """
+        return self._charged_with_energy(timeline)[0]
+
+    def _charged_with_energy(
+        self, timeline: Sequence[_Block]
+    ) -> tuple[list[_Block], tuple[Additions, ...] | None]:
+        """The charged timeline (see :meth:`_charged_timeline`), with its
+        energy where the timeline needed no charge and its energy was
+        therefore already totalled for that check; None otherwise."""
+        if not self._battery.active:
+            return list(timeline), None
+        energy = self._timeline_energy(timeline)
+        if self._within_level(energy):
+            return list(timeline), energy
+        charged = self._all_charge_timeline(timeline)
+        excess = self._charge_excess(charged)
+        preserved = {b.entry.obsid for b in timeline if b.is_charge}
+        # Keep explicit/committed charges. Candidate charges are reversible;
+        # work backwards so each accepted removal prices all later loads.
+        for index in range(len(charged) - 1, -1, -1):
+            block = charged[index]
+            if not block.is_charge or block.entry.obsid in preserved:
+                continue
+            trial = self._replace_charge(charged, index, None)
+            if trial is not None:
+                trial_excess = self._charge_excess(trial)
+                if trial_excess <= max(excess, _CHARGE_ENERGY_TOLERANCE_WH):
+                    charged, excess = trial, trial_excess
+                    continue
+            if excess > _CHARGE_ENERGY_TOLERANCE_WH:
+                continue
+            # Find a shorter feasible hold on the simulation grid. Every
+            # accepted trial includes its outgoing slew and the entire tail.
+            lower = self.ctx.ceil_step(block.ready + MIN_CHARGE_SECONDS)
+            upper = self.ctx.floor_step(block.end)
+            best = charged
+            while lower < upper:
+                stop = self.ctx.floor_step((lower + upper) / 2)
+                shorter = self._copy_for_reconnection(block)
+                shorter.end = stop
+                shorter.entry.end = stop
+                shorter.entry.ss_max = stop - shorter.ready
+                shorter.entry.exptime = stop - shorter.ready
+                trial = self._replace_charge(charged, index, shorter)
+                if trial is not None and self._within_level(
+                    self._timeline_energy(trial)
+                ):
+                    best = trial
+                    upper = stop
+                else:
+                    lower = stop + self.ctx.step_size
+            charged = best
+        return charged, None
+
+    def _all_charge_timeline(self, timeline: Sequence[_Block]) -> list[_Block]:
+        """Generate geometry-feasible candidates in the idle sunlit stretches.
+
+        Reconnect on copies: forecast trials must not change visits or the
+        mandatory holds in their input timeline.
         """
         if not self._battery.active:
             return list(timeline)
@@ -3614,8 +4864,7 @@ class PriorityScheduler:
                         f"attitude activity {pred.entry.obsid} follows"
                     )
             if (charges or stale) and succ_slew is not None:
-                if not commit:
-                    succ = succ.model_copy(update={"entry": succ.entry.model_copy()})
+                succ = self._copy_for_reconnection(succ)
                 if succ.activity is not None:
                     # A block that may begin late follows the charges before
                     # it, as the chain into it was checked.
@@ -3745,7 +4994,7 @@ class PriorityScheduler:
             obstype=ObsType.CHARGE,
             obsid=self._next_charge_obsid,
         )
-        if self.ctx.first_slew_violation(slew, ACSMode.SLEWING) is not None:
+        if self._first_slew_violation(slew, ACSMode.SLEWING) is not None:
             return None
         hold_begin = self.ctx.ceil_step(float(slew.slewend))
         latest = self.ctx.floor_step(span_end - ledger.slew_allowance)

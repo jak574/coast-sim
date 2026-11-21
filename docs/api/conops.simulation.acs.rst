@@ -2,7 +2,6 @@ conops.simulation.acs
 =====================
 
 .. automodule:: conops.simulation.acs
-   :members: ACS
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

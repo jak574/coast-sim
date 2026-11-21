@@ -116,6 +116,7 @@ class Pointing(PlanEntry):
     _visits_done: set[int] = PrivateAttr(default_factory=set)
     _visit_seconds: dict[int, float] = PrivateAttr(default_factory=dict)
     _visit_attempt_seconds: dict[int, float] = PrivateAttr(default_factory=dict)
+    _collecting_visit: int | None = PrivateAttr(default=None)
     _visit_parent: "Pointing | None" = PrivateAttr(default=None)
 
     @field_validator("deadline", "earliest_start", mode="before")
@@ -326,6 +327,7 @@ class Pointing(PlanEntry):
                 else self.visit_index_at(utime - seconds)
             )
             if index is not None:
+                self._collecting_visit = index
                 self._visit_seconds[index] = (
                     self._visit_seconds.get(index, 0.0) + seconds
                 )
@@ -346,20 +348,33 @@ class Pointing(PlanEntry):
         if self._visit_parent is not None:
             self._visit_parent.record_calibration(utime, seconds)
 
-    def record_interruption(self, utime: float) -> None:
+    def record_interruption(self, utime: float, *, began: float | None = None) -> None:
         """A visit cut short is taken again, whole, while its window is
         open: the window counts as visited only once one attempt has
         collected a whole visit's science in it, uninterrupted. The science
-        every attempt collected still counts."""
-        super().record_interruption(utime)
+        every attempt collected still counts. Follow the visit credited by
+        collection, including when it runs past the next window's opening.
+
+        ``began`` is when the observation that was cut began. Where the
+        target has collected nothing since then, the cut observation
+        collected nothing, and the visit last credited belongs to an
+        earlier observation that was not cut: it stays as it is."""
+        collected_before = (
+            began is not None
+            and self._last_collection_time is not None
+            and self._last_collection_time <= began
+        )
+        super().record_interruption(utime, began=began)
         if self._visit_parent is not None:
-            self._visit_parent.record_interruption(utime)
+            self._visit_parent.record_interruption(utime, began=began)
         if self.visit_windows:
-            index = self.visit_index_at(utime)
+            index = None if collected_before else self._collecting_visit
+            self._collecting_visit = None
             if index is not None:
                 attempt = self._visit_attempt_seconds.pop(index, 0.0)
                 if attempt < self.per_visit_seconds - 1e-6:
                     self._visits_done.discard(index)
+                    self.done = False
                     self._exposure_is_the_visits_left()
 
     def visit_complete(self, index: int) -> bool:
@@ -634,7 +649,8 @@ class Pointing(PlanEntry):
         self.collection_limit = None
         self._visits_done = set()
         self._visit_seconds = {}
-        self._visit_attempt_seconds = {}  # Retries must start with no prior progress.
+        self._visit_attempt_seconds = {}
+        self._collecting_visit = None
         self.visit = None
         self.begin = 0
         self.end = 0
@@ -714,9 +730,14 @@ class MovingPointing(Pointing):
             return "given"
         return "looked up"
 
-    def visibility(self, *args: object, **kwargs: object) -> int:
+    def visibility(
+        self,
+        *,
+        begin: float | int | str | datetime | None = None,
+        end: float | int | str | datetime | None = None,
+    ) -> int:
         """As :meth:`PlanEntry.visibility`, after the body's track is looked
         up when none was given."""
         if not self.track and self.body is not None:
             self.fetch_track()
-        return super().visibility(*args, **kwargs)
+        return super().visibility(begin=begin, end=end)

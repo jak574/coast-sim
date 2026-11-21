@@ -9,16 +9,19 @@ This module mirrors the star tracker pattern for body-mounted radiators:
 
 from __future__ import annotations
 
+import math
 from functools import cached_property
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import numpy.typing as npt
 import rust_ephem
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from rust_ephem.constraints import ConstraintConfig
 
 from ..common import dtutcfromtimestamp, scbodyvector
+from ..common.ephemeris import position_vectors
+from ..common.geodesy import MEAN_EARTH_RADIUS_KM
 from ..common.numerics import UNIT_MAGNITUDE_TOLERANCE
 from ..common.vector import normal_to_boresight_offset_euler_deg, radec2vec
 from ._base import ConfigModel
@@ -26,6 +29,14 @@ from .constraint import Constraint
 from .geometry import PanelGeometry, compute_shadow_fraction
 
 STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8
+BUS_SUBSYSTEM = "spacecraft_bus"
+PAYLOAD_SUBSYSTEM = "payload"
+"""The subsystem names for the whole bus and the whole payload. A heat source
+may also be named after one instrument."""
+# The temperature integration splits a step so that no part covers more than
+# this fraction of the radiative time constant, up to a fixed number of parts.
+_MAX_TIME_CONSTANT_FRACTION = 0.25
+_MAX_SUBSTEPS = 64
 _ECLIPSE_CONSTRAINT = rust_ephem.EclipseConstraint()
 
 
@@ -95,6 +106,58 @@ class Radiator(ConfigModel):
     )
     sun_loading_factor: float = Field(default=0.7, ge=0.0)
     earth_loading_factor: float = Field(default=0.3, ge=0.0)
+    earth_flux_model: Literal["uniform", "view_factor"] = Field(
+        default="uniform",
+        description=(
+            "How the Earth loads the radiator. 'uniform': earth_ir_flux_w_per_m2 "
+            "at any distance, absorbed with ``absorptivity``. 'view_factor': the "
+            "Earth's infrared flux and reflected sunlight are scaled by "
+            "(Earth radius / distance from Earth's centre) squared, and the "
+            "infrared flux is absorbed with ``emissivity``"
+        ),
+    )
+    earth_albedo: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of sunlight the Earth reflects onto the radiator, absorbed "
+            "with ``absorptivity``. Requires earth_flux_model='view_factor'"
+        ),
+    )
+
+    thermal_mass_j_per_k: float | None = Field(
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Heat capacity of the radiator and the hardware it cools, in J/K. "
+            "When set, the radiator temperature is integrated over the run, "
+            "starting at radiator_temperature_k, and the emitted flux is not "
+            "capped by dissipation_coefficient_w_per_m2. When None, the "
+            "temperature stays at radiator_temperature_k"
+        ),
+    )
+    heat_load_w: float = Field(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Constant internal heat conducted to the radiator, in watts. "
+            "Requires thermal_mass_j_per_k"
+        ),
+    )
+    subsystem_power_fraction: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of the electrical power of ``subsystem`` that reaches "
+            "this radiator as heat, added to heat_load_w at each step. "
+            "Requires thermal_mass_j_per_k and a subsystem of 'spacecraft_bus', "
+            "'payload' or the name of an instrument"
+        ),
+    )
 
     hard_constraint: Constraint | None = None
 
@@ -115,9 +178,26 @@ class Radiator(ConfigModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _heat_inputs_need_a_thermal_mass(self) -> Radiator:
+        has_heat = self.heat_load_w > 0.0 or self.subsystem_power_fraction > 0.0
+        if has_heat and self.thermal_mass_j_per_k is None:
+            raise ValueError(
+                "heat_load_w and subsystem_power_fraction are used only when "
+                "thermal_mass_j_per_k is set"
+            )
+        if self.earth_albedo > 0.0 and self.earth_flux_model != "view_factor":
+            raise ValueError("earth_albedo needs earth_flux_model='view_factor'")
+        return self
+
     @property
     def area_m2(self) -> float:
         return self.width_m * self.height_m
+
+    @property
+    def radiating_area_m2(self) -> float:
+        """The panel area scaled by ``efficiency``."""
+        return self.area_m2 * self.efficiency
 
     def set_ephem(self, ephem: rust_ephem.Ephemeris) -> None:
         if self.hard_constraint is not None:
@@ -268,37 +348,202 @@ class Radiator(ConfigModel):
         )
         return self._dot_exposure(sun_unit, earth_unit, in_eclipse, occluder_geometries)
 
-    def heat_dissipation_w(self, sun_exposure: float, earth_exposure: float) -> float:
+    def earth_loads(
+        self, earth_exposure: float, earth_radius_ratio: float, subsolar_cosine: float
+    ) -> tuple[float, float]:
+        """The Earth infrared and albedo exposures for a geometric exposure.
+
+        ``earth_radius_ratio`` is the Earth's radius over the distance from
+        its centre, and ``subsolar_cosine`` the cosine of the angle at the
+        Earth's centre between the spacecraft and the Sun. With the uniform
+        model the infrared exposure is the geometric exposure and there is
+        no albedo. With the view-factor model both are scaled by the ratio
+        squared, the view factor of a small plate to a distant sphere, and
+        the albedo also by the sunlit fraction of the Earth below the
+        spacecraft, ``max(0, subsolar_cosine)``.
+        """
+        if self.earth_flux_model == "uniform":
+            return earth_exposure, 0.0
+        view = earth_exposure * earth_radius_ratio**2
+        return view, view * max(0.0, subsolar_cosine)
+
+    def absorbed_power_w(
+        self, sun_exposure: float, earth_exposure: float, albedo_exposure: float = 0.0
+    ) -> float:
+        """External radiative power the radiator absorbs, in watts.
+
+        ``earth_exposure`` and ``albedo_exposure`` are those of
+        :meth:`earth_loads`.
+        """
+        infrared_absorptivity = (
+            self.emissivity
+            if self.earth_flux_model == "view_factor"
+            else self.absorptivity
+        )
+        return self.radiating_area_m2 * (
+            self.absorptivity
+            * self.solar_constant_w_per_m2
+            * (
+                self.sun_loading_factor * sun_exposure
+                + self.earth_albedo * self.earth_loading_factor * albedo_exposure
+            )
+            + infrared_absorptivity
+            * self.earth_ir_flux_w_per_m2
+            * self.earth_loading_factor
+            * earth_exposure
+        )
+
+    def emitted_power_w(self, temperature_k: float) -> float:
+        """Power radiated to the sink at a surface temperature, in watts,
+        without the ``dissipation_coefficient_w_per_m2`` cap."""
+        return self._radiative_coefficient_w_per_k4 * (
+            temperature_k**4 - self.sink_temperature_k**4
+        )
+
+    @property
+    def _radiative_coefficient_w_per_k4(self) -> float:
+        return self.radiating_area_m2 * self.emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
+
+    def heat_dissipation_w(
+        self,
+        sun_exposure: float,
+        earth_exposure: float,
+        temperature_k: float | None = None,
+        albedo_exposure: float = 0.0,
+    ) -> float:
         """Compute net radiator heat flow in Watts.
 
         Positive values indicate net heat rejection (dumping heat).
         Negative values indicate net absorption from external fluxes.
+
+        With ``temperature_k`` the radiator emits at that temperature and the
+        emitted flux is not capped. Without it the radiator emits at
+        ``radiator_temperature_k``, capped by
+        ``dissipation_coefficient_w_per_m2``.
         """
-        absorbed_flux_w_per_m2 = self.absorptivity * (
-            self.solar_constant_w_per_m2 * self.sun_loading_factor * sun_exposure
-            + self.earth_ir_flux_w_per_m2 * self.earth_loading_factor * earth_exposure
+        absorbed_w = self.absorbed_power_w(
+            sun_exposure, earth_exposure, albedo_exposure
         )
+        if temperature_k is not None:
+            return self.emitted_power_w(temperature_k) - absorbed_w
 
         emitted_flux_w_per_m2 = (
             self.emissivity
             * STEFAN_BOLTZMANN_W_PER_M2_K4
             * (self.radiator_temperature_k**4 - self.sink_temperature_k**4)
         )
-
         # Keep legacy calibration lever by capping emitted flux.
         emitted_flux_w_per_m2 = min(
             emitted_flux_w_per_m2,
             self.dissipation_coefficient_w_per_m2,
         )
+        return self.radiating_area_m2 * emitted_flux_w_per_m2 - absorbed_w
 
-        net_flux_w_per_m2 = emitted_flux_w_per_m2 - absorbed_flux_w_per_m2
-        return self.area_m2 * self.efficiency * net_flux_w_per_m2
+    def internal_heat_w(self, subsystem_power_w: float) -> float:
+        """Internal heat reaching the radiator, in watts, when its subsystem
+        draws ``subsystem_power_w`` of electrical power."""
+        return self.heat_load_w + self.subsystem_power_fraction * subsystem_power_w
+
+    def equilibrium_temperature_k(
+        self,
+        internal_heat_w: float,
+        sun_exposure: float,
+        earth_exposure: float,
+        albedo_exposure: float = 0.0,
+    ) -> float:
+        """The temperature at which the radiator emits exactly the internal
+        heat plus the absorbed external power.
+
+        Infinite where the radiator cannot emit (zero emissivity, efficiency
+        or area) and receives any heat.
+        """
+        gain_w = internal_heat_w + self.absorbed_power_w(
+            sun_exposure, earth_exposure, albedo_exposure
+        )
+        coefficient = self._radiative_coefficient_w_per_k4
+        if coefficient <= 0.0:
+            return float("inf") if gain_w > 0.0 else self.sink_temperature_k
+        return float((self.sink_temperature_k**4 + gain_w / coefficient) ** 0.25)
+
+    def temperature_after(
+        self,
+        temperature_k: float,
+        seconds: float,
+        internal_heat_w: float,
+        sun_exposure: float,
+        earth_exposure: float,
+        albedo_exposure: float = 0.0,
+    ) -> float:
+        """The temperature ``seconds`` after ``temperature_k`` with the heat
+        inputs held constant.
+
+        The node has heat capacity ``thermal_mass_j_per_k`` and obeys
+        ``C dT/dt = internal + absorbed - emitted(T)``, which is the same as
+        ``dT/dt = -rate(T) (T - T_eq)`` with ``T_eq`` the equilibrium
+        temperature. The step is split into parts, and in each part the
+        temperature relaxes exponentially toward ``T_eq`` at the rate
+        evaluated at the start of the part, so the result approaches the
+        equilibrium from one side and never passes it, whatever the step
+        length.
+        """
+        capacity = self.thermal_mass_j_per_k
+        if capacity is None:
+            return temperature_k
+        if seconds <= 0.0:
+            return temperature_k
+        coefficient = self._radiative_coefficient_w_per_k4
+        if coefficient <= 0.0:
+            gain_w = internal_heat_w + self.absorbed_power_w(
+                sun_exposure, earth_exposure, albedo_exposure
+            )
+            return temperature_k + gain_w * seconds / capacity
+        equilibrium_k = self.equilibrium_temperature_k(
+            internal_heat_w, sun_exposure, earth_exposure, albedo_exposure
+        )
+
+        def rate_per_s(at_k: float) -> float:
+            # emitted(T) - emitted(T_eq), divided by (T - T_eq) and the capacity
+            return (
+                coefficient
+                * (at_k + equilibrium_k)
+                * (at_k**2 + equilibrium_k**2)
+                / capacity
+            )
+
+        parts = min(
+            _MAX_SUBSTEPS,
+            max(
+                1,
+                math.ceil(
+                    rate_per_s(temperature_k) * seconds / _MAX_TIME_CONSTANT_FRACTION
+                ),
+            ),
+        )
+        part_seconds = seconds / parts
+        for _ in range(parts):
+            temperature_k = equilibrium_k + (temperature_k - equilibrium_k) * math.exp(
+                -rate_per_s(temperature_k) * part_seconds
+            )
+        return temperature_k
 
 
 class RadiatorConfiguration(ConfigModel):
     """Configuration for spacecraft radiator subsystem."""
 
     radiators: list[Radiator] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _thermal_radiators_have_unique_names(self) -> RadiatorConfiguration:
+        if not any(rad.thermal_mass_j_per_k is not None for rad in self.radiators):
+            return self
+        names = [rad.name for rad in self.radiators]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(
+                "Radiator temperatures are reported by name, so radiator names "
+                f"must be unique when a thermal mass is set; repeated: {repeated}"
+            )
+        return self
 
     @cached_property
     def radiator_hard_constraint(self) -> ConstraintConfig | None:
@@ -427,6 +672,18 @@ class RadiatorConfiguration(ConfigModel):
             )
         )
 
+        # The Earth's apparent size and sunlit fraction, for the radiators
+        # whose Earth load depends on them.
+        earth_radius_ratio = 1.0
+        subsolar_cosine = 0.0
+        if any(rad.earth_flux_model == "view_factor" for rad in self.radiators):
+            distance_km = float(np.linalg.norm(position_vectors(ephem, "gcrs")[idx]))
+            earth_radius_ratio = min(1.0, MEAN_EARTH_RADIUS_KM / distance_km)
+            if sun_unit is not None and earth_unit is not None:
+                # The spacecraft is opposite the Earth's direction, and the
+                # Sun's direction is the same from the Earth's centre.
+                subsolar_cosine = -float(np.dot(earth_unit, sun_unit))
+
         area_total = sum(rad.area_m2 for rad in self.radiators)
         if area_total <= 0:
             area_total = 1.0
@@ -449,7 +706,12 @@ class RadiatorConfiguration(ConfigModel):
             sun_exp, earth_exp = rad._dot_exposure(
                 sun_unit, earth_unit, in_eclipse, occluders or None
             )
-            heat_w = rad.heat_dissipation_w(sun_exp, earth_exp)
+            earth_ir_exp, albedo_exp = rad.earth_loads(
+                earth_exp, earth_radius_ratio, subsolar_cosine
+            )
+            heat_w = rad.heat_dissipation_w(
+                sun_exp, earth_ir_exp, albedo_exposure=albedo_exp
+            )
 
             sun_weighted += sun_exp * rad.area_m2
             earth_weighted += earth_exp * rad.area_m2
@@ -462,6 +724,8 @@ class RadiatorConfiguration(ConfigModel):
                     "area_m2": rad.area_m2,
                     "sun_exposure": sun_exp,
                     "earth_exposure": earth_exp,
+                    "earth_ir_exposure": earth_ir_exp,
+                    "albedo_exposure": albedo_exp,
                     "heat_dissipation_w": heat_w,
                     "hard_violation": rad.in_hard_constraint(
                         ra_deg, dec_deg, utime, roll_deg

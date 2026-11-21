@@ -4,10 +4,12 @@ from collections.abc import Mapping
 from functools import cached_property
 
 import yaml
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SerializeAsAny, field_validator, model_validator
 from rust_ephem.constraints import ConstraintConfig
 
 from ..common.enums import ACSMode
+from ..requirements.base import KIND_KEY, Requirement, parse_requirement
+from ..requirements.slew import SlewTimeRequirement
 from ._base import ConfigModel
 from .battery import Battery
 from .constraint import AttitudeConstraintScope, Constraint, DefaultConstraint
@@ -52,6 +54,7 @@ def _default_attitude_constraint_scopes() -> dict[str, list[AttitudeConstraintSc
         ],
         ACSMode.IDLE.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
         ACSMode.DESAT.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
+        ACSMode.ACTIVITY.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
     }
 
 
@@ -76,6 +79,7 @@ def _normalize_attitude_constraint_scopes(
     scopes = _default_attitude_constraint_scopes()
     if value is None:
         return scopes
+    activity_configured = False
     for mode, configured_scopes in value.items():
         normalized: list[AttitudeConstraintScope] = []
         for scope in configured_scopes:
@@ -83,6 +87,9 @@ def _normalize_attitude_constraint_scopes(
             if enum_scope not in normalized:
                 normalized.append(enum_scope)
         scopes[_mode_name(mode)] = normalized
+        activity_configured |= _mode_name(mode) == ACSMode.ACTIVITY.name
+    if not activity_configured:
+        scopes[ACSMode.ACTIVITY.name] = list(scopes[ACSMode.IDLE.name])
     return scopes
 
 
@@ -194,6 +201,62 @@ class MissionConfig(ConfigModel):
         ),
     )
 
+    requirements: list[SerializeAsAny[Requirement]] = Field(
+        default_factory=list,
+        description=(
+            "Mission requirements checked against a plan and a run, such as slew "
+            "times and telemetry limits. They are checks, not constraints: a "
+            "scheduler does not change a plan to meet one"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _move_slew_requirements_from_the_acs(cls, data: object) -> object:
+        """Read a file written when the slew classes were configured as
+        ``spacecraft_bus.attitude_control.slew_requirements``: the classes
+        become a slew time requirement."""
+        if not isinstance(data, Mapping):
+            return data
+        bus = data.get("spacecraft_bus")
+        if not isinstance(bus, Mapping):
+            return data
+        acs = bus.get("attitude_control")
+        if not isinstance(acs, Mapping) or "slew_requirements" not in acs:
+            return data
+        classes = acs["slew_requirements"]
+        moved = dict(data)
+        moved["spacecraft_bus"] = {
+            **bus,
+            "attitude_control": {
+                key: value for key, value in acs.items() if key != "slew_requirements"
+            },
+        }
+        if classes:
+            moved["requirements"] = [
+                *(data.get("requirements") or []),
+                {KIND_KEY: SlewTimeRequirement.kind, "classes": classes},
+            ]
+        return moved
+
+    @field_validator("requirements", mode="before")
+    @classmethod
+    def _requirements_by_kind(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            return value
+        return [parse_requirement(item) for item in value]
+
+    @field_validator("requirements")
+    @classmethod
+    def _requirement_names_are_unique(
+        cls, value: list[Requirement]
+    ) -> list[Requirement]:
+        names = [requirement.name for requirement in value]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"requirement names must be unique; repeated: {repeated}")
+        return value
+
     @model_validator(mode="after")
     def _one_storage_model(self) -> MissionConfig:
         self.__dict__.pop("_recorder_view_cache", None)
@@ -303,6 +366,13 @@ class MissionConfig(ConfigModel):
                 if step.instrument_modes:
                     check(step.instrument_modes)
         return self
+
+    def science_in_eclipse_for(self, obsid: int) -> bool:
+        """The category override, or the mission's eclipse observing default."""
+        override = self.observation_categories.get_category(
+            int(obsid)
+        ).science_in_eclipse
+        return self.constraint.science_in_eclipse if override is None else override
 
     def observation_timing_for(self, obsid: int) -> ObservationTiming:
         """The setup, cleanup and handoff budgets of the observation ``obsid``:

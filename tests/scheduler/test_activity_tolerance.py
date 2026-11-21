@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from conops import DITL, QueueDITL, create_ditl
 from conops.common import ObsType
-from conops.config import Constraint, SolarPanel, SolarPanelSet
+from conops.config import Constraint, ObservationTiming, SolarPanel, SolarPanelSet
 from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 from conops.targets import Plan, PlanEntry, Pointing, ScheduledActivity
 from conops.targets.activity import periodic_activities
@@ -253,7 +253,13 @@ class TestActivityAfterActivity:
 
     def _check(self, plan: Plan | list, second: ScheduledActivity) -> None:
         window, cal = _activities(plan)
-        assert float(window.begin) == BLOCK_START
+        # The window is held from its start; a plan may slew to it before.
+        held_from = (
+            window.activity_hold_begin
+            if window.activity_hold_begin is not None
+            else float(window.begin)
+        )
+        assert held_from == BLOCK_START
         assert float(window.end) == self.WINDOW.end
         assert float(cal.begin) == self.WINDOW.end
         assert float(cal.end) - float(cal.begin) == pytest.approx(BLOCK)
@@ -408,6 +414,81 @@ class TestEclipseIntervals:
 
 
 class TestHeldBlock:
+    def test_momentum_pass_keeps_slews_before_a_sliding_activity(self) -> None:
+        """Retained science is ordered by slew start, including a slew that
+        arrives after a calibration's nominal start but before its latest one.
+        Inserting the first retained entry settles the calibration earlier;
+        the second must still precede it and move it back after its collection.
+        """
+        config = _config(HOURS)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        config.payload.observation_timing = ObservationTiming()
+        acs = config.spacecraft_bus.attitude_control
+        acs.max_slew_rate = 0.05
+        acs.slew_acceleration = 0.01
+        acs.settle_time = 0.0
+        first = _target(
+            config,
+            1,
+            10,
+            20,
+            merit=90,
+            minutes=20,
+            snapshot=20,
+            earliest_start=T0 + HOUR,
+            deadline=T0 + HOUR + MIN,
+        )
+        second = _target(
+            config,
+            2,
+            160,
+            0,
+            merit=80,
+            minutes=20,
+            snapshot=20,
+            earliest_start=T0 + 2 * HOUR + 10 * MIN,
+        )
+        calibration = ScheduledActivity(
+            name="Cal",
+            begin=BLOCK_START,
+            duration_seconds=BLOCK,
+            slide_seconds=HOUR,
+        )
+        scheduler = PriorityScheduler(
+            config,
+            [first, second],
+            BEGIN,
+            END,
+            step_size=STEP,
+            activities=[calibration],
+            include_passes=False,
+        )
+        original = scheduler.schedule()
+        science = _science(original)
+        assert len(science) == 2
+        assert (
+            float(science[1].begin)
+            < calibration.begin
+            < (float(science[1].begin) + science[1].slewtime)
+        )
+        windows = [(e.obsid, float(e.begin), float(e.end)) for e in science]
+
+        # A momentum pass retains the science before its newly reserved dump.
+        scheduler._keep_before(T0 + 3 * HOUR)
+        rebuilt = scheduler._plan_once()
+
+        assert [
+            (e.obsid, float(e.begin), float(e.end)) for e in _science(rebuilt)
+        ] == windows
+        [entry] = _activities(rebuilt)
+        assert float(entry.begin) >= windows[-1][2]
+        assert float(entry.end) - float(entry.begin) == BLOCK
+        replay = DITL(config=config, plan=rebuilt, begin=BEGIN, end=END)
+        replay.step_size = STEP
+        assert replay.calc()
+        assert replay.validate_plan_matches_execution() == []
+
     def test_a_held_block_begins_after_what_is_fixed_before_it(self) -> None:
         """A seeded planner holds a sliding activity where its start plan held
         it. Where an entry fixed before the activity, such as one committed

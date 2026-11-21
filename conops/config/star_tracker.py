@@ -201,6 +201,7 @@ class StarTrackerOrientation(ConfigModel):
         Given a pointing direction in the spacecraft frame (RA/Dec), this method
         computes what that same direction looks like from the star tracker's
         perspective, accounting for:
+
         1. The spacecraft's roll rotation about its boresight axis
         2. The star tracker's offset orientation (boresight vector) relative to
            the spacecraft body

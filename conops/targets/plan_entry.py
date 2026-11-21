@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from enum import Enum
+from hashlib import sha256
 from typing import ClassVar, Literal
 
 import numpy as np
@@ -18,7 +20,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from rust_ephem.constraints import ConstraintConfig
+from rust_ephem.constraints import CombinedConstraintConfig, ConstraintConfig
 
 from ..common import givename, unixtime2date, unixtime_from
 from ..common.enums import ACSMode, ObsType
@@ -39,6 +41,7 @@ from ..config import (
 )
 from ..config.acs import scheduled_slew_time
 from ..config.constraint import (
+    AttitudeConstraintScope,
     attitude_constraint_names_for_scopes,
     mounted_science_attitude_constraint_names,
 )
@@ -143,6 +146,16 @@ class TargetAttitudeSchema(BaseModel):
     pointing: AttitudePointingSchema
 
 
+class ActivityInterruption(BaseModel):
+    """An emergency override and the disposition of unexecuted activity time."""
+
+    model_config = ConfigDict(frozen=True)
+    time: float
+    reason: Literal["emergency_recharge"] = "emergency_recharge"
+    remaining_seconds: float = Field(ge=0)
+    disposition: Literal["resume", "restart"]
+
+
 class PlanEntry(BaseModel):
     """Class to define a entry in the Plan"""
 
@@ -236,6 +249,29 @@ class PlanEntry(BaseModel):
         description=(
             "Whether this activity entry is a thruster momentum dump, after "
             "which the wheels hold the dump's residual"
+        ),
+    )
+    activity_hold_begin: float | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Full activity hold start, including any part before this run",
+    )
+    safe_hold: bool = Field(default=False, exclude_if=lambda v: v is False)
+    activity_resumed: bool = Field(default=False, exclude_if=lambda v: v is False)
+    activity_interruption: ActivityInterruption | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    activity_hold_end: float | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Full activity hold end, including any part after this run",
+    )
+    activity_requires_stationary: bool = Field(
+        default=False,
+        exclude_if=lambda v: v is False,
+        description=(
+            "Whether this activity reserves a stationary hold after ingress; "
+            "slewing or an unexpected hold mode violates the plan"
         ),
     )
     own_timing: ObservationTiming | None = Field(
@@ -351,6 +387,9 @@ class PlanEntry(BaseModel):
     _frame_axes: (
         tuple[tuple[float, float, float], tuple[float, float, float]] | None
     ) = PrivateAttr(default=None)
+    _visibility_key: tuple[object, ...] | None = PrivateAttr(default=None)
+    _visibility_spans: list[tuple[float, float]] = PrivateAttr(default_factory=list)
+    _bounded_windows: list[list[float]] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -492,6 +531,43 @@ class PlanEntry(BaseModel):
         return f"{unixtime2date(self.begin)} Target: {self.name} ({self.obsid}) Exp: {self.exposure}s "
 
     @property
+    def activity_partial(self) -> bool:
+        """Whether this entry covers only part of its full activity hold."""
+        return (
+            self.activity_resumed
+            or self.activity_interruption is not None
+            or (
+                self.activity_hold_begin is not None
+                and float(self.begin) > self.activity_hold_begin
+            )
+            or (
+                self.activity_hold_end is not None
+                and float(self.end) < self.activity_hold_end
+            )
+        )
+
+    @property
+    def activity_mode(self) -> ACSMode:
+        return (
+            ACSMode.SAFE
+            if self.safe_hold
+            else ACSMode.DESAT
+            if self.desaturation
+            else ACSMode.ACTIVITY
+        )
+
+    @property
+    def activity_finishes(self) -> bool:
+        """Whether the reserved interval reaches the full hold's end.
+
+        Legacy entries without hold metadata retain their original meaning:
+        their entry end is the activity's completion time.
+        """
+        return self.activity_interruption is None and (
+            self.activity_hold_end is None or float(self.end) >= self.activity_hold_end
+        )
+
+    @property
     def collected_seconds(self) -> float:
         """Science collection credited to this target so far."""
         return self._collected_seconds
@@ -507,8 +583,9 @@ class PlanEntry(BaseModel):
         """Credit executed science collection to this target.
 
         Reduces the remaining exposure time and records when the target was
-        last observed. A remainder shorter than ``step``, the step the
-        simulation runs at, ends the target: it is rounding, not science.
+        last observed. A remainder that is rounding at ``step``, the step
+        the simulation runs at, ends the target (see
+        :func:`is_rounding_remainder`).
 
         Args:
             utime: Time the collection ended.
@@ -519,9 +596,9 @@ class PlanEntry(BaseModel):
             return
         if self.exptime is not None:
             self.exptime = max(0, self.exptime - seconds)
-            if 0 < self.exptime < step:
-                # A remainder shorter than the step the simulation runs at
-                # is rounding, not science to come back for.
+            if self.exptime > 0 and is_rounding_remainder(
+                self.exptime, step, self.exporig
+            ):
                 self.exptime = 0
         self._collected_seconds += seconds
         self._last_collection_time = utime
@@ -556,9 +633,21 @@ class PlanEntry(BaseModel):
         """When this target's observations were cut short, in order."""
         return tuple(self._interruptions)
 
-    def record_interruption(self, utime: float) -> None:
-        """Record that an observation of this target was cut short at ``utime``."""
+    def record_interruption(self, utime: float, *, began: float | None = None) -> None:
+        """Record that an observation of this target was cut short at
+        ``utime``. ``began`` is when that observation began, where the
+        caller has it; a target with visit windows uses it (see
+        :meth:`Pointing.record_interruption`)."""
         self._interruptions.append(utime)
+
+    @property
+    def last_observation_cut(self) -> bool:
+        """Whether the target's most recent observation was cut short: it
+        has an interruption at or after its last collection."""
+        if not self._interruptions:
+            return False
+        last = self._last_collection_time
+        return last is None or self._interruptions[-1] >= last
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -832,6 +921,26 @@ class PlanEntry(BaseModel):
             return ra, dec, float(roll)
         return telescope.target_body_attitude(ra, dec, float(roll))
 
+    def forbids_eclipse(self) -> bool:
+        """Whether this observation inherits or requests an eclipse prohibition."""
+        return (
+            self.config is not None
+            and self.config.science_in_eclipse_for(int(self.obsid)) is False
+        )
+
+    def eclipse_violation(self, begin: float, end: float) -> float | None:
+        if self.forbids_eclipse() and self.constraint is not None:
+            return self.constraint.first_eclipse_overlap(begin, end)
+        return None
+
+    def observing_windows(
+        self, windows: Sequence[Sequence[float]]
+    ) -> list[tuple[float, float]]:
+        """Geometric windows filtered by this request's eclipse policy."""
+        if self.forbids_eclipse() and self.constraint is not None:
+            return self.constraint.without_eclipses(windows)
+        return [(a, b) for a, b in windows]
+
     def attitude_constraint_names(
         self,
         scopes: Sequence[str | Enum],
@@ -844,7 +953,7 @@ class PlanEntry(BaseModel):
             return []
         if self.uses_mounted_attitude():
             science_ra, science_dec = self.position_at(utime)
-            return mounted_science_attitude_constraint_names(
+            names = mounted_science_attitude_constraint_names(
                 self.constraint,
                 scopes,
                 (science_ra, science_dec, self.roll),
@@ -852,15 +961,24 @@ class PlanEntry(BaseModel):
                 utime,
                 acs_mode,
             )
-        return attitude_constraint_names_for_scopes(
-            self.constraint,
-            scopes,
-            spacecraft_attitude[0],
-            spacecraft_attitude[1],
-            utime,
-            target_roll=spacecraft_attitude[2],
-            acs_mode=acs_mode,
-        )
+        else:
+            names = attitude_constraint_names_for_scopes(
+                self.constraint,
+                scopes,
+                spacecraft_attitude[0],
+                spacecraft_attitude[1],
+                utime,
+                target_roll=spacecraft_attitude[2],
+                acs_mode=acs_mode,
+            )
+        if (
+            acs_mode == ACSMode.SCIENCE
+            and AttitudeConstraintScope.IMAGING_QUALITY in scopes
+            and self.forbids_eclipse() is True
+            and self.constraint.in_eclipse(0, 0, utime)
+        ):
+            names.append("science_eclipse")
+        return names
 
     def givename(self, stem: str = "") -> None:
         self.name = givename(self.ra, self.dec, stem=stem)
@@ -892,14 +1010,117 @@ class PlanEntry(BaseModel):
 
     def visibility(
         self,
+        *,
+        begin: float | int | str | datetime | None = None,
+        end: float | int | str | datetime | None = None,
     ) -> int:
-        """Calculate the visibility windows for a target for a given day(s).
+        """Compute visibility over the ephemeris, or only a requested interval.
 
-        Note: year, day, length, and hires parameters are kept for backwards
-        compatibility but are no longer used. The visibility is calculated over
-        the entire ephemeris time range.
+        Bounded calls accumulate known windows on this entry. Wider/later calls
+        extend coverage; changes to geometry, track, roll or configuration
+        invalidate it. Omitting both bounds retains the whole-ephemeris API.
+        Evaluations use the original grid with adjacent samples so interval
+        boundaries agree with clipping a whole-window evaluation.
         """
+        if begin is None and end is None:
+            self._visibility_key = None
+            self._visibility_spans = []
+            self._bounded_windows = []
+            return self._evaluate_visibility()
+        assert self.ephem is not None and self.config is not None
+        assert self.constraint is not None
+        timestamps = list(self.ephem.timestamp)
+        grid = [float(t.timestamp()) for t in timestamps]
+        if not grid:
+            raise ValueError("Cannot calculate visibility on an empty ephemeris")
+        first = grid[0] if begin is None else unixtime_from(begin)
+        last = grid[-1] if end is None else unixtime_from(end)
+        if not np.isfinite(first) or not np.isfinite(last) or first > last:
+            raise ValueError("Visibility bounds must be finite and begin <= end")
+        first, last = max(first, grid[0]), min(last, grid[-1])
+        key = (
+            id(self.ephem),
+            len(grid),
+            grid[0],
+            grid[-1],
+            self.ra,
+            self.dec,
+            self.roll,
+            self.instrument_name,
+            self.obsid,
+            tuple((p.utime, p.ra, p.dec) for p in self.track),
+            sha256(self.config.model_dump_json().encode()).digest(),
+            sha256(self.constraint.model_dump_json().encode()).digest(),
+        )
+        if key != self._visibility_key:
+            self._visibility_key = key
+            self._visibility_spans = []
+            self._bounded_windows = []
+        for missing_begin, missing_end in self._uncovered_visibility(first, last):
+            left = max(0, bisect_left(grid, missing_begin) - 1)
+            right = min(len(grid), bisect_right(grid, missing_end) + 1)
+            self._evaluate_visibility(timestamps[left:right])
+            clipped = [
+                [max(a, missing_begin), min(b, missing_end)]
+                for a, b in self.windows
+                if a <= missing_end and b >= missing_begin
+            ]
+            self._bounded_windows = self._merge_visibility(
+                [*self._bounded_windows, *clipped]
+            )
+            self._visibility_spans = [
+                (w[0], w[1])
+                for w in self._merge_visibility(
+                    [*self._visibility_spans, (missing_begin, missing_end)]
+                )
+            ]
+        self.windows = [list(w) for w in self._bounded_windows]
+        return 0
 
+    def _uncovered_visibility(
+        self, begin: float, end: float
+    ) -> list[tuple[float, float]]:
+        """Intervals whose visibility is unknown, including shared endpoints.
+
+        Each missing interval is evaluated with its original-grid halo. Shared
+        endpoints preserve transitions when its windows join the cached ones.
+        """
+        if begin > end:
+            return []
+        if begin == end:
+            return (
+                []
+                if any(a <= begin <= b for a, b in self._visibility_spans)
+                else [(begin, end)]
+            )
+        missing = []
+        cursor = begin
+        for first, last in self._visibility_spans:
+            if last < cursor:
+                continue
+            if first > end:
+                break
+            if cursor < first:
+                missing.append((cursor, first))
+            cursor = max(cursor, last)
+            if cursor >= end:
+                break
+        if cursor < end:
+            missing.append((cursor, end))
+        return missing
+
+    @staticmethod
+    def _merge_visibility(windows: Sequence[Sequence[float]]) -> list[list[float]]:
+        merged: list[list[float]] = []
+        for begin, end in sorted(windows, key=lambda w: (w[0], w[1])):
+            if merged and begin <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([begin, end])
+        return merged
+
+    def _evaluate_visibility(self, times: list[datetime] | None = None) -> int:
+        """Evaluate original grid samples; bounded callers provide a grid halo."""
         assert self.config is not None, "Config must be set to calculate visibility"
         assert self.config.constraint is not None, (
             "Constraint must be set to calculate visibility"
@@ -910,6 +1131,13 @@ class PlanEntry(BaseModel):
         assert self.constraint is not None, (
             "Constraint must be set to calculate visibility"
         )
+        if times is not None:
+            # A bounded cache miss can follow configuration mutation. Rebuild
+            # composite trees and the backend rather than reuse their old geometry.
+            self.constraint.invalidate_combined_constraint_cache()
+            telescope = self.science_telescope()
+            if telescope is not None and telescope.constraint is not None:
+                telescope.constraint.invalidate_combined_constraint_cache()
         if self.uses_mounted_attitude():
             # Visibility belongs to the selected science line of sight. Physical
             # bus hardware constraints are checked after a concrete instrument
@@ -938,19 +1166,25 @@ class PlanEntry(BaseModel):
             combined_constraint = self.constraint.constraint
             effective_roll = self.roll
 
+        if times is not None and combined_constraint is not None:
+            combined_constraint = CombinedConstraintConfig.validate_json(
+                combined_constraint.model_dump_json()
+            )
+
         if combined_constraint is None:
             self.windows = [
                 [
-                    float(self.ephem.begin.timestamp()),
-                    float(self.ephem.end.timestamp()),
+                    float((times[0] if times else self.ephem.begin).timestamp()),
+                    float((times[-1] if times else self.ephem.end).timestamp()),
                 ]
             ]
+            self.windows = [list(w) for w in self.observing_windows(self.windows)]
             return 0
 
         if self.track:
             # A moving target: the constraint along its track, resampled on
             # the ephemeris grid, which the moving-body evaluation wants.
-            times = list(self.ephem.timestamp)
+            times = list(self.ephem.timestamp) if times is None else times
             ras, decs = positions_along(
                 self.track, [float(t.timestamp()) for t in times]
             )
@@ -965,14 +1199,24 @@ class PlanEntry(BaseModel):
                 [v.start_time.timestamp(), v.end_time.timestamp()]
                 for v in moving.visibility
             ]
+            self.windows = [list(w) for w in self.observing_windows(self.windows)]
             return 0
 
-        in_constraint = combined_constraint.evaluate(
-            ephemeris=self.ephem,
-            target_ra=self.ra,  # already in degrees
-            target_dec=self.dec,
-            target_roll=effective_roll,
-        )
+        if times is None:
+            in_constraint = combined_constraint.evaluate(
+                ephemeris=self.ephem,
+                target_ra=self.ra,  # already in degrees
+                target_dec=self.dec,
+                target_roll=effective_roll,
+            )
+        else:
+            in_constraint = combined_constraint.evaluate(
+                ephemeris=self.ephem,
+                target_ra=self.ra,
+                target_dec=self.dec,
+                target_roll=effective_roll,
+                times=times,
+            )
         # Construct the visibility windows
 
         self.windows = [
@@ -980,6 +1224,7 @@ class PlanEntry(BaseModel):
             for v in in_constraint.visibility
         ]
 
+        self.windows = [list(w) for w in self.observing_windows(self.windows)]
         return 0
 
     def visible(self, begin: float, end: float) -> list[float] | Literal[False]:
@@ -1123,15 +1368,40 @@ class PlanEntry(BaseModel):
         )
 
 
+ROUNDING_REMAINDER_FRACTION = 0.1
+"""The largest part of a request's exposure that a remainder shorter than
+the simulation step may be and still count as rounding."""
+
+
+def is_rounding_remainder(
+    remaining: float, step: float, exposure: float | None
+) -> bool:
+    """Whether ``remaining`` seconds of a request for ``exposure`` seconds
+    are rounding, not science to observe.
+
+    The remainder is rounding when it is shorter than ``step``, the step
+    the simulation runs at, and no more than
+    :data:`ROUNDING_REMAINDER_FRACTION` of the exposure. A request only a
+    few steps long can have most of its science left and still less than a
+    step of it, and that remainder is observed. Without an exposure to
+    compare with, any remainder shorter than the step is rounding.
+    """
+    if remaining >= step:
+        return False
+    if exposure is None or exposure <= 0.0:
+        return True
+    return remaining <= ROUNDING_REMAINDER_FRACTION * exposure
+
+
 def snapshot_min_seconds(entry: PlanEntry, step: float = 0.0) -> float:
     """The least a snapshot of ``entry`` may collect, in seconds.
 
     ``ss_min`` for its first snapshot; once it has collected anything, the
     smaller of ``ss_min`` and what remains, so a target cut short by an
     interruption, or left with a remainder, finishes its exposure instead
-    of losing what is below ``ss_min``. A remainder shorter than ``step``,
-    the step the simulation runs at, is rounding rather than science and
-    gets no snapshot: the minimum stays ``ss_min``. Reads the public
+    of losing what is below ``ss_min``. A remainder that is rounding at
+    ``step`` (see :func:`is_rounding_remainder`) gets no snapshot: the
+    minimum stays ``ss_min``. Reads the public
     attributes, so a test double with a numeric ``ss_min`` and no
     collection record gets its ``ss_min``.
     """
@@ -1142,7 +1412,11 @@ def snapshot_min_seconds(entry: PlanEntry, step: float = 0.0) -> float:
         not isinstance(collected, (int, float))
         or collected <= 0.0
         or not isinstance(remaining, (int, float))
-        or float(remaining) < step
+    ):
+        return ss_min
+    exposure = getattr(entry, "exporig", None)
+    if is_rounding_remainder(
+        float(remaining), step, exposure if isinstance(exposure, (int, float)) else None
     ):
         return ss_min
     return min(ss_min, max(0.0, float(remaining)))

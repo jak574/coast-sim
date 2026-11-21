@@ -697,17 +697,32 @@ class Payload(ConfigModel):
             Total power draw in watts
         """
         return sum(
-            instrument.power(
-                mode,
-                in_eclipse=in_eclipse,
-                instrument_mode=(
-                    instrument_modes.get(instrument.name)
-                    if instrument_modes is not None
-                    else None
-                ),
-            )
-            for instrument in self.instruments
+            self.power_by_instrument(mode, in_eclipse, instrument_modes).values()
         )
+
+    def power_by_instrument(
+        self,
+        mode: int | None = None,
+        in_eclipse: bool = False,
+        instrument_modes: Mapping[str, str] | None = None,
+    ) -> dict[str, float]:
+        """The power draw of each instrument, in watts, by instrument name,
+        for the arguments of :meth:`power`. Instruments that share a name
+        are added together."""
+        powers: dict[str, float] = {}
+        for instrument in self.instruments:
+            powers[instrument.name] = powers.get(instrument.name, 0.0) + (
+                instrument.power(
+                    mode,
+                    in_eclipse=in_eclipse,
+                    instrument_mode=(
+                        instrument_modes.get(instrument.name)
+                        if instrument_modes is not None
+                        else None
+                    ),
+                )
+            )
+        return powers
 
     def check_instrument_modes(self, instrument_modes: Mapping[str, str]) -> None:
         """Raise if a mode names an instrument the payload lacks, or a mode

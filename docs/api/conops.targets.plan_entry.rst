@@ -1,9 +1,7 @@
-conops.targets.plan\_entry
-==========================
+conops.targets.plan_entry
+=========================
 
 .. automodule:: conops.targets.plan_entry
-   :members: PlanEntry
+   :members:
    :undoc-members:
    :show-inheritance:
-   :special-members: __init__
-   :no-index:

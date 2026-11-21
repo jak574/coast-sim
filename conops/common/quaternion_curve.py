@@ -1,12 +1,11 @@
 """Rate-continuous quaternion Hermite curves with interval limit checks.
 
-Normalize a cubic quaternion polynomial p(s). For the ECI-to-body convention,
-body rate is -2 vec(p' conjugate(p)) / |p|². Differentiating this rational
+Normalize a cubic quaternion polynomial ``p(s)``. For the ECI-to-body convention,
+body rate is ``-2 vec(p' conjugate(p)) / |p|²``. Differentiating this rational
 expression gives body angular acceleration. Bernstein convex-hull bounds check
 both envelopes over whole intervals, not just a grid of evaluation times.
 """
 
-from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from math import comb, isclose, isfinite
 from typing import cast
@@ -14,6 +13,7 @@ from typing import cast
 import numpy as np
 import numpy.typing as npt
 from numpy.polynomial.polynomial import polyval
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from .numerics import ROUNDOFF
 from .vector import _quat_mul
@@ -74,15 +74,17 @@ def _certify(
     return _certify(dl, nl, power, depth + 1) and _certify(dr, nr, power, depth + 1)
 
 
-@dataclass(frozen=True)
-class QuaternionHermite:
+class QuaternionHermite(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     first: tuple[float, float, float, float]
     last: tuple[float, float, float, float]
     first_rate: tuple[float, float, float]
     last_rate: tuple[float, float, float]
     duration: float
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _validate_state(self) -> "QuaternionHermite":
         if not isfinite(self.duration) or self.duration <= 0:
             raise ValueError("Curve duration must be finite and positive")
         for quaternion in (self.first, self.last):
@@ -96,6 +98,7 @@ class QuaternionHermite:
             for value in rate
         ):
             raise ValueError("Curve endpoint rates must be finite")
+        return self
 
     @cached_property
     def _coefficients(self) -> npt.NDArray[np.float64]:

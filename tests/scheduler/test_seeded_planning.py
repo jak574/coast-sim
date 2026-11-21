@@ -15,10 +15,11 @@ from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 TLE = "examples/example.tle"
 
 
-def _weighted(results: list, name: str) -> float:
+def _dynamic(results: list, name: str) -> float:
     result = next(r for r in results if r.contender == name)
     assert result.error is None, result.error
-    return result.weighted_science
+    assert result.dynamic_science is not None
+    return result.dynamic_science
 
 
 class TestStartPlan:
@@ -78,13 +79,7 @@ class TestStartPlan:
 
 
 class TestAcceptance:
-    """The seeded plan's merit-weighted science is at least the dispatch
-    run's, measured the same way from telemetry, within one percent: a
-    snapshot the queue began and a ToO cut short before the request's
-    minimum is science no plan can place, and the planner's slews and
-    rounding shift what it decodes by a minute or two."""
-
-    BOUND = 0.99
+    """Compare executed science at the dynamic values selected by each mode."""
 
     @pytest.mark.parametrize("make", [baseline, program])
     def test_the_seeded_local_search_plan_scores_at_least_dispatch(self, make) -> None:  # type: ignore[no-untyped-def]
@@ -98,11 +93,11 @@ class TestAcceptance:
         )
         table = format_results(results)
         assert "planned:local_search seeded by dispatch" in table
-        assert _weighted(
-            results, "planned:local_search seeded by dispatch"
-        ) >= self.BOUND * _weighted(results, "dispatch")
+        assert _dynamic(results, "planned:local_search seeded by dispatch") >= _dynamic(
+            results, "dispatch"
+        )
 
-    def test_the_seeded_cp_sat_plan_scores_at_least_dispatch(self) -> None:
+    def test_the_seeded_cp_sat_plan_beats_dispatch_deterministically(self) -> None:
         pytest.importorskip("ortools")
         from conops.schedulers import CpSatScheduler
 
@@ -111,12 +106,19 @@ class TestAcceptance:
             scenario,
             [
                 dispatch(),
-                planned(CpSatScheduler, seeded_by_dispatch=True, solver_time_limit=2.0),
+                planned(
+                    CpSatScheduler,
+                    seeded_by_dispatch=True,
+                    solver_time_limit=60.0,
+                    solver_deterministic_time=20.0,
+                    workers=1,
+                    seed=2029,
+                ),
             ],
         )
-        assert _weighted(
-            results, "planned:cp_sat seeded by dispatch"
-        ) >= self.BOUND * _weighted(results, "dispatch")
+        assert _dynamic(results, "planned:cp_sat seeded by dispatch") > _dynamic(
+            results, "dispatch"
+        )
 
 
 class TestProgramScenario:
@@ -127,7 +129,25 @@ class TestProgramScenario:
         categories = {c.name for c in config.observation_categories.categories}
         assert categories == {"Deep fields", "Campaign", "Monitoring", "Pool"}
         campaign = [t for t in targets if t.sequence is not None]
-        assert len(campaign) == 6 and all(len(t.visit_windows) == 2 for t in campaign)
+        assert len(campaign) == 15 and all(len(t.visit_windows) == 2 for t in campaign)
+        # A visit is one unbroken observation: each target is placed where
+        # every visit window holds a visibility window long enough for it.
+        timing = config.observation_categories.get_category(20000).observation_timing
+        assert timing is not None
+        for target in campaign:
+            assert target.sequence is not None
+            needed = (
+                sum(step.duration_seconds for step in target.sequence.steps)
+                + timing.setup_seconds
+                + timing.cleanup_seconds
+            )
+            target.visibility()
+            for visit in target.visit_windows:
+                assert any(
+                    max(w0, visit.start) <= visit.deadline
+                    and w1 - max(w0, visit.start) >= needed
+                    for w0, w1 in target.windows
+                )
         assert not config.observation_categories.get_category(20000).interruptible
         assert (
             config.observation_categories.get_category(10000).observation_timing
@@ -146,3 +166,205 @@ class TestProgramScenario:
             assert result.error is None, result.error
         run = _dispatch(scenario)
         assert any(e.obstype == ObsType.ACTIVITY for e in run.plan)
+
+
+class TestSeedActivityReservations:
+    @pytest.mark.parametrize("kind", ["local_search", "cp_sat"])
+    def test_a_losing_seed_does_not_move_activities_into_the_priority_plan(self, kind):
+        from datetime import timedelta
+
+        from conops.targets import Plan, ScheduledActivity
+
+        from .planning_scenario import BEGIN, MIN, T0, make_config, make_target
+        from .test_activity_safety import _planner
+
+        config = make_config(3)
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        activity = ScheduledActivity(
+            name="Calibration",
+            begin=T0 + 60 * MIN,
+            duration_seconds=30 * MIN,
+            slide_seconds=60 * MIN,
+            obsid=998000,
+        )
+        target = make_target(
+            config,
+            100,
+            105,
+            10,
+            minutes=80,
+            snapshot=80,
+            ss_min=80,
+            deadline=T0 + 20 * MIN,
+        )
+        scheduler_class, options = _planner(kind)
+        settings = dict(
+            config=config,
+            targets=[target],
+            begin=BEGIN,
+            end=BEGIN + timedelta(hours=3),
+            activities=[activity],
+            include_passes=False,
+            **options,
+        )
+        unseeded = scheduler_class(**settings)
+        baseline = unseeded._start_from_priority_plan()
+        assert baseline.final.score > 0
+        seed = Plan(entries=[activity.plan_entry(config, (105, 10, 0))])
+        seeded = scheduler_class(**settings, start_plan=seed)
+        start = seeded._start_from_priority_plan()
+        assert seeded.seed_score == 0
+        assert seeded.start_score == unseeded.start_score
+        assert start.final.score == baseline.final.score
+        [hold] = [b for b in start.final.timeline if b.is_activity]
+        assert hold.ready > activity.begin
+        # The chosen fixed reservations must be the ones used when a
+        # search move or CP-SAT chunk redecodes from the starting state.
+        replay = seeded._decode(list(start.sequence))
+        assert replay.final.score == start.final.score
+        from conops import DITL
+
+        plan = seeded.schedule()
+        run = DITL(config, plan=plan, begin=BEGIN, end=settings["end"])
+        assert run.calc()
+        assert run.validate_plan_matches_execution() == []
+        assert (
+            sum(
+                h.collection_seconds or 0
+                for h in run.telemetry.housekeeping
+                if not h.calibration
+            )
+            == 80 * MIN
+        )
+
+    @pytest.mark.parametrize("kind", ["local_search", "cp_sat"])
+    def test_a_better_seed_retains_its_activity_reservations(self, kind):
+        from conops.common import ObsType
+
+        from .test_activity_safety import _planner
+
+        scenario = program(TLE, hours=6)
+        dispatched = _dispatch(scenario)
+        config = scenario.make_config()
+        targets = [*scenario.make_targets(config), *too_targets(config, scenario.toos)]
+        scheduler_class, options = _planner(kind)
+        scheduler = scheduler_class(
+            config,
+            targets,
+            scenario.begin,
+            scenario.end,
+            activities=scenario.activities,
+            start_plan=dispatched.plan,
+            **options,
+        )
+        start = scheduler._start_from_priority_plan()
+        assert scheduler.seed_score > scheduler.initial_score
+        assert scheduler.start_score == scheduler.seed_score
+        held = {
+            e.obsid: e.activity_hold_begin
+            for e in dispatched.plan
+            if e.obstype == ObsType.ACTIVITY
+        }
+        assert held
+        for block in scheduler._fixed:
+            if block.is_activity:
+                assert block.ready == held[block.entry.obsid]
+        assert scheduler._decode(list(start.sequence)).final.score == start.final.score
+
+    def test_the_planner_and_dispatch_place_campaign_visits(self) -> None:
+        """Every campaign visit is a sequence of four steps. The scenario
+        once asked for visits longer than any visibility window of the
+        orbit, and none was ever placed."""
+        from conops.benchmark.contenders import dispatch
+        from conops.schedulers import PriorityScheduler
+
+        scenario = program(TLE, hours=48)
+        config = scenario.make_config()
+        plan = PriorityScheduler(
+            config,
+            scenario.make_targets(config),
+            scenario.begin,
+            scenario.end,
+            activities=scenario.activities,
+        ).schedule()
+        planned = {
+            (int(e.obsid), e.visit) for e in plan if 20000 <= int(e.obsid) < 20100
+        }
+        assert len(planned) >= 20
+        flown = dispatch().simulate(scenario).simulation.plan
+        dispatched = {
+            (int(e.obsid), e.visit)
+            for e in flown
+            if 20000 <= int(e.obsid) < 20100 and e.collection_begin is not None
+        }
+        assert len(dispatched) >= 20
+
+
+def test_a_plan_of_three_days_fills_every_day() -> None:
+    """The program's calibrations and maintenance inherit their attitude.
+    Several in a row once held one target's attitude for the hours they
+    spanned, the block after them could be reached from no other, and a plan
+    of three days placed 7 hours of science on its first day. Each is now
+    held at a safe hold attitude where idle time comes before it, and every
+    day holds about as much as a plan of one day does."""
+    hours = 72
+    scenario = program(TLE, hours=hours)
+    config = scenario.make_config()
+    plan = PriorityScheduler(
+        config,
+        scenario.make_targets(config),
+        scenario.begin,
+        scenario.end,
+        activities=scenario.activities,
+    ).schedule()
+    start = scenario.begin.timestamp()
+    per_day = [0.0] * (hours // 24)
+    for entry in plan:
+        if (
+            entry.collection_begin is None
+            or entry.collection_end is None
+            or not 10000 <= int(entry.obsid) < 1_000_000
+        ):
+            continue
+        day = int((float(entry.collection_begin) - start) // 86400)
+        per_day[day] += float(entry.collection_end) - float(entry.collection_begin)
+    assert min(per_day) > 12 * 3600
+
+
+class TestProgramPlanIsDecoded:
+    """Local search and CP-SAT start from the priority-first plan as the
+    decoder reproduces it. The program scenario has activities that may
+    begin late, and the decoding lost a tenth of the plan there."""
+
+    @staticmethod
+    def _started(hours: int) -> LocalSearchScheduler:
+        scenario = program(TLE, hours=hours)
+        config = scenario.make_config()
+        scheduler = LocalSearchScheduler(
+            config,
+            scenario.make_targets(config),
+            scenario.begin,
+            scenario.end,
+            activities=scenario.activities,
+            time_limit=0,
+        )
+        scheduler._start_from_priority_plan()
+        return scheduler
+
+    @pytest.mark.parametrize("hours", [24, 48])
+    def test_the_decoded_plan_scores_what_the_priority_plan_does(
+        self, hours: int
+    ) -> None:
+        scheduler = self._started(hours)
+        assert scheduler.start_score == pytest.approx(scheduler.initial_score)
+
+    def test_no_block_begins_before_the_block_before_it_ends(self) -> None:
+        """A visit moved later to make room for a snapshot ends later. The
+        activity after it, which may begin late, begins when the visit now
+        ends, not where it was held before the move."""
+        scheduler = self._started(48)
+        timeline = scheduler._greedy_timeline
+        for before, block in zip(timeline, timeline[1:]):
+            assert float(block.entry.begin) >= before.end - 1e-6
+            assert block.ready >= before.end - 1e-6

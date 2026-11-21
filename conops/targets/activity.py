@@ -3,7 +3,7 @@
 A maintenance window, a calibration that needs the spacecraft still, or a
 block set aside for an engineering test is a :class:`ScheduledActivity`: it
 has a start and a duration, the spacecraft holds the attitude it has in
-``IDLE`` mode for its length, and no science is observed meanwhile. The
+``ACTIVITY`` mode for its length, and no science is observed meanwhile. The
 schedulers reserve activities as fixed blocks, as they reserve ground passes,
 and both simulations execute them: dispatch ends the observation under way at
 the activity's start, starts none whose slew or collection would run into it,
@@ -14,12 +14,19 @@ activity entries.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
-from ..common import ObsType
-from ..config import MissionConfig
+from ..common import ACSMode, ObsType, unixtime_from
+from ..config import ActivityAttitude, MissionConfig
 from .plan_entry import PlanEntry
 
 ACTIVITY_OBSID = 998000
@@ -39,6 +46,10 @@ class ScheduledActivity(BaseModel):
     name: str
     begin: float = Field(description="When the activity starts, in Unix seconds")
     duration_seconds: float = Field(gt=0.0)
+    attitude: ActivityAttitude = Field(
+        default_factory=ActivityAttitude,
+        description="Inherited, fixed or power-positive body attitude for the full hold",
+    )
     instrument_modes: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -61,6 +72,10 @@ class ScheduledActivity(BaseModel):
             "Whether the activity is a thruster momentum dump: the wheels are "
             "unloaded when it ends"
         ),
+    )
+    safe_hold: bool = Field(
+        default=False,
+        description="Recoverable SAFE-mode hold, without latching fault safe mode",
     )
     fixed: bool = Field(
         default=False,
@@ -86,16 +101,34 @@ class ScheduledActivity(BaseModel):
 
     @field_validator("begin", mode="before")
     @classmethod
-    def _begin_as_unix(cls, value: float | datetime) -> float:
+    def _begin_as_unix(cls, value: float | int | str | datetime) -> float:
         if isinstance(value, datetime):
             return value.timestamp()
-        return float(value)
+        return unixtime_from(value)
+
+    @field_serializer("begin", when_used="json")
+    def _serialize_begin(self, v: float) -> str:
+        return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
 
     @model_validator(mode="after")
     def _fixed_does_not_slide(self) -> ScheduledActivity:
+        if self.desaturation and self.attitude.kind == "power_positive":
+            raise ValueError("a firing attitude must be inherited or fixed")
+        if self.safe_hold and self.desaturation:
+            raise ValueError("a safe hold cannot also be a desaturation")
         if self.fixed and self.slide_seconds > 0.0:
             raise ValueError("a fixed activity begins at its start and cannot slide")
         return self
+
+    @property
+    def hold_mode(self) -> ACSMode:
+        return (
+            ACSMode.SAFE
+            if self.safe_hold
+            else ACSMode.DESAT
+            if self.desaturation
+            else ACSMode.ACTIVITY
+        )
 
     @property
     def end(self) -> float:
@@ -109,6 +142,15 @@ class ScheduledActivity(BaseModel):
     @property
     def slides(self) -> bool:
         return self.slide_seconds > 0.0
+
+    def hold_start_for_run(self, run_begin: float) -> float:
+        """Start assumed by an independent run without prior execution state.
+
+        A still-open slide window can start a whole hold within this run.
+        After the window closes, resume from the latest permitted start;
+        a fixed activity has only its nominal start.
+        """
+        return max(self.begin, min(run_begin, self.latest_start))
 
     def plan_entry(
         self,
@@ -133,6 +175,9 @@ class ScheduledActivity(BaseModel):
         entry.instrument_modes = dict(self.instrument_modes)
         entry.fixed_data_gb = float(self.data_gb)
         entry.desaturation = self.desaturation
+        entry.safe_hold = self.safe_hold
+        entry.activity_hold_begin = self.begin
+        entry.activity_hold_end = self.end
         entry.obsid = self.obsid
         entry.obstype = ObsType.ACTIVITY
         entry.ra, entry.dec, entry.roll = attitude
@@ -169,6 +214,8 @@ def periodic_activities(
     data_gb: float = 0.0,
     fixed: bool = False,
     slide_seconds: float = 0.0,
+    attitude: ActivityAttitude | None = None,
+    safe_hold: bool = False,
 ) -> list[ScheduledActivity]:
     """Activities named ``name`` every ``interval_seconds`` from ``first``,
     each ``duration_seconds`` long, ``count`` of them or as many as begin by
@@ -194,6 +241,8 @@ def periodic_activities(
                 data_gb=data_gb,
                 fixed=fixed,
                 slide_seconds=slide_seconds,
+                attitude=attitude or ActivityAttitude(),
+                safe_hold=safe_hold,
             )
         )
         k += 1

@@ -2,7 +2,6 @@ conops.config.power
 ===================
 
 .. automodule:: conops.config.power
-   :members: PowerDraw
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

@@ -43,6 +43,7 @@ from ..config.observation_categories import (
     ObservationCategory,
 )
 from ..config.observation_timing import ObservationTiming
+from ..simulation.slew import Slew
 from ..targets import (
     ObservationSequence,
     Pointing,
@@ -57,6 +58,12 @@ BEGIN = datetime(2025, 11, 1, tzinfo=timezone.utc)
 """Start of every standard scenario."""
 
 HOUR = 3600.0
+
+_CAMPAIGN_TARGETS = 15
+"""Campaign targets of the program scenario: with a visit a day each, their
+science is about a quarter of the run, the category's share."""
+_CAMPAIGN_DRAWS = 200
+"""Sky positions tried for one campaign target at most."""
 
 
 def mission_config(
@@ -492,6 +499,10 @@ def program(
     their own and not interruptible, monitoring targets with a cadence, a
     pool of fillers, twice-daily calibration blocks that may slide, a
     fixed maintenance window, and a ToO a day with a four-hour response.
+    A campaign visit is one unbroken observation, so it has to fit in one
+    visibility window of this low orbit: its steps, setup and cleanup come
+    to 2,340 s, and each campaign target is placed where every one of its
+    visit windows holds a visibility window that long, with the slew in.
     Base merits are set in bands wider than the dynamic merit terms, as a
     program's priorities are, so the planners' objective and the measured
     merit-weighted science rank the programs alike.
@@ -499,6 +510,9 @@ def program(
     end = BEGIN + timedelta(hours=hours)
     start = BEGIN.timestamp()
     days = max(1, hours // 24)
+    campaign_timing = ObservationTiming(
+        setup_seconds=300, cleanup_seconds=120, handoff_seconds=30
+    )
     categories = [
         ObservationCategory(
             name="Deep fields",
@@ -512,12 +526,10 @@ def program(
         ObservationCategory(
             name="Campaign",
             obsid_min=20000,
-            obsid_max=20006,
+            obsid_max=20000 + _CAMPAIGN_TARGETS,
             time_share=0.25,
             interruptible=False,
-            observation_timing=ObservationTiming(
-                setup_seconds=600, cleanup_seconds=300, handoff_seconds=30
-            ),
+            observation_timing=campaign_timing,
         ),
         ObservationCategory(
             name="Monitoring",
@@ -532,13 +544,18 @@ def program(
     ]
     sequence = ObservationSequence(
         steps=[
-            SequenceStep(name="reference", duration_seconds=600, science=False),
-            SequenceStep(name="target", duration_seconds=1800),
+            SequenceStep(name="reference", duration_seconds=240, science=False),
+            SequenceStep(name="target", duration_seconds=720),
             SequenceStep(
-                name="target rolled", duration_seconds=1800, roll_offset_deg=30.0
+                name="target rolled", duration_seconds=720, roll_offset_deg=30.0
             ),
-            SequenceStep(name="reference", duration_seconds=600, science=False),
+            SequenceStep(name="reference", duration_seconds=240, science=False),
         ]
+    )
+    visit_seconds = (
+        sum(step.duration_seconds for step in sequence.steps)
+        + campaign_timing.setup_seconds
+        + campaign_timing.cleanup_seconds
     )
 
     def make_targets(config: MissionConfig) -> list[Pointing]:
@@ -554,22 +571,31 @@ def program(
             target.ss_min, target.ss_max = 1500, 3 * 3600
         rng = np.random.default_rng(seed + 5)
         campaign = []
-        for k in range(6):
+        needed = visit_seconds + Slew.duration_upper_bound(
+            config.spacecraft_bus.attitude_control
+        )
+        for k in range(_CAMPAIGN_TARGETS):
             windows = []
             for visit in range(days):
                 opens = start + (visit * 24 + float(rng.uniform(0, 12))) * HOUR
                 windows.append(VisitWindow(start=opens, deadline=opens + 10 * HOUR))
-            target = Pointing(
-                config=config,
-                ra=float(rng.uniform(0, 360)),
-                dec=float(np.degrees(np.arcsin(rng.uniform(-1, 1)))),
-                obsid=20000 + k,
-                name=f"campaign {k}",
-                merit=700.0,
-                sequence=sequence,
-                visits=len(windows),
-                visit_windows=windows,
-            )
+            # Draw positions until one can hold a visit in every visit
+            # window. A horizon too short for the windows has none; the
+            # last position drawn is then kept.
+            for _ in range(_CAMPAIGN_DRAWS):
+                target = Pointing(
+                    config=config,
+                    ra=float(rng.uniform(0, 360)),
+                    dec=float(np.degrees(np.arcsin(rng.uniform(-1, 1)))),
+                    obsid=20000 + k,
+                    name=f"campaign {k}",
+                    merit=700.0,
+                    sequence=sequence,
+                    visits=len(windows),
+                    visit_windows=windows,
+                )
+                if _holds_every_visit(target, windows, needed, end.timestamp()):
+                    break
             campaign.append(target)
         monitoring = random_targets(
             config,
@@ -626,6 +652,23 @@ def program(
         toos=toos,
         activities=activities,
     )
+
+
+def _holds_every_visit(
+    target: Pointing, windows: list[VisitWindow], needed: float, end: float
+) -> bool:
+    """Whether each visit window has a visibility window of ``target`` in
+    which ``needed`` seconds fit, starting in the visit window and ending
+    by ``end``."""
+    target.visibility()
+    for visit in windows:
+        if not any(
+            max(float(w0), visit.start) <= visit.deadline
+            and min(float(w1), end) - max(float(w0), visit.start) >= needed
+            for w0, w1 in target.windows
+        ):
+            return False
+    return True
 
 
 SCENARIOS: dict[str, Callable[..., BenchmarkScenario]] = {

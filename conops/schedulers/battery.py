@@ -18,9 +18,9 @@ whenever they are lit, whatever the spacecraft is doing, so every span is
 counted at the attitude held through it: a slew along its path, an
 observation or a charge at its attitude, a contact along its tracking
 profile, and idle time at the attitude the spacecraft is left in. Charging
-is an addition too: the schedulers put a charging entry, pointing the panels
-at the Sun, into every idle sunlit stretch a charge fits as they build the
-plan, and the walk counts what those entries put back (see
+is an addition too: the schedulers reserve a charging entry, pointing the panels
+at the Sun, only where the full forecast needs one, and the walk counts its net
+benefit along with both transition slews (see
 :meth:`~conops.schedulers.PriorityScheduler.schedule`). The ledger knows the
 horizon's sunlit runs, the charging attitude in each and what it generates
 step by step, which is what the schedulers place charges from. The segments
@@ -60,6 +60,9 @@ MIN_CHARGE_SECONDS = 300.0
 
 
 _EXCESS_TOLERANCE_WH = 1e-9
+_WALK_MEMO_SIZE = 2_000_000
+"""The most walked additions a ledger keeps (see
+:meth:`BatteryLedger._walked`); the memo is emptied when it holds more."""
 """An excess over the battery limit below this many watt-hours is none."""
 
 
@@ -80,7 +83,8 @@ class Addition(NamedTuple):
     counts the addition at the angles it is reached with."""
     profile: int = -1
     """The ledger's record of the mode and attitude held at each of its
-    steps, from which the walk counts it at any drive angles; -1 if none."""
+    steps, from which the walk counts it at any drive angles; -1 when no
+    drive needs it, so identical static-panel additions compare equal."""
 
 
 Additions = tuple[Addition, ...]
@@ -181,6 +185,11 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         """Additions by entry identity and the fields they depend on: a
         scheduler re-slews entries as it places others before them, and reads
         a timeline's additions again each time."""
+        self._walk_memo: dict[
+            tuple[int, float], tuple[tuple[float, ...], float, float]
+        ] = {}
+        """The peak and end level of an addition's deltas walked from a
+        level, with the deltas, by their identity and that level."""
         self._charger = EmergencyCharging(config, log=DITLLog())
         self.recharge_floor = float(config.battery.planning_recharge_deficit_wh)
         """The deficit generation is not counted below: a plan never assumes
@@ -487,6 +496,8 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
             float(entry.ra),
             float(entry.dec),
             float(entry.roll),
+            entry.activity_mode,
+            entry.activity_hold_begin,
             after,
             rest,
             path_start,
@@ -511,7 +522,7 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         elif obstype == ObsType.CHARGE:
             mode = ACSMode.CHARGING
         elif obstype == ObsType.ACTIVITY:
-            mode = ACSMode.DESAT if entry.desaturation else ACSMode.IDLE
+            mode = entry.activity_mode
         else:
             self._addition_cache[key] = None
             return None
@@ -568,6 +579,12 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
                 step_mode = ACSMode.PASS if mode is ACSMode.PASS else ACSMode.SLEWING
             elif utime >= end:
                 step_mode = ACSMode.SLEWING
+            elif (
+                obstype == ObsType.ACTIVITY
+                and entry.activity_hold_begin is not None
+                and utime < entry.activity_hold_begin
+            ):
+                step_mode = ACSMode.IDLE
             else:
                 step_mode = mode
             return (
@@ -673,9 +690,12 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         counts for nothing.
         """
         profile = tuple(held_at(float(step)) for step in self.steps(begin, end))
-        self._profiles.append(profile)
+        profile_index = -1
+        if self.driven:
+            profile_index = len(self._profiles)
+            self._profiles.append(profile)
         deltas = self._deltas(begin, profile, self.drive_start)[0]
-        return Addition(begin, end, sum(deltas), deltas, len(self._profiles) - 1)
+        return Addition(begin, end, sum(deltas), deltas, profile_index)
 
     def _deltas(
         self, begin: float, profile: _Profile, angles: Angles
@@ -798,9 +818,8 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
                     idle_peak, level = self._idle(level, cursor, addition.begin)
                     peak = max(peak, idle_peak)
                 deltas, angles = self.driven_deltas(addition, angles)
-                for delta in deltas:
-                    level = self._after(level, delta)
-                    peak = max(peak, level)
+                inner, level = self._walked(deltas, level)
+                peak = max(peak, inner)
                 cursor = max(cursor, addition.end)
             if self.bounds[k + 1] > cursor:
                 idle_peak, level = self._idle(level, cursor, self.bounds[k + 1])
@@ -809,6 +828,30 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
             peaks.append(peak)
             levels.append(level)
         return peaks, levels
+
+    def _walked(self, deltas: tuple[float, ...], level: float) -> tuple[float, float]:
+        """Walk an addition's ``deltas`` from ``level``: the highest level
+        reached after any of them (minus infinity for no deltas) and the
+        level after the last.
+
+        The result depends only on the deltas and the level, so it is kept
+        for both. A scheduler totals a timeline again after each change to
+        it, and every addition before the change is then reached at the same
+        level as the time before. The deltas are held with the result, which
+        keeps their identity from being given to another tuple.
+        """
+        key = (id(deltas), level)
+        found = self._walk_memo.get(key)
+        if found is not None and found[0] is deltas:
+            return found[1], found[2]
+        peak = -np.inf
+        for delta in deltas:
+            level = self._after(level, delta)
+            peak = max(peak, level)
+        if len(self._walk_memo) >= _WALK_MEMO_SIZE:
+            self._walk_memo.clear()
+        self._walk_memo[key] = (deltas, peak, level)
+        return peak, level
 
     def first_over_limit(self, planned: Sequence[Additions]) -> float | None:
         """The first time the deficit exceeds the limit, or None if it never does."""

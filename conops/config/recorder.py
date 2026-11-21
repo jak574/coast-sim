@@ -31,16 +31,6 @@ class OnboardRecorder(ConfigModel):
             alert fires, so a plan stops just short of the red. None plans
             without regard to the recorder.
 
-    Methods:
-        add_data(data_gb): Add data to the recorder, returns amount actually stored.
-        remove_data(data_gb): Remove data from the recorder during downlink.
-        transfer(data_in_gb, data_out_gb): Add and remove data over the same
-            interval, as during a contact.
-        get_fill_fraction(): Get the current fill level as a fraction (0-1).
-        get_alert_level(): Get current alert level (0=none, 1=yellow, 2=red).
-        is_full(): Check if recorder is at or above capacity.
-        available_capacity(): Get remaining available capacity in Gb.
-
     Example:
         >>> recorder = OnboardRecorder(name="SSR", capacity_gb=64)
         >>> recorder.add_data(10.5)  # Add 10.5 Gb

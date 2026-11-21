@@ -8,6 +8,7 @@ from ..common.enums import SlewAlgorithm
 from ..common.motion import RestToRestMotion
 from ..common.numerics import ROUNDOFF
 from ._base import ConfigModel
+from .activity_attitude import ActivityAttitude
 from .constants import DTOR
 from .momentum import StoredMomentumConfig
 
@@ -15,24 +16,6 @@ from .momentum import StoredMomentumConfig
 def scheduled_slew_time(duration_s: float) -> int:
     """Convert a physical duration to whole seconds without ending it early."""
     return 0 if duration_s <= 0.0 else int(np.ceil(duration_s))
-
-
-class SlewRequirement(ConfigModel):
-    """A slew requirement class: a slew of up to a great-circle angle
-    completes, settled, within a time."""
-
-    name: str = Field(description="The class's name, such as 'small' or 'large'")
-    max_great_circle_deg: float = Field(
-        gt=0.0,
-        le=180.0,
-        description=(
-            "The widest slew of the class, as the great-circle angle between "
-            "the pointings it joins, in degrees"
-        ),
-    )
-    max_seconds: float = Field(
-        gt=0.0, description="The most a slew of the class may take, settled, in seconds"
-    )
 
 
 class ThermalSettlingStep(ConfigModel):
@@ -64,6 +47,20 @@ class AttitudeControlSystem(ConfigModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
+    safe_mode_attitude: ActivityAttitude | None = Field(
+        default=None,
+        description="Optional fixed or power-positive fault SAFE guidance; None keeps legacy guidance",
+    )
+
+    @field_validator("safe_mode_attitude")
+    @classmethod
+    def _safe_mode_request(
+        cls, value: ActivityAttitude | None
+    ) -> ActivityAttitude | None:
+        if value is not None and value.kind == "inherited":
+            raise ValueError("fault safe mode needs a fixed or power-positive attitude")
+        return value
+
     slew_acceleration: float = Field(
         default=0.5, description="Maximum angular acceleration in degrees/second²"
     )
@@ -88,15 +85,6 @@ class AttitudeControlSystem(ConfigModel):
     )
     slew_accuracy: float = Field(
         default=0.01, description="Pointing accuracy after slew completion in degrees"
-    )
-    slew_requirements: list[SlewRequirement] = Field(
-        default_factory=list,
-        description=(
-            "Slew requirement classes, each the time a slew of up to a "
-            "great-circle angle may take, settled, in ascending angle. A check on "
-            "the slews the ACS model flies, reported by the plan validator and the "
-            "statistics, not a constraint on them; empty for no check"
-        ),
     )
     settle_time: float = Field(
         default=120.0, description="Time to settle after slew completion in seconds"
@@ -289,7 +277,7 @@ class AttitudeControlSystem(ConfigModel):
         vmax = self.effective_max_slew_rate(rotation_axis_body)
         if a <= 0 or vmax <= 0:
             return 0.0
-        return RestToRestMotion(angle_deg, a, vmax).duration
+        return RestToRestMotion(angle=angle_deg, acceleration=a, rate=vmax).duration
 
     def max_motion_angle(
         self,
@@ -330,7 +318,7 @@ class AttitudeControlSystem(ConfigModel):
         if a <= 0 or vmax <= 0:
             return min(max(0.0, t * vmax), angle_deg)  # best-effort fallback
 
-        return RestToRestMotion(angle_deg, a, vmax).at(t)[0]
+        return RestToRestMotion(angle=angle_deg, acceleration=a, rate=vmax).at(t)[0]
 
     def slew_time(
         self,
@@ -380,18 +368,6 @@ class AttitudeControlSystem(ConfigModel):
         )
         return slewdist, slewpath
 
-    @field_validator("slew_requirements")
-    @classmethod
-    def _classes_in_ascending_angle(
-        cls, value: list[SlewRequirement]
-    ) -> list[SlewRequirement]:
-        angles = [r.max_great_circle_deg for r in value]
-        if len(set(angles)) != len(angles):
-            raise ValueError("slew requirement classes must have distinct angles")
-        if len({r.name for r in value}) != len(value):
-            raise ValueError("slew requirement classes must have distinct names")
-        return sorted(value, key=lambda r: r.max_great_circle_deg)
-
     @field_validator("thermal_settling")
     @classmethod
     def _steps_in_ascending_angle(
@@ -422,12 +398,3 @@ class AttitudeControlSystem(ConfigModel):
         if not self.thermal_settling:
             return float(self.settle_time)
         return max(float(step.settle_seconds) for step in self.thermal_settling)
-
-    def slew_class(self, great_circle_deg: float) -> SlewRequirement | None:
-        """The requirement class a slew of ``great_circle_deg`` falls in: the
-        narrowest class wide enough for it; None without a table or for a
-        slew wider than the widest class."""
-        for requirement in self.slew_requirements:
-            if great_circle_deg <= requirement.max_great_circle_deg + 1e-9:
-                return requirement
-        return None

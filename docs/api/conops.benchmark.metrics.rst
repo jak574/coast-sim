@@ -2,6 +2,6 @@ conops.benchmark.metrics
 ========================
 
 .. automodule:: conops.benchmark.metrics
-   :members: visit_starts, cadence_error, program_shares
+   :members:
    :undoc-members:
-   :no-index:
+   :show-inheritance:

@@ -19,9 +19,16 @@ from ..config import (
     MissionConfig,
     OnboardRecorder,
     SolarArrayDriveState,
+    SpacecraftFrame,
 )
 from ..config.data_storage import DataStorage, RecorderSummary, RecorderView
 from ..config.observation_timing import ObservationTiming, timing_for
+from ..config.radiator import (
+    BUS_SUBSYSTEM,
+    PAYLOAD_SUBSYSTEM,
+    RadiatorConfiguration,
+)
+from ..config.thermal import ThermalNetwork
 from ..schedulers.recorder import contact_downlink_gb
 from ..simulation.acs import ACS
 from ..simulation.attitude import slew_angular_velocity
@@ -36,7 +43,8 @@ from ..simulation.momentum import (
 from ..simulation.momentum_budget import MomentumBudget, MomentumLimitError
 from ..simulation.passes import Pass, PassTimes
 from ..simulation.slew import Slew
-from ..targets import Plan, PlanEntry
+from ..simulation.thermal_network import ThermalNetworkModel
+from ..targets import AttitudeTimeseriesSchema, Plan, PlanEntry
 from ..targets.plan_entry import extra_data_gb, instrument_modes_of
 from .ditl_log import DITLLog
 from .telemetry import SolarArrayDriveAngle, Telemetry
@@ -173,14 +181,16 @@ class DITLMixin:
         """The mode each instrument is in at this step: the observation's
         while ACS is in SCIENCE mode, a calibration step's own during a
         setup or cleanup step at ``utime``, a scheduled activity's while ACS
-        holds for it in IDLE mode, or in DESAT for a thruster dump, else
+        holds for it in ACTIVITY mode, or in DESAT for a thruster dump, else
         None, when every instrument idles or holds a mode named like the
         ACS mode."""
         try:
             acs_mode = ACSMode(int(mode))
         except (TypeError, ValueError):
             return None
-        if acs_mode in (ACSMode.IDLE, ACSMode.DESAT):
+        if acs_mode == ACSMode.SAFE and getattr(self.acs, "in_safe_mode", False):
+            return None
+        if acs_mode in (ACSMode.IDLE, ACSMode.ACTIVITY, ACSMode.DESAT, ACSMode.SAFE):
             # Dispatch holds the activity itself; a plan holds its entry.
             active = getattr(self, "_active_activity", None)
             modes = getattr(active, "instrument_modes", None)
@@ -244,6 +254,7 @@ class DITLMixin:
     telemetry: Telemetry
     calculate_field_of_regard: bool
     _stored_momentum_tracker: StoredMomentumTracker | None
+    _thermal_network: ThermalNetworkModel | None
 
     def __init__(
         self,
@@ -341,6 +352,7 @@ class DITLMixin:
         # Initialize common subsystems (can be overridden by subclasses)
         self._init_subsystems()
         self._stored_momentum_tracker = self._build_stored_momentum_tracker()
+        self._reset_thermal_network()
 
     @property
     def fault_management(self) -> FaultManagementRun:
@@ -461,6 +473,61 @@ class DITLMixin:
     def _antenna_repoints(self, target: PlanEntry) -> str:
         """The category setting for antenna repoints during ``target``."""
         return self.config.observation_categories.antenna_repoints(int(target.obsid))
+
+    def _reset_thermal_network(self) -> None:
+        """Start the run's thermal node temperatures from the configured
+        values."""
+        bus = self.config.spacecraft_bus
+        radiators = getattr(bus, "radiators", None)
+        network = getattr(bus, "thermal", None)
+        if not isinstance(radiators, RadiatorConfiguration) or not isinstance(
+            network, ThermalNetwork
+        ):
+            self._thermal_network = None
+            return
+        self._thermal_network = ThermalNetworkModel.for_spacecraft(
+            radiators.radiators,
+            network,
+            power_sources=[
+                BUS_SUBSYSTEM,
+                PAYLOAD_SUBSYSTEM,
+                *(instrument.name for instrument in self.config.payload.instruments),
+            ],
+        )
+
+    def _thermal_telemetry(
+        self,
+        utime: float,
+        mode: ACSMode,
+        bus_power_w: float | None,
+        payload_power_w: float | None,
+    ) -> tuple[dict[str, float] | None, dict[str, float] | None, float]:
+        """Advance the thermal nodes to this step and return the radiator
+        temperatures, the interior node temperatures and the total radiator
+        heat flow to record.
+
+        Without a thermal node there are no temperatures, and the heat flow
+        is the one the ACS computed at the fixed radiator temperatures.
+        """
+        model = self._thermal_network
+        if model is None:
+            return None, None, self.acs.radiator_heat_dissipation_w
+        exposures = self.acs.radiator_exposures
+        power_w = self.config.payload.power_by_instrument(
+            mode,
+            in_eclipse=self.acs.in_eclipse,
+            instrument_modes=self._instrument_modes_now(mode, utime),
+        )
+        # The whole bus and the whole payload take these names, whatever an
+        # instrument is called.
+        power_w[BUS_SUBSYSTEM] = bus_power_w or 0.0
+        power_w[PAYLOAD_SUBSYSTEM] = payload_power_w or 0.0
+        model.advance(utime, exposures, power_w)
+        return (
+            model.radiator_temperatures_k or None,
+            model.node_temperatures_k or None,
+            model.heat_dissipation_w(exposures),
+        )
 
     def _build_stored_momentum_tracker(self) -> StoredMomentumTracker | None:
         attitude_control = self.config.spacecraft_bus.attitude_control
@@ -940,6 +1007,37 @@ class DITLMixin:
         self._attach_attitude_timeseries_to_plan()
         self._attach_orbit_state_timeseries_to_plan()
 
+    def sample_attitude(
+        self,
+        *,
+        begin: float | int | str | datetime | None = None,
+        end: float | int | str | datetime | None = None,
+        interval_seconds: float = 1.0,
+        include_transitions: bool = True,
+        origin_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> AttitudeTimeseriesSchema:
+        """Resample the flown trajectory while this simulation is retained.
+
+        The default endpoint is the last physically advanced executor time,
+        which may precede the requested run end by one simulation step. Export
+        before discarding the run; a saved coarse series cannot reconstruct it.
+        """
+        from ..targets.attitude_export import sample_executed_attitude
+
+        executor = self.acs._executor
+        if executor is None:
+            raise ValueError("Run the simulation before sampling executed attitude")
+        return sample_executed_attitude(
+            executor,
+            self.ephem,
+            self.config.spacecraft_bus.frame,
+            begin=begin,
+            end=end,
+            interval_seconds=interval_seconds,
+            include_transitions=include_transitions,
+            origin_offset_m=origin_offset_m,
+        )
+
     def _attach_attitude_timeseries_to_plan(self) -> None:
         """Attach the executed attitude timeline to the current plan for export."""
         from ..targets import AttitudeSampleSchema, AttitudeTimeseriesSchema
@@ -966,7 +1064,13 @@ class DITLMixin:
                 )
             )
 
-        self.plan.attitude_timeseries = AttitudeTimeseriesSchema(samples=samples)
+        frame = getattr(self.config.spacecraft_bus, "frame", None)
+        self.plan.attitude_timeseries = AttitudeTimeseriesSchema(
+            samples=samples,
+            spacecraft_frame=frame
+            if isinstance(frame, SpacecraftFrame)
+            else SpacecraftFrame(),
+        )
 
     def _attach_orbit_state_timeseries_to_plan(self) -> None:
         """Attach GCRS spacecraft position/velocity samples to the current plan."""
@@ -1093,9 +1197,15 @@ class DITLMixin:
             start = max(start, slew.slewend + setup)
         elif mode == ACSMode.SLEWING:
             return utime, utime
-        return self.ppt.collection_interval_between(
+        begin, end = self.ppt.collection_interval_between(
             start, min(utime + self.step_size, self.uend)
         )
+        eclipse = (
+            self.ppt.eclipse_violation(begin, end)
+            if self.ppt.forbids_eclipse() is True
+            else None
+        )
+        return (begin, end if eclipse is None else max(begin, eclipse))
 
     def _add_activity_data(self, data_gb: float, entry: object | None = None) -> None:
         """Store an activity's fixed data now and report it on the next step."""
