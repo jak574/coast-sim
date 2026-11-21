@@ -655,7 +655,9 @@ attitude model; see :ref:`power-positive-fault-safe-mode`.
 Capacity enforcement checks the wheels' momentum against a limit both when a target
 is admitted to the plan and when the plan is executed. To enable it, set
 ``stored_momentum.enforce_capacity`` and give the actuator momentum limit in
-``stored_momentum.capacity_n_m_s``. The limit must be finite and positive, and it is
+``stored_momentum.capacity_n_m_s``, or the momentum wheels in
+``stored_momentum.wheels`` (see :doc:`momentum`). A limit given as
+``capacity_n_m_s`` must be finite and positive, and it is
 spherical, meaning the same about every axis. Enforcement is off by default, which
 leaves existing scheduling unchanged. A physical inertia tensor is required, even when
 gravity-gradient torque is disabled.

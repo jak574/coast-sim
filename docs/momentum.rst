@@ -163,8 +163,10 @@ the orbit.
 A slew is sampled more finely, wherever it falls. The simulations ask the ACS for
 the attitude flown at intermediate times within the step. The intermediate times
 are spaced every ``max_attitude_step_deg`` (5° by default) of motion at the
-fastest configured slew rate, and the orbit is interpolated between the step's
-ends. The planners' forecast samples the same way.
+fastest configured slew rate. The orbit at each of those times comes from the
+ephemeris's own interpolation between its samples (cubic Hermite in position and
+velocity, which is how its constraints evaluate the orbit at such a time). The
+planners' forecast samples the same way.
 
 Tracking therefore works at whatever resolution the ephemeris has. The attitude
 step is a convergence control. It does not guarantee a bound on the integration
@@ -197,8 +199,14 @@ The settings below are under ``spacecraft_bus.attitude_control.stored_momentum``
   torque source enabled, the ephemeris must be sampled at least this finely, and
   an error is raised otherwise. The run's own tracker samples at the ephemeris
   resolution whatever this setting is.
-* ``capacity_n_m_s`` (float or None) is the wheels' capacity, taken as the same
-  about every axis. None sets no capacity.
+* ``capacity_n_m_s`` (float or None) is the wheels' total capacity, taken as the
+  same about every axis. None takes the limit from ``wheels`` (see `Wheels`_), with
+  each wheel held within its own capacity, and sets no capacity where there are no
+  wheels.
+* ``wheels`` (list of :class:`~conops.config.MomentumWheel`, default empty) lists
+  the momentum wheels, each with its ``spin_axis``, ``capacity_n_m_s`` and position
+  in the body. The momentum is shared among them and each limits it (see
+  `Wheels`_).
 * ``planning_level`` (default 0.8) is the fraction of the capacity at which a
   thruster dump is called for. The rest of the capacity is margin.
 * ``thruster_dump`` (:class:`~conops.config.ThrusterDumpConfig` or None) describes
@@ -258,6 +266,66 @@ A minimal configuration that tracks gravity gradient and drag with thruster dump
          capacity_n_m_s: 4.0
          planning_level: 0.8
          thruster_dump: {duration_seconds: 180, residual_fraction: 0.05}
+
+Wheels
+------
+
+``wheels`` describes the momentum wheels themselves. Each
+:class:`~conops.config.MomentumWheel` has:
+
+* ``name`` (default ``Wheel``).
+* ``spin_axis`` (three floats): the axis it spins about, in body coordinates,
+  normalised to a unit vector.
+* ``capacity_n_m_s`` (float): the greatest momentum it holds along that axis, in
+  either sense.
+* ``position_m`` (three floats or None), ``radius_m`` (default 0.15) and
+  ``thickness_m`` (default 0.06): where it sits and its size, for the
+  :doc:`3-D spacecraft plot <spacecraft_3d_visualization>`. None places it inside
+  the bus along its spin axis.
+
+What the wheels hold together is shared among them, and each is held within its
+own capacity. The sharing is the capacity-weighted minimum-norm law
+(:class:`~conops.config.WheelArray`): of all the ways to make the momentum up
+along the spin axes, the one with the least sum of squared fractions of each
+wheel's capacity. Three wheels have only one way; with more, a larger wheel takes
+more. Each wheel's share is in the telemetry as ``wheel_momentum_n_m_s``, in the
+order the wheels are configured.
+
+The limit therefore depends on where the momentum points in the body. Three
+orthogonal wheels of 4 N m s hold 4 N m s along any one spin axis, and 6.9 N m s
+along the diagonal between all three, where each takes a third. As the spacecraft
+turns, the same stored momentum moves between the wheels.
+
+Everything on this page still works in one figure, ``total_capacity_n_m_s``: the
+momentum the wheels hold whichever way it points, their weakest direction. What
+is checked against it, and against the planning level, is the fullest wheel's
+fraction of its own capacity as that fraction of the total: the norm along the
+weakest direction and less along any other. So a dump is called for when a wheel
+reaches the planning level of its own capacity, the capacity fault is a wheel at
+its capacity, and slew momentum and ``enforce_capacity`` admit and certify motion
+against each wheel. With several wheels a single figure would dump earlier than
+the wheels need.
+
+``capacity_n_m_s`` given alongside ``wheels`` replaces their limits with that one
+figure, the same about every axis, as with no wheels; their shares are still
+reported. Wheels whose spin axes do not span three dimensions cannot share a
+momentum in every direction, so they need ``capacity_n_m_s`` and report no shares.
+
+A four-wheel pyramid about the boresight, each wheel held within 4 N m s, with a
+total of 5.3 N m s for the planning level:
+
+.. code-block:: yaml
+
+   spacecraft_bus:
+     attitude_control:
+       stored_momentum:
+         gravity_gradient_enabled: true
+         wheels:
+           - {name: RW1, spin_axis: [0.577,  0.577,  0.577], capacity_n_m_s: 4.0}
+           - {name: RW2, spin_axis: [0.577, -0.577,  0.577], capacity_n_m_s: 4.0}
+           - {name: RW3, spin_axis: [0.577, -0.577, -0.577], capacity_n_m_s: 4.0}
+           - {name: RW4, spin_axis: [0.577,  0.577, -0.577], capacity_n_m_s: 4.0}
+         thruster_dump: {duration_seconds: 180}
 
 Dumps
 -----
@@ -488,6 +556,7 @@ Housekeeping telemetry contains the following at every step:
   (``stored_momentum_body_n_m_s``, ``stored_momentum_norm_n_m_s``);
 * what the wheels hold, which is the stored momentum less the body's own while it
   turns (``actuator_momentum_body_n_m_s``, ``actuator_momentum_norm_n_m_s``);
+* each configured wheel's share of it (``wheel_momentum_n_m_s``);
 * the geomagnetic field in body coordinates, where a source uses one
   (``geomagnetic_field_body_t``);
 * the atmosphere's density, where drag is tracked (``atmosphere_density_kg_m3``).
@@ -511,6 +580,13 @@ What is left out
   Sun. A dump holds the attitude the spacecraft has, or the fixed attitude set in
   ``thruster_dump.attitude``.
 * Propellant accounting for dumps.
+* Redistributing momentum among redundant wheels. More than three wheels share
+  the momentum by one fixed law, so they are full a little before the most that
+  any sharing could hold. Wheel speeds, zero crossings, friction and a failed
+  wheel are not modelled.
+* The wheels' individual limits where the planners bound an idle hold's escape.
+  There the norm of the stored momentum is used in place of the fullest wheel's
+  share, and the norm is never less than that share.
 * The accuracy of the environment. The built-in atmosphere table and the dipole
   field are order-of-magnitude models. The optional ``msis`` and ``igrf`` models
   are the ones to use where the numbers matter. The density's solar-activity

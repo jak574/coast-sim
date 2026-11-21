@@ -139,6 +139,7 @@ quaternion applies the inverse rotation ``R_x(-roll)``.
    - ``stored_momentum_norm_n_m_s``: Coordinate-invariant norm of accumulated stored momentum (N m s), or ``None`` when tracking is disabled
    - ``actuator_momentum_body_n_m_s``: Momentum held by the wheels, in body coordinates (N m s), or ``None`` when tracking is disabled. While the spacecraft turns, the body itself has momentum :math:`I\omega`, and the wheels hold the stored momentum less that amount. When the spacecraft is at rest, the wheels hold all of the stored momentum
    - ``actuator_momentum_norm_n_m_s``: Norm of the momentum held by the wheels (N m s), or ``None`` when tracking is disabled
+   - ``wheel_momentum_n_m_s``: Momentum of each configured wheel along its spin axis (N m s), in the order configured, or ``None`` without wheels
 
 **Power System**
    - ``panel_illumination``: Solar panel illumination fraction (0-1)

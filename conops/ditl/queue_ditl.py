@@ -1518,21 +1518,28 @@ class QueueDITL(DITLMixin, DITLStats):
             return
         if any(a.desaturation for a in self._unstarted_activities()):
             return
-        stored = tracker.stored_momentum_norm_n_m_s
-        capacity = (
-            self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_n_m_s
-        )
+        stored = tracker.stored_momentum_load_n_m_s
+        capacity = self.config.spacecraft_bus.attitude_control.stored_momentum.total_capacity_n_m_s
         assert capacity is not None
         observing = self.ppt is not None and self.ppt is not self.charging_ppt
         obsid = self.ppt.obsid if observing and self.ppt is not None else None
         if self._momentum_at_capacity(utime, obsid):
             demand = self._momentum_demand_n_m_s(tracker)
+            reached = (
+                f"Fullest wheel at {demand / capacity:.1%} of its capacity "
+                f"(stored momentum {tracker.stored_momentum_norm_n_m_s:.3f} N m s)"
+                if tracker.limit_by_wheels
+                else (
+                    f"{'Actuator' if self._slew_momentum_enabled() else 'Stored'} "
+                    f"momentum {demand:.3f} N m s has reached the "
+                    f"{capacity} N m s capacity"
+                )
+            )
             self.log.log_event(
                 utime=utime,
                 event_type="MOMENTUM",
                 description=(
-                    f"Stored momentum {demand:.3f} N m s has reached the "
-                    f"{capacity} N m s capacity: emergency thruster dump"
+                    f"{reached}: emergency thruster dump"
                     + (f" interrupts observation {obsid}" if obsid is not None else "")
                 ),
                 obsid=obsid,
@@ -1543,12 +1550,21 @@ class QueueDITL(DITLMixin, DITLStats):
             return
         if stored >= level and not self._dump_pending:
             self._dump_pending = True
+            reached = (
+                f"Fullest wheel at {stored / capacity:.1%} of its capacity "
+                f"has reached the planning level {level / capacity:.1%} "
+                f"(stored momentum {tracker.stored_momentum_norm_n_m_s:.3f} N m s)"
+                if tracker.limit_by_wheels
+                else (
+                    f"Stored momentum {stored:.3f} N m s has reached the planning "
+                    f"level {level:.3f} of the {capacity} N m s capacity"
+                )
+            )
             self.log.log_event(
                 utime=utime,
                 event_type="MOMENTUM",
                 description=(
-                    f"Stored momentum {stored:.3f} N m s has reached the planning "
-                    f"level {level:.3f} of the {capacity} N m s capacity: thruster dump"
+                    f"{reached}: thruster dump"
                     + (f" after observation {obsid}" if obsid is not None else "")
                 ),
                 obsid=obsid,
@@ -1592,9 +1608,7 @@ class QueueDITL(DITLMixin, DITLStats):
         observation does not begin now."""
         tracker = self._stored_momentum_tracker
         level = self._dump_level_n_m_s()
-        capacity = (
-            self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_n_m_s
-        )
+        capacity = self.config.spacecraft_bus.attitude_control.stored_momentum.total_capacity_n_m_s
         ppt = self.ppt
         assert ppt is not None
         if tracker is None or level is None or capacity is None:
@@ -1633,10 +1647,16 @@ class QueueDITL(DITLMixin, DITLStats):
             else slew_end
         )
         if at_level <= collects:
-            reason = (
-                f"Stored momentum {norms[0]:.3f} N m s reaches the planning level "
-                f"{level:.3f} before {name} collects: thruster dump first"
+            reached = (
+                f"Fullest wheel at {norms[0] / capacity:.1%} of its capacity "
+                f"reaches the planning level {level / capacity:.1%}"
+                if tracker.limit_by_wheels
+                else (
+                    f"Stored momentum {norms[0]:.3f} N m s reaches the planning level "
+                    f"{level:.3f}"
+                )
             )
+            reason = f"{reached} before {name} collects: thruster dump first"
         elif norms.max() < capacity:
             return True
         elif not visit:
@@ -1745,8 +1765,8 @@ class QueueDITL(DITLMixin, DITLStats):
     def _momentum_forecast_begin(self, utime: float) -> float:
         """Where a forecast from the wheels as they are starts: the tracker's
         last sample, a step ago, or now before the first."""
-        previous = getattr(self, "_momentum_previous", None)
-        return min(utime, previous.utime) if previous is not None else utime
+        previous = getattr(self, "_momentum_previous_utime", None)
+        return min(utime, previous) if previous is not None else utime
 
     def _momentum_forecast_state(
         self, attitude: tuple[float, float, float]
@@ -1778,7 +1798,7 @@ class QueueDITL(DITLMixin, DITLStats):
         fraction for later steps and checks them again from the live state."""
         tracker = self._stored_momentum_tracker
         momentum_config = self.config.spacecraft_bus.attitude_control.stored_momentum
-        capacity = momentum_config.capacity_n_m_s
+        capacity = momentum_config.total_capacity_n_m_s
         if (
             tracker is None
             or capacity is None
@@ -3018,6 +3038,12 @@ class QueueDITL(DITLMixin, DITLStats):
             actuator_momentum_norm_n_m_s=(
                 momentum_sample.actuator_momentum_norm_n_m_s
                 if momentum_sample is not None
+                else None
+            ),
+            wheel_momentum_n_m_s=(
+                list(momentum_sample.wheel_momentum_n_m_s)
+                if momentum_sample is not None
+                and momentum_sample.wheel_momentum_n_m_s is not None
                 else None
             ),
             disturbance_torques_body_n_m=(

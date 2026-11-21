@@ -19,7 +19,7 @@ import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict
 
 from ..common import ObsType
-from ..common.ephemeris import position_vectors, velocity_vectors
+from ..common.ephemeris import orbit_at
 from ..common.vector import attitude_to_quat
 from ..ditl.plan_validator import entry_obstype
 from ..simulation.attitude import Attitude, AttitudeTrajectory, slew_angular_velocity
@@ -117,7 +117,9 @@ _Integrated = tuple[
     MomentumState,
 ]
 """A span integrated: its sample times, the norm at each, what the wheels
-hold at each and the state at its end."""
+hold at each and the state at its end. The norm and what the wheels hold are
+as they are checked against the capacity: with wheel limits, the fullest
+wheel's share."""
 
 SpanCache = dict[tuple[object, ...], _Integrated]
 """Spans integrated, by the span's key and the state they started from.
@@ -166,11 +168,7 @@ class MomentumForecast:
         self._times = np.array(
             [t.timestamp() for t in ephem.timestamp], dtype=np.float64
         )
-        self._positions = np.asarray(position_vectors(ephem, "gcrs"), dtype=np.float64)
-        self._sun = np.asarray(position_vectors(ephem, "sun"), dtype=np.float64)
-        ecef = getattr(getattr(ephem, "itrs_pv", None), "position", None)
-        self._ecef = np.asarray(ecef, dtype=np.float64) if ecef is not None else None
-        self._velocities = velocity_vectors(ephem)
+        self._ephem = ephem
 
     @property
     def active(self) -> bool:
@@ -185,9 +183,7 @@ class MomentumForecast:
 
     @property
     def capacity_n_m_s(self) -> float | None:
-        return (
-            self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_n_m_s
-        )
+        return self.config.spacecraft_bus.attitude_control.stored_momentum.total_capacity_n_m_s
 
     # ── The timeline as attitudes ─────────────────────────────────────────
 
@@ -285,14 +281,6 @@ class MomentumForecast:
         return self.ctx.initial_attitude(utime)
 
     # ── Integration ───────────────────────────────────────────────────────
-
-    def _interpolate(
-        self, table: npt.NDArray[np.float64], utime: float
-    ) -> npt.NDArray[np.float64]:
-        return np.array(
-            [np.interp(utime, self._times, table[:, k]) for k in range(3)],
-            dtype=np.float64,
-        )
 
     def _sunlit(self, utime: float) -> bool:
         index = int(
@@ -416,24 +404,16 @@ class MomentumForecast:
                 while resets and float(utime) >= resets[0]:
                     tracker.unload(residual)
                     resets.pop(0)
-                position = self._interpolate(self._positions, float(utime))
+                orbit = orbit_at(self._ephem, float(utime))
                 attitude = self._attitude_at(span, float(utime))
                 sample = tracker.update(
                     utime=float(utime),
-                    position_eci_km=position,
+                    position_eci_km=orbit.position_eci_km,
                     attitude_quaternion_eci_to_body=attitude_to_quat(*attitude),
-                    sun_eci_km=self._interpolate(self._sun, float(utime)) - position,
+                    sun_eci_km=orbit.sun_position_eci_km - orbit.position_eci_km,
                     sunlit=self._sunlit(float(utime)),
-                    velocity_eci_km_s=(
-                        self._interpolate(self._velocities, float(utime))
-                        if self._velocities is not None
-                        else None
-                    ),
-                    position_ecef_km=(
-                        self._interpolate(self._ecef, float(utime))
-                        if self._ecef is not None
-                        else None
-                    ),
+                    velocity_eci_km_s=orbit.velocity_eci_km_s,
+                    position_ecef_km=orbit.position_ecef_km,
                     angular_velocity_body_rad_s=(
                         np.deg2rad(
                             span.motion.state(float(utime)).angular_velocity_body
@@ -445,17 +425,17 @@ class MomentumForecast:
                     ),
                 )
                 times.append(float(utime))
-                norms.append(sample.stored_momentum_norm_n_m_s)
+                norms.append(sample.stored_momentum_load_n_m_s)
                 demands.append(
-                    sample.actuator_momentum_norm_n_m_s
-                    if sample.actuator_momentum_norm_n_m_s is not None
-                    else sample.stored_momentum_norm_n_m_s
+                    sample.actuator_momentum_load_n_m_s
+                    if sample.actuator_momentum_load_n_m_s is not None
+                    else sample.stored_momentum_load_n_m_s
                 )
             if span.unload_at_end is not None:
                 tracker.unload(span.unload_at_end)
                 times.append(span.end)
-                norms.append(tracker.stored_momentum_norm_n_m_s)
-                demands.append(tracker.stored_momentum_norm_n_m_s)
+                norms.append(tracker.stored_momentum_load_n_m_s)
+                demands.append(tracker.stored_momentum_load_n_m_s)
             self.cache[key] = (
                 np.array(times[first:]),
                 np.array(norms[first:]),

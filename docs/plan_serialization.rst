@@ -542,6 +542,20 @@ Use :func:`~conops.targets.attach_tle_plan_metadata` to store the TLE that was u
 create a plan. The helper records the source, TLE filename and lines, epoch, NORAD ID, and
 TLE mean elements:
 
+rust-ephem refreshes its cached EOP2 file once it is a day old, and a refreshed
+file moves ground-station positions in the inertial frame very slightly. To
+repeat a run exactly on a later day, such as replaying a recorded plan, keep the
+file the run loaded and point rust-ephem at it before the first ephemeris is
+built:
+
+.. code-block:: bash
+
+   # A directory holding the run's copy of latest_eop2.short, never refreshed.
+   export RUST_EPHEM_EOP_CACHE=/path/to/run/eop2
+   export RUST_EPHEM_EOP_CACHE_TTL=3153600000
+
+The recorded SHA-256 then confirms that the replay loaded the same file.
+
 .. code-block:: python
 
    from conops.targets import attach_tle_plan_metadata
