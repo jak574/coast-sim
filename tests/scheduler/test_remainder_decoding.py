@@ -147,21 +147,36 @@ def test_cpsat_holds_a_remainder_of_the_priority_plan() -> None:
 def test_short_remainders_are_placed_after_every_full_snapshot(monkeypatch) -> None:
     """A remainder below ``ss_min`` costs a slew for little science. The
     priority-first plan places each one after every request that can still
-    take a full snapshot, so it takes only time no full snapshot used."""
+    take a full snapshot, so it takes only time no full snapshot used. The
+    exception is a remainder that goes directly after its own target's
+    snapshot, where the spacecraft already is."""
     scenario = baseline("examples/example.tle", hours=6, targets=100, seed=2)
     config = scenario.make_config()
     scheduler = PriorityScheduler(
         config, scenario.make_targets(config), scenario.begin, scenario.end
     )
-    attempts: list[bool] = []
+    attempts: list[tuple[bool, bool]] = []
+    """For each placement tried: whether it was a short remainder, and
+    whether it went directly after a snapshot of the same target."""
     place = scheduler._place_snapshot
 
     def recorded(request, *args, **kwargs):
-        attempts.append(request.short_remainder)
-        return place(request, *args, **kwargs)
+        short = request.short_remainder
+        block = place(request, *args, **kwargs)
+        after_own = False
+        if block is not None:
+            index = next(k for k, b in enumerate(scheduler.timeline) if b is block)
+            after_own = (
+                index > 0
+                and scheduler.timeline[index - 1].entry.obsid == block.entry.obsid
+            )
+        attempts.append((short, after_own))
+        return block
 
     monkeypatch.setattr(scheduler, "_place_snapshot", recorded)
     scheduler.schedule()
-    assert any(attempts)
-    first = attempts.index(True)
-    assert all(attempts[first:])
+    deferred = [k for k, (short, after_own) in enumerate(attempts) if short]
+    assert deferred
+    last_full = max(k for k, (short, _) in enumerate(attempts) if not short)
+    assert all(k > last_full or attempts[k][1] for k in deferred)
+    assert any(k > last_full for k in deferred)
