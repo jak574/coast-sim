@@ -252,6 +252,20 @@ class _Request(BaseModel):
         return least
 
     @property
+    def short_remainder(self) -> bool:
+        """Whether what remains is shorter than ``ss_min`` and may still be
+        placed, because a snapshot of the target has been placed or it has
+        collected before. Such a remainder is placed after every request
+        that can still take a full snapshot (see
+        :meth:`PriorityScheduler._place_requests`). A request for a span of
+        allocated time is not one: what it cannot place joins another span."""
+        return (
+            self.span is None
+            and 0 < self.remaining < float(snapshot_min_seconds(self.target, self.step))
+            and self.remaining >= self.minimum_snapshot
+        )
+
+    @property
     def pointing(self) -> Pointing:
         """The pointing the snapshot being placed observes: the target's,
         or the visit's own where its window gives it one."""
@@ -1654,6 +1668,8 @@ class PriorityScheduler:
 
         Re-evaluate values after each snapshot: program shares can change,
         and merging leftover allocated seconds can dilute a request's bonus.
+        Requests with only a remainder shorter than ``ss_min`` left are
+        placed last (see :attr:`_Request.short_remainder`).
         """
         # The request for the rest of a target's exposure can start with none,
         # all of it allocated, and take allocated seconds that do not fit.
@@ -1692,10 +1708,14 @@ class PriorityScheduler:
                 following = None
                 continue
             # The original order breaks ties only; a merge can change value
-            # even when completion-deficit balancing is disabled.
+            # even when completion-deficit balancing is disabled. A remainder
+            # shorter than ``ss_min`` is placed after every request that can
+            # still take a full snapshot, whatever its value: it costs a slew
+            # for little science, so it takes only time no full snapshot used.
             request = max(
                 pool,
                 key=lambda r: (
+                    not r.short_remainder,
                     self._value(r, shares),
                     -order[id(r)],
                 ),

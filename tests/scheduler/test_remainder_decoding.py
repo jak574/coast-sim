@@ -8,7 +8,7 @@ from datetime import timedelta
 import pytest
 
 from conops.benchmark.scenarios import baseline
-from conops.schedulers import LocalSearchScheduler
+from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 from conops.schedulers.local_search_scheduler import _Snapshot
 from conops.schedulers.priority_scheduler import _collection_seconds
 
@@ -108,13 +108,16 @@ def test_the_solver_is_hinted_every_variable(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_cpsat_holds_a_remainder_of_the_priority_plan() -> None:
-    """The priority-first plan ends two exposures with a snapshot below
-    ``ss_min``. The model takes each as the remainder of its exposure, so
-    the solver starts from the whole plan and both chunks are kept."""
+    """The priority-first plan ends an exposure with a snapshot below
+    ``ss_min``, in the first of two chunks. The model takes it as the
+    remainder of its exposure, so the solver starts from the whole plan and
+    both chunks are kept."""
     pytest.importorskip("ortools")
     from conops.schedulers import CpSatScheduler
 
-    scenario = baseline("examples/example.tle", hours=6, targets=100)
+    # With this seed the priority-first plan holds a short remainder; it
+    # places them last, and most six-hour plans have no time left for one.
+    scenario = baseline("examples/example.tle", hours=6, targets=100, seed=2)
     config = scenario.make_config()
     targets = scenario.make_targets(config)
     scheduler = CpSatScheduler(
@@ -124,7 +127,7 @@ def test_cpsat_holds_a_remainder_of_the_priority_plan() -> None:
         scenario.end,
         solver_deterministic_time=4.0,
         workers=1,
-        # Two chunks of three hours, each holding one of the two remainders.
+        # Two chunks of three hours; the remainder is in the first.
         chunk=timedelta(hours=3),
     )
     plan = scheduler.schedule()
@@ -139,3 +142,26 @@ def test_cpsat_holds_a_remainder_of_the_priority_plan() -> None:
     assert short
     assert scheduler.solver_chunks_used == [True, True]
     assert scheduler.score >= scheduler.initial_score
+
+
+def test_short_remainders_are_placed_after_every_full_snapshot(monkeypatch) -> None:
+    """A remainder below ``ss_min`` costs a slew for little science. The
+    priority-first plan places each one after every request that can still
+    take a full snapshot, so it takes only time no full snapshot used."""
+    scenario = baseline("examples/example.tle", hours=6, targets=100, seed=2)
+    config = scenario.make_config()
+    scheduler = PriorityScheduler(
+        config, scenario.make_targets(config), scenario.begin, scenario.end
+    )
+    attempts: list[bool] = []
+    place = scheduler._place_snapshot
+
+    def recorded(request, *args, **kwargs):
+        attempts.append(request.short_remainder)
+        return place(request, *args, **kwargs)
+
+    monkeypatch.setattr(scheduler, "_place_snapshot", recorded)
+    scheduler.schedule()
+    assert any(attempts)
+    first = attempts.index(True)
+    assert all(attempts[first:])

@@ -349,6 +349,10 @@ subsections after it give the detail.
    short it is, in the same way that dispatch finishes such a target. A remainder
    that is shorter than the simulation step and no more than a tenth of the
    request's exposure is treated as rounding and ends the request.
+   A remainder shorter than ``ss_min`` is placed after every request that can
+   still take a full snapshot, whatever its merit, so it uses only time that no
+   full snapshot used: such a remainder costs a slew for little science. Requests
+   for a span of allocated time are not reordered this way.
 4. **Each snapshot** goes in the earliest slot where every check ``DITL`` and the plan
    validator will apply passes:
 
