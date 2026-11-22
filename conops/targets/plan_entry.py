@@ -633,12 +633,22 @@ class PlanEntry(BaseModel):
         """When this target's observations were cut short, in order."""
         return tuple(self._interruptions)
 
-    def record_interruption(self, utime: float, *, began: float | None = None) -> None:
+    def record_interruption(
+        self,
+        utime: float,
+        *,
+        began: float | None = None,
+        visit: int | None = None,
+    ) -> None:
         """Record that an observation of this target was cut short at
-        ``utime``. ``began`` is when that observation began, where the
-        caller has it; a target with visit windows uses it (see
-        :meth:`Pointing.record_interruption`)."""
+        ``utime``. ``began`` is when that observation began and ``visit`` is
+        the visit it flew, where the caller has them; a target with visit
+        windows uses them (see :meth:`Pointing.record_interruption`)."""
         self._interruptions.append(utime)
+
+    def end_visit_attempt(self) -> None:
+        """The observation under way has ended. Nothing to do without visit
+        windows; see :meth:`Pointing.end_visit_attempt`."""
 
     @property
     def last_observation_cut(self) -> bool:
