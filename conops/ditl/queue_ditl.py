@@ -2325,6 +2325,12 @@ class QueueDITL(DITLMixin, DITLStats):
             )
             if cursor > context.uend:
                 return False
+            # A step whose pointing sets before it ends would be dropped when
+            # the visit reaches it, and the visit cut short. The planners place
+            # a visit only where every step is visible, so the visit is not
+            # started here either.
+            if not pointing.visible(float(following.slewend), cursor):
+                return False
             previous = pose
         activity_begin = self._next_activity_begin(
             float(slew.slewstart), protected_visit=True

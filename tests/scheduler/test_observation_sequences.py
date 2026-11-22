@@ -385,6 +385,42 @@ class TestDispatch:
         assert not any(e.step in ("first", "offset") for e in ditl.plan)
         assert any("Protected visit rejected" in e.description for e in ditl.log.events)
 
+    def test_a_visit_with_a_later_step_out_of_view_is_not_started(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The planners place a visit only where every step is visible.
+        Dispatch once started a visit whose last step had set by the time
+        the visit reached it, dropped the step and kept the science of the
+        steps before it, which no plan could hold."""
+        config = _config(1)
+        target = Pointing(
+            config=config,
+            obsid=500,
+            name="Setting sequence",
+            ra=TARGET[0],
+            dec=TARGET[1],
+            sequence=ObservationSequence(
+                steps=[
+                    SequenceStep(name="first", duration_seconds=300),
+                    SequenceStep(name="second", duration_seconds=300),
+                ]
+            ),
+        )
+        visible = Pointing.visible
+        monkeypatch.setattr(
+            Pointing,
+            "visible",
+            lambda self, begin, end: (
+                False if self.step == "second" else visible(self, begin, end)
+            ),
+        )
+        end = BEGIN + timedelta(hours=1)
+        ditl = create_ditl(config, [target], BEGIN, end)
+        ditl.step_size = STEP
+        assert ditl.calc()
+        assert not any(e.step in ("first", "second") for e in ditl.plan)
+        assert not any("cut short" in e.description for e in ditl.log.events)
+
 
 @pytest.mark.parametrize("engine", ["planned", "dispatch", "rolling"])
 @pytest.mark.parametrize("fixed_gb", [0.0, 0.2])
