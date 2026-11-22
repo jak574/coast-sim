@@ -582,7 +582,11 @@ class LocalSearchScheduler(PriorityScheduler):
         # An activity that may begin late is held where the priority-first
         # plan held it. Left where it was reserved, at its latest, a snapshot
         # the plan placed after it would be decoded before it, and the
-        # activity and every snapshot after it would then land later.
+        # activity and every snapshot after it would then land later. A
+        # start plan is settled from the reservations as they were made: it
+        # may have held an activity later than the priority-first plan did.
+        reserved_fixed = [self._copy_block(block) for block in self._fixed]
+        reserved_volumes, reserved_energy = self._initial_volumes, self._initial_energy
         self._settle_from(block.entry for block in self._greedy_timeline)
         # Released at their priority-first times, the snapshots decode to
         # the priority-first plan; moves release them one at a time.
@@ -616,10 +620,10 @@ class LocalSearchScheduler(PriorityScheduler):
             # Each contender owns its hold reservations. A new dump can
             # change the priority order while the preceding optimized plan
             # still fits. Repair it with the same exact decoder checks.
-            self._fixed = [self._copy_block(block) for block in priority_fixed]
+            self._fixed = [self._copy_block(block) for block in reserved_fixed]
             self._initial_volumes, self._initial_energy = (
-                priority_volumes,
-                priority_energy,
+                reserved_volumes,
+                reserved_energy,
             )
             self._settle_from(candidate)
             seeded = self._decode_plan(candidate)

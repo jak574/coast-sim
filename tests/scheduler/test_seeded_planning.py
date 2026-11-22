@@ -297,6 +297,58 @@ class TestSeedActivityReservations:
                 assert block.ready == held[block.entry.obsid]
         assert scheduler._decode(list(start.sequence)).final.score == start.final.score
 
+    def test_a_seed_keeps_the_science_flown_before_a_slid_activity(self) -> None:
+        """Dispatch lets an observation under way run on into a sliding
+        activity's window and begins the activity when it ends. The seeded
+        planner holds the activity where the start plan held it, later than
+        the priority-first plan did, so that science decodes where it flew."""
+        scenario = program(TLE, hours=24)
+        dispatched = _dispatch(scenario)
+        slid = {
+            int(e.obsid): float(e.activity_hold_begin)
+            for e in dispatched.plan
+            if e.obstype == ObsType.ACTIVITY and e.activity_hold_begin is not None
+        }
+        before = [
+            e
+            for e in dispatched.plan
+            if entry_obstype(e) in PLAN_SCIENCE_OBSTYPES
+            and not e.calibration
+            and any(
+                activity.begin < float(e.end) <= slid[obsid]
+                for obsid, activity in zip(
+                    sorted(slid), scenario.activities, strict=False
+                )
+                if activity.slides
+            )
+        ]
+        assert before, "the scenario no longer flies science into a slide window"
+        config = scenario.make_config()
+        targets = [*scenario.make_targets(config), *too_targets(config, scenario.toos)]
+        scheduler = LocalSearchScheduler(
+            config,
+            targets,
+            scenario.begin,
+            scenario.end,
+            activities=scenario.activities,
+            start_plan=dispatched.plan,
+            time_limit=0,
+            max_iterations=0,
+        )
+        start = scheduler._start_from_priority_plan()
+        decoded = {
+            (int(b.entry.obsid), float(b.entry.begin))
+            for b in start.final.timeline
+            if not b.is_fixed
+        }
+        first = {}
+        for e in sorted(dispatched.plan, key=lambda e: float(e.begin)):
+            if entry_obstype(e) in PLAN_SCIENCE_OBSTYPES:
+                first.setdefault((int(e.obsid), e.visit), float(e.begin))
+        for entry in before:
+            begin = first[(int(entry.obsid), entry.visit)]
+            assert (int(entry.obsid), begin) in decoded
+
     def test_the_planner_and_dispatch_place_campaign_visits(self) -> None:
         """Every campaign visit is a sequence of four steps. The scenario
         once asked for visits longer than any visibility window of the
