@@ -1145,3 +1145,57 @@ class TestSlidingDispatch:
             BLOCK_START <= float(e.begin) < float(entry.begin)
             for e in _science(ditl.plan)
         )
+
+
+def test_partial_dump_across_horizons_retains_coverage_data_and_momentum():
+    config = _config(2)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    config.spacecraft_bus.inertia_tensor_body_kg_m2 = (
+        (1000, 0, 0),
+        (0, 1000, 0),
+        (0, 0, 1000),
+    )
+    config.spacecraft_bus.attitude_control.stored_momentum = StoredMomentumConfig(
+        gravity_gradient_enabled=True,
+        initial_momentum_body_n_m_s=(0.4, 0, 0),
+        capacity_n_m_s=10,
+        thruster_dump=ThrusterDumpConfig(duration_seconds=HOUR),
+    )
+    activity = ScheduledActivity(
+        name="Long dump",
+        begin=T0 + 600,
+        duration_seconds=HOUR,
+        data_gb=1.5,
+        desaturation=True,
+    )
+    run = RollingHorizonDITL(
+        config,
+        [],
+        begin=BEGIN,
+        end=BEGIN + timedelta(hours=2),
+        horizon=timedelta(minutes=30),
+        replan_interval=timedelta(minutes=15),
+        activities=[activity],
+        include_passes=False,
+    )
+    run._add_activity_data = Mock(wraps=run._add_activity_data)
+    run._unload_stored_momentum = Mock(wraps=run._unload_stored_momentum)
+    assert run.calc()
+    # The run's plan holds the dump once, or as one entry for each horizon
+    # that planned part of it; either way the entries cover it end to end.
+    entries = [e for e in run.plan if e.obstype == ObsType.ACTIVITY]
+    assert entries
+    assert float(entries[0].begin) == activity.begin
+    assert float(entries[-1].end) == activity.end
+    assert all(float(a.end) == float(b.begin) for a, b in zip(entries, entries[1:]))
+    assert all(
+        (e.activity_hold_begin, e.activity_hold_end) == (activity.begin, activity.end)
+        for e in entries
+    )
+    assert all(not e.activity_finishes for e in entries[:-1])
+    assert entries[-1].activity_finishes
+    run._add_activity_data.assert_called_once()
+    assert run._add_activity_data.call_args.args[0] == activity.data_gb
+    run._unload_stored_momentum.assert_called_once_with(activity.end, entries[-1].obsid)
+    assert run.validate_plan_matches_execution() == []
