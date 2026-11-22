@@ -16,7 +16,7 @@ from numpy.polynomial.polynomial import polyval
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from .numerics import ROUNDOFF
-from .vector import _quat_mul
+from .vector import _quat_mul, shorter_arc_sign
 
 _RELATIVE_TOLERANCE = 1e-10
 """The relative slack that absorbs floating-point roundoff in the
@@ -103,8 +103,7 @@ class QuaternionHermite(BaseModel):
     @cached_property
     def _coefficients(self) -> npt.NDArray[np.float64]:
         q0, q1 = np.asarray(self.first), np.asarray(self.last)
-        if np.dot(q0, q1) < 0:
-            q1 = -q1
+        q1 = shorter_arc_sign(q0, q1) * q1
         v0 = (
             -0.5
             * self.duration

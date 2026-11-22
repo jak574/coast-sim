@@ -30,4 +30,5 @@ that defines them:
    conops.simulation.saa
    conops.simulation.safe_hold
    conops.simulation.slew
+   conops.simulation.target_tracking
    conops.simulation.thermal_network

@@ -15,6 +15,17 @@ from .numerics import (
 )
 
 _SLERP_LINEAR_DOT = 0.9995
+
+_HALF_TURN_DOT = 1e-6
+"""Two unit quaternions whose dot product is no larger than this in size are
+half a turn apart: the rotation between them is 180 degrees either way round,
+to within about a ten-thousandth of a degree. An attitude converted to and
+from right ascension, declination and roll near a pole is only good to about
+1e-8 here, so a tighter band would leave the choice to that error."""
+
+_HALF_TURN_AXIS_MIN = 1e-6
+"""The smallest component of a half turn's axis that decides which way round
+the turn goes (see :func:`shorter_arc_sign`)."""
 """Quaternions whose dot product exceeds this are blended linearly, where
 spherical interpolation would divide by a vanishing sine."""
 _NO_ROTATION_RAD = 1e-6
@@ -581,9 +592,9 @@ def _quaternion_delta(
     delta /= float(np.linalg.norm(delta))
 
     # q and -q represent the same rotation.  Choose the representative whose
-    # scalar component is non-negative so the angle follows the shortest arc.
-    if delta[0] < 0.0:
-        delta = -delta
+    # scalar component is non-negative so the angle follows the shortest arc,
+    # and at a half turn the one every body frame agrees on.
+    delta = shorter_arc_sign(q1, q2) * delta
 
     vector_norm = float(np.linalg.norm(delta[1:]))
     angle_deg = float(
@@ -620,6 +631,15 @@ def quaternion_deltas(
     )
     delta /= np.linalg.norm(delta, axis=-1)[..., None]
     delta = np.where(delta[..., :1] < 0.0, -delta, delta)
+    half_turn = np.abs(delta[..., 0]) <= _HALF_TURN_DOT
+    if half_turn.any():
+        # As :func:`shorter_arc_sign` chooses, one pair at a time.
+        first, second = np.broadcast_arrays(a, b)[0], np.broadcast_arrays(a, b)[1]
+        for index in np.argwhere(half_turn):
+            pair = tuple(index)
+            sign = shorter_arc_sign(first[pair], second[pair])
+            raw = _quat_mul(first[pair], second[pair], conjugate_b=True)
+            delta[pair] = sign * raw / float(np.linalg.norm(raw))
     vector_norm = np.linalg.norm(delta[..., 1:], axis=-1)
     angles = np.rad2deg(2.0 * np.arctan2(vector_norm, np.maximum(0.0, delta[..., 0])))
     still = vector_norm < ROUNDOFF
@@ -774,6 +794,48 @@ def quat_to_attitude(q: npt.NDArray[np.float64]) -> tuple[float, float, float]:
     )
 
 
+def shorter_arc_sign(
+    q1: Sequence[float] | npt.NDArray[np.float64],
+    q2: Sequence[float] | npt.NDArray[np.float64],
+) -> float:
+    """+1 or -1: the sign to give ``q2`` so that the rotation from ``q1`` to
+    it is the shorter one. ``q2`` and ``-q2`` are the same attitude, reached
+    by turning opposite ways about one axis.
+
+    Away from a half turn the sign is that of the quaternions' dot product.
+    At a half turn the two ways round are equally long and the dot product
+    is zero but for rounding, so its sign cannot choose: rounding differs
+    with the body frame the attitudes are written in, and the same physical
+    slew would turn one way in one frame and the other way in another. The
+    turn is chosen there from its axis in inertial coordinates, which is the
+    same in every body frame: the first of the axis's x, y and z components
+    that is not small is made negative. Which sign is a convention; either
+    gives a valid half turn.
+    """
+    dot = (
+        float(q1[0]) * float(q2[0])
+        + float(q1[1]) * float(q2[1])
+        + float(q1[2]) * float(q2[2])
+        + float(q1[3]) * float(q2[3])
+    )
+    if abs(dot) > _HALF_TURN_DOT:
+        return 1.0 if dot > 0.0 else -1.0
+    # The vector part of conjugate(q1) * q2: the rotation's axis in inertial
+    # coordinates. Attitude quaternions map inertial into body coordinates,
+    # so a change of body frame multiplies both on the left and cancels here.
+    aw, ax, ay, az = float(q1[0]), float(q1[1]), float(q1[2]), float(q1[3])
+    bw, bx, by, bz = float(q2[0]), float(q2[1]), float(q2[2]), float(q2[3])
+    axis = (
+        aw * bx - bw * ax - (ay * bz - az * by),
+        aw * by - bw * ay - (az * bx - ax * bz),
+        aw * bz - bw * az - (ax * by - ay * bx),
+    )
+    for component in axis:
+        if abs(component) > _HALF_TURN_AXIS_MIN:
+            return -1.0 if component > 0.0 else 1.0
+    return 1.0
+
+
 def quat_slerp(
     q1: npt.NDArray[np.float64], q2: npt.NDArray[np.float64], t: float
 ) -> npt.NDArray[np.float64]:
@@ -789,12 +851,9 @@ def quat_slerp(
     """
     q1 = q1 / np.linalg.norm(q1)
     q2 = q2 / np.linalg.norm(q2)
-    dot = float(np.dot(q1, q2))
     # Always take the shorter arc through SO(3)
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-    dot = min(dot, 1.0)
+    q2 = shorter_arc_sign(q1, q2) * q2
+    dot = min(max(float(np.dot(q1, q2)), 0.0), 1.0)
     # atan2 resolves tiny turns without acos cancellation. Keep exact spherical
     # interpolation: normalized linear interpolation introduces a rate error.
     theta_0 = float(np.arctan2(np.linalg.norm(q2 - dot * q1), dot))
@@ -816,11 +875,8 @@ def quat_slerp_at(
     ``quat_slerp`` gives at that parameter."""
     q1 = q1 / np.linalg.norm(q1)
     q2 = q2 / np.linalg.norm(q2)
-    dot = float(np.dot(q1, q2))
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-    dot = min(dot, 1.0)
+    q2 = shorter_arc_sign(q1, q2) * q2
+    dot = min(max(float(np.dot(q1, q2)), 0.0), 1.0)
     theta_0 = float(np.arctan2(np.linalg.norm(q2 - dot * q1), dot))
     ts = np.asarray(ts, dtype=np.float64)
     if theta_0 == 0.0:
@@ -846,11 +902,8 @@ def _batch_quat_slerp(
     """
     q1 = q1 / np.linalg.norm(q1)
     q2 = q2 / np.linalg.norm(q2)
-    dot = float(np.dot(q1, q2))
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-    dot = min(dot, 1.0)
+    q2 = shorter_arc_sign(q1, q2) * q2
+    dot = min(max(float(np.dot(q1, q2)), 0.0), 1.0)
 
     ts = np.linspace(0.0, 1.0, steps + 1)  # (N,)
 

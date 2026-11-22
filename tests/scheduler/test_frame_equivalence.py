@@ -271,3 +271,66 @@ def test_explicit_hardware_offsets_are_not_rotated_twice():
     transformed = frame.constraint_in_body(combined)
     assert transformed.constraints[1] is hardware
     assert transformed.constraints[0] is not combined.constraints[0]
+
+
+_ANTIPODAL = [
+    (100.0, 0.0, 0.0, 280.0, 0.0, 0.0),
+    (105.0, 10.0, 0.0, 285.0, -10.0, 0.0),
+    (30.0, 40.0, 20.0, 210.0, -40.0, 75.0),
+    (251.3, -62.0, 310.0, 71.3, 62.0, 45.0),
+    (0.0, 0.0, 90.0, 180.0, 0.0, 270.0),
+    (317.0, 5.5, 12.0, 137.0, -5.5, 200.0),
+]
+
+
+@pytest.mark.parametrize(
+    "algorithm", [SlewAlgorithm.QUATERNION, SlewAlgorithm.CONSTRAINT_AVOIDING]
+)
+@pytest.mark.parametrize(
+    "frame",
+    [
+        SpacecraftFrame(boresight=(0, 0, 1), sun_side=(1, 0, 0)),
+        SpacecraftFrame(boresight=(0, 0, 1), sun_side=(0, -1, 0)),
+        SpacecraftFrame(
+            boresight=(np.sqrt(0.75), 0.5, 0), sun_side=(-0.5, np.sqrt(0.75), 0)
+        ),
+    ],
+)
+@pytest.mark.parametrize("attitudes", _ANTIPODAL)
+def test_a_half_turn_slew_is_frame_invariant(algorithm, frame, attitudes):
+    """Between antipodal pointings the rotation is 180 degrees either way
+    round. The way chosen must not depend on the body frame the attitudes
+    are written in, or the same slew flies two physical paths."""
+    paths = []
+    for axes in [SpacecraftFrame(), frame]:
+        config = make_config(2)
+        config.spacecraft_bus.frame = axes
+        config.constraint.sun_constraint = None
+        config.constraint.earth_constraint = None
+        config.spacecraft_bus.attitude_control.slew_algorithm = algorithm
+        start = axes.mounting.body_attitude(*attitudes[:3])
+        end = axes.mounting.body_attitude(*attitudes[3:])
+        slew = Slew(
+            config=config,
+            slewstart=T0,
+            startra=start[0],
+            startdec=start[1],
+            startroll=start[2],
+            endra=end[0],
+            enddec=end[1],
+            endroll=end[2],
+        )
+        slew.calc_slewtime()
+        assert slew.slewdist == pytest.approx(180.0)
+        paths.append(
+            [
+                quaternion_to_rotation_matrix(
+                    attitude_to_quat(*slew._quaternion_attitude(fraction))
+                )
+                for fraction in (0.25, 0.5, 0.75)
+            ]
+        )
+    for original, changed in zip(*paths, strict=True):
+        # A turn the other way round differs by order one; an attitude written
+        # as angles at a pole is only good to about 1e-8.
+        assert changed == pytest.approx(frame.body_from_canonical @ original, abs=1e-6)
