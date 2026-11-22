@@ -235,3 +235,47 @@ def test_sequence_reservation_counts_its_science_steps_without_calibration(
     ]
     expected = {700: 1} if last_seconds == 300 else {}
     assert run._reserved_visit_windows(entries, T0 + 120 * MIN) == expected
+
+
+@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+@pytest.mark.parametrize(
+    "setup,reserved,expected",
+    [
+        # Window 1 committed beyond the horizon: only window 2 remains.
+        (None, (10 * MIN, 100 * MIN, {700: 1}), [2]),
+        # Sequence overhead: the recorded index, not the end time, names window 1.
+        ("sequence", (10 * MIN, 190 * MIN, {700: 1}), [2, 2, 2]),
+        # An older reservation does not erase newer completed history.
+        ("history", (None, 70 * MIN, {700: 0}), [2]),
+        # A pending cut attempt reserves no whole window, so a whole retry is allowed.
+        (None, (5 * MIN, 105 * MIN, {}), [1, 2]),
+    ],
+)
+def test_reserved_visits_with_completed_history_place_the_remaining_windows(
+    kind, setup, reserved, expected
+):
+    config, target = _case()
+    if setup == "sequence":
+        target.sequence = ObservationSequence(
+            steps=[
+                SequenceStep(name="science A", duration_seconds=5 * MIN),
+                SequenceStep(
+                    name="calibration", duration_seconds=50 * MIN, science=False
+                ),
+                SequenceStep(name="science B", duration_seconds=5 * MIN),
+            ]
+        )
+    elif setup == "history":
+        target.record_collection(T0 + 100 * MIN, 10 * MIN, visit=1)
+    seconds, visit_end, windows = reserved
+    options = {"reserved_seconds": {700: seconds}} if seconds else {}
+    scheduler = _planner(
+        kind,
+        config,
+        target,
+        reserved_visits={700: T0 + visit_end},
+        reserved_visit_windows=windows,
+        **options,
+    )
+    assert [e.visit for e in scheduler.schedule() if e.obsid == 700] == expected
+    assert target.visits_done == ({0, 1} if setup == "history" else {0})

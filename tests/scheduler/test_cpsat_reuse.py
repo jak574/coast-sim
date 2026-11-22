@@ -186,3 +186,32 @@ def test_unknown_at_deterministic_budget_reuses_the_same_fallback(monkeypatch):
     assert solve(chunk(), cache) == ("UNKNOWN", "deterministic budget", None)
     assert solve(chunk(), cache) == ("UNKNOWN", "reused", None)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "status,wall,first,second,calls",
+    [
+        # A wall-limited result is never cached.
+        (cp_model.FEASIBLE, 2.0, "wall clock", "wall clock", 2),
+        # An unknown at the deterministic budget reuses the same fallback.
+        (cp_model.UNKNOWN, 0.001, "deterministic budget", "reused", 1),
+    ],
+)
+def test_limited_results_are_cached_only_at_the_deterministic_budget(
+    monkeypatch, native_calls, status, wall, first, second, calls
+):
+    cache = _ChunkSolveCache()
+    counted = cp_model.CpSolver.solve
+
+    def limited(self, *args, **kwargs):
+        counted(self, *args, **kwargs)
+        return status
+
+    monkeypatch.setattr(cp_model.CpSolver, "solve", limited)
+    monkeypatch.setattr(cp_model.CpSolver, "wall_time", property(lambda self: wall))
+    monkeypatch.setattr(
+        cp_model.CpSolver, "deterministic_time", property(lambda self: 0.05)
+    )
+    assert solve(chunk(), cache)[1] == first
+    assert solve(chunk(), cache)[1] == second
+    assert len(native_calls) == calls

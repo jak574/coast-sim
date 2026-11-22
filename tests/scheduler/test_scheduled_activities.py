@@ -23,9 +23,39 @@ from conops.targets import (
     assign_obsids,
 )
 
-from .planning_scenario import BEGIN, HOUR, MIN, PATCH, T0
+from .planning_scenario import BEGIN, HOUR, MIN, PATCH, T0, patch_targets
 from .planning_scenario import make_config as _config
 from .planning_scenario import make_target as _target
+
+SLIDE_HOURS = 6
+
+
+SLIDE_END = BEGIN + timedelta(hours=SLIDE_HOURS)
+
+
+def _long_targets(config) -> list[Pointing]:  # type: ignore[no-untyped-def]
+    """Targets observed in long snapshots, so one is always under way."""
+    return patch_targets(config, 3, minutes=300, snapshot=60)
+
+
+SLIDE_HOURS = 6
+
+
+def _dispatch_long(activities: list[ScheduledActivity]) -> QueueDITL:
+    config = _config(SLIDE_HOURS)
+    ditl = create_ditl(
+        config, _long_targets(config), BEGIN, SLIDE_END, activities=activities
+    )
+    assert isinstance(ditl, QueueDITL)
+    ditl.step_size = STEP
+    assert ditl.calc()
+    return ditl
+
+
+BLOCK = 20 * MIN
+
+
+BLOCK_START = T0 + 2 * HOUR
 
 HOURS = 8
 STEP = 60
@@ -1069,3 +1099,49 @@ def test_candidate_copies_keep_the_sliding_activity_hold() -> None:
     assert float(candidate.entry.end) == activity.end
     assert float(original.entry.begin) == activity.begin
     assert float(original.entry.end) == activity.end
+
+
+class TestSlidingDispatch:
+    @pytest.mark.parametrize(
+        "slide",
+        [0, 5 * MIN, 45 * MIN],
+        ids=["no-window", "short-window", "long-window"],
+    )
+    def test_a_block_due_mid_observation_waits_within_its_window(
+        self, slide: float
+    ) -> None:
+        """A block due while an observation collects waits for it, within its
+        window, then runs its full length; without a window its start is the
+        deadline the science before it ends by."""
+        block = ScheduledActivity(
+            name="Cal", begin=BLOCK_START, duration_seconds=BLOCK, slide_seconds=slide
+        )
+        ditl = _dispatch_long([block])
+        (entry,) = _activities(ditl.plan)
+        assert float(entry.end) - float(entry.begin) == pytest.approx(BLOCK)
+        if not slide:
+            assert float(entry.begin) == BLOCK_START
+            assert all(
+                float(e.end) <= BLOCK_START or float(e.begin) >= block.end
+                for e in _science(ditl.plan)
+            )
+            return
+        under_way = [
+            e
+            for e in _science(ditl.plan)
+            if float(e.begin) < BLOCK_START < float(e.end)
+        ]
+        assert len(under_way) == 1
+        assert float(under_way[0].end) <= float(entry.begin) <= block.latest_start
+        assert float(entry.begin) > BLOCK_START
+        assert not under_way[0].interruptions
+        assert any(
+            "waits for observation" in e.description
+            and "at the latest" in e.description
+            for e in ditl.log.events
+        )
+        # Nothing starts while the block waits.
+        assert not any(
+            BLOCK_START <= float(e.begin) < float(entry.begin)
+            for e in _science(ditl.plan)
+        )

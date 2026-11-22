@@ -1,7 +1,8 @@
 """Mandatory activities use a reachable attitude safe for the entire hold."""
 
+from contextlib import nullcontext
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from rust_ephem import EarthLimbConstraint
@@ -394,3 +395,39 @@ def test_a_sliding_hold_finishes_inside_the_physical_run(kind):
     assert run.calc()
     assert run.validate_plan_matches_execution() == []
     assert run.fault_management.events == []
+
+
+@pytest.mark.parametrize(
+    "overdue, reason",
+    [(False, "full duration"), (True, "start window closed")],
+    ids=["no-safe-attitude", "window-closed"],
+)
+def test_an_unplaceable_mandatory_activity_is_reported(overdue, reason):
+    config = _config()
+    activity = ScheduledActivity(
+        name="Mandatory calibration",
+        begin=T0 + HOUR,
+        duration_seconds=(2 if overdue else 1) * HOUR,
+        fixed=not overdue,
+        slide_seconds=30 * MIN if overdue else 0,
+    )
+    builder = PriorityScheduler(
+        config,
+        [],
+        BEGIN + timedelta(hours=2 if overdue else 0),
+        BEGIN + timedelta(hours=4),
+        simulation_start=BEGIN,
+        activities=[activity],
+        include_passes=False,
+    )
+    # Without the overdue start, make every candidate attitude unsafe.
+    unsafe = patch.multiple(
+        SchedulingContext,
+        first_hold_violation=Mock(return_value=T0 + HOUR),
+        idle_hold_candidates=Mock(return_value=iter([(0.0, 0.0, 0.0)])),
+    )
+    with nullcontext() if overdue else unsafe:
+        with pytest.raises(ActivitySchedulingError, match=activity.name) as error:
+            builder.schedule()
+    assert error.value.activity.obsid is not None
+    assert reason in error.value.reason

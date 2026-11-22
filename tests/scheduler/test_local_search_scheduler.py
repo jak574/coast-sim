@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pydantic import BaseModel, Field
 
 from conops import DITL
 from conops.common import ObsType
@@ -152,6 +153,41 @@ class TestSearchBudgetReporting:
             )
         )
         assert record.search_iterations == record.search_limits == []
+
+    def test_a_noop_does_not_skip_an_evaluated_history_slot(self, monkeypatch):
+        class State(BaseModel):
+            score: float
+            timeline: list[object] = Field(default_factory=list)
+            owed: frozenset[int] = frozenset()
+
+        class Candidate(BaseModel):
+            final: State
+
+        outcomes = []
+        for proposals in [[(1,), (2,), (3,)], [(1,), None, (2,), (3,)]]:
+            scheduler = self._scheduler(
+                history_length=2, max_iterations=len(proposals), time_limit=60
+            )
+            moves = iter(proposals)
+            decoded_from = []
+
+            def decode(current, step):
+                decoded_from.append(current.final.score)
+                if step == 3:
+                    score = 13 if current.final.score == 11 else 12
+                else:
+                    score = {1: 12, 2: 11}[step]
+                return Candidate(final=State(score=score))
+
+            monkeypatch.setattr(scheduler, "_random_move", lambda *args: next(moves))
+            monkeypatch.setattr(scheduler, "_redecode", decode)
+            best = scheduler._search(Candidate(final=State(score=10)))
+            outcomes.append((best.final.score, decoded_from))
+            assert scheduler.search_iterations == [len(proposals)]
+            assert scheduler.search_limits == ["iteration budget"]
+            assert len(decoded_from) == 3
+        # A no-op proposal uses an attempt but leaves the evaluated neighbours unchanged.
+        assert outcomes == [(13, [10, 12, 11]), (13, [10, 12, 11])]
 
 
 def test_equal_value_does_not_postpone_the_priority_science() -> None:
@@ -846,3 +882,48 @@ class TestRollingHorizon:
 
         assert len(ditl.replans) == 3
         assert ditl.validate_plan_matches_execution() == []
+
+
+class TestDecoderReuse:
+    @staticmethod
+    def _planner(*, battery: bool = True) -> LocalSearchScheduler:
+        config = _config(
+            2,
+            weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0),
+            open_sky=True,
+        )
+        if not battery:
+            config.battery.planning_level = None
+        merits = [32.3900381556679, 15.093408900710946, 65.09693795925497]
+        targets = [
+            _target(config, n, *PATCH[0], merit=merit, minutes=5)
+            for n, merit in enumerate(merits, 1)
+        ]
+        return LocalSearchScheduler(
+            config,
+            targets,
+            BEGIN,
+            BEGIN + timedelta(hours=2),
+            time_limit=0,
+            max_iterations=0,
+            include_passes=False,
+        )
+
+    def test_an_unchanged_sequence_retains_its_exact_score(self) -> None:
+        planner = self._planner(battery=False)
+        start = planner._start_from_priority_plan()
+        repeated = planner._redecode(start, list(start.sequence), 0, 0, 0)
+        fresh = planner._decode(start.sequence)
+        assert repeated.final.score == fresh.final.score == start.final.score
+
+    @pytest.mark.parametrize(
+        "left,right",
+        [({"volumes": (0.3,)}, {"volumes": (0.3 + 5e-10,)}), ({}, {"score": 1.0})],
+    )
+    def test_a_small_state_difference_requires_fresh_decoding(self, left, right):
+        planner = self._planner(battery=False)
+        initial = planner._start_from_priority_plan().states[0]
+        assert planner._ledger.active
+        assert not planner._same_state(
+            initial.model_copy(update=left), initial.model_copy(update=right)
+        )

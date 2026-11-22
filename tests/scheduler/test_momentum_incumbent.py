@@ -8,6 +8,7 @@ from conops.benchmark.scenarios import program
 from conops.common import ObsType
 from conops.targets import Plan, assign_obsids
 
+from .planning_scenario import collected_seconds, planner, replay
 from .test_activity_safety import _planner
 
 
@@ -284,3 +285,59 @@ def test_committed_activity_forecast_includes_frames_after_ingress(explicit_hold
     # and belong in the forecast only once the hold has begun.
     assert run._recorder_volume_at(T0 + 45 * MIN, T0 + 50 * MIN, [entry]) == 0
     assert run._recorder_volume_at(T0 + 45 * MIN, T0 + 75 * MIN, [entry]) == 4
+
+
+@pytest.mark.parametrize("kind", ["local_search", "cp_sat"])
+def test_losing_seeds_preserve_priority_activity_reservations(kind):
+    from datetime import timedelta
+
+    from conops.targets import Plan, ScheduledActivity
+
+    from .planning_scenario import BEGIN, MIN, T0, make_config, make_target
+
+    config = make_config(3, open_sky=True)
+    activity = ScheduledActivity(
+        name="Calibration",
+        begin=T0 + 60 * MIN,
+        duration_seconds=30 * MIN,
+        slide_seconds=60 * MIN,
+        obsid=998000,
+    )
+    target = make_target(
+        config,
+        100,
+        105,
+        10,
+        minutes=80,
+        snapshot=80,
+        ss_min=80,
+        deadline=T0 + 20 * MIN,
+    )
+    scheduler_class, options = planner(kind)
+    settings = dict(
+        config=config,
+        targets=[target],
+        begin=BEGIN,
+        end=BEGIN + timedelta(hours=3),
+        activities=[activity],
+        include_passes=False,
+        **options,
+    )
+    unseeded = scheduler_class(**settings)
+    baseline = unseeded._start_from_priority_plan()
+    assert baseline.final.score > 0
+    seed = Plan(entries=[activity.plan_entry(config, (105, 10, 0))])
+    seeded = scheduler_class(**settings, start_plan=seed)
+    seeded._momentum_seed = seed
+    start = seeded._start_from_priority_plan()
+    assert seeded.seed_score == 0
+    assert seeded.start_score == unseeded.start_score
+    assert start.final.score == baseline.final.score
+    [hold] = [b for b in start.final.timeline if b.is_activity]
+    assert hold.ready > activity.begin
+    # The chosen fixed reservations must be the ones used when a
+    # search move or CP-SAT chunk redecodes from the starting state.
+    redecoded = seeded._decode(list(start.sequence))
+    assert redecoded.final.score == start.final.score
+    run = replay(config, seeded.schedule(), BEGIN, settings["end"])
+    assert collected_seconds(run) == 80 * MIN

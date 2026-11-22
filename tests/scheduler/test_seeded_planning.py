@@ -12,6 +12,13 @@ from conops.common import ObsType
 from conops.ditl.plan_validator import PLAN_SCIENCE_OBSTYPES, entry_obstype
 from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 
+
+def _weighted(results: list, name: str) -> float:
+    result = next(r for r in results if r.contender == name)
+    assert result.error is None, result.error
+    return result.weighted_science
+
+
 TLE = "examples/example.tle"
 
 
@@ -81,6 +88,8 @@ class TestStartPlan:
 class TestAcceptance:
     """Compare executed science at the dynamic values selected by each mode."""
 
+    BOUND = 0.99
+
     @pytest.mark.parametrize("make", [baseline, program])
     def test_the_seeded_local_search_plan_scores_at_least_dispatch(self, make) -> None:  # type: ignore[no-untyped-def]
         scenario = make(TLE, hours=6)
@@ -119,6 +128,22 @@ class TestAcceptance:
         assert _dynamic(results, "planned:cp_sat seeded by dispatch") > _dynamic(
             results, "dispatch"
         )
+
+    def test_the_seeded_cp_sat_plan_scores_at_least_dispatch(self) -> None:
+        pytest.importorskip("ortools")
+        from conops.schedulers import CpSatScheduler
+
+        scenario = program(TLE, hours=6)
+        results = run_benchmark(
+            scenario,
+            [
+                dispatch(),
+                planned(CpSatScheduler, seeded_by_dispatch=True, solver_time_limit=2.0),
+            ],
+        )
+        assert _weighted(
+            results, "planned:cp_sat seeded by dispatch"
+        ) >= self.BOUND * _weighted(results, "dispatch")
 
 
 class TestProgramScenario:

@@ -216,3 +216,38 @@ def test_a_reserved_future_visit_does_not_hide_an_earlier_unused_window():
     assert [e.visit for e in visits] == [0, 1]
     assert all(e.exposure == 10 * MIN for e in visits)
     assert visits[1].collection_begin == locked.collection_begin
+
+
+@pytest.mark.parametrize("trial", ["momentum", "objective", "settling"])
+def test_a_rejected_trial_leaves_the_plan_unchanged(trial, monkeypatch):
+    _, scheduler, _, activity, _ = scenario()
+    plan = scheduler._plan_within_momentum(scheduler._plan_once)
+    before = plan.model_dump_json()
+    events = list(scheduler.log.events)
+    adds_science = lambda blocks: any(b.entry.obsid == 1 for b in blocks)  # noqa: E731
+    if trial == "momentum":
+        # Adding the science would cross the momentum capacity.
+        scheduler._momentum = SimpleNamespace(
+            capacity_n_m_s=1.0,
+            first_crossing=lambda timeline, *a, **k: (
+                T0 if adds_science(timeline) else None
+            ),
+        )
+    elif trial == "objective":
+        monkeypatch.setattr(
+            scheduler, "_timeline_score", lambda b: -1.0 if adds_science(b) else 0.0
+        )
+    else:
+        original = scheduler._finish
+
+        # Final settling moves the selected hold.
+        def finish(self, timeline):
+            result = original.__func__(self, timeline)
+            hold = next(b for b in self.timeline if b.entry.obsid == activity.obsid)
+            hold.entry.activity_hold_end += MIN
+            return result
+
+        monkeypatch.setattr(LocalSearchScheduler, "_finish", finish)
+    assert scheduler._augment_selected_plan(plan) is plan
+    assert plan.model_dump_json() == before
+    assert scheduler.log.events == events

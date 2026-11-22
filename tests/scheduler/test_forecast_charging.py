@@ -168,3 +168,75 @@ def test_an_explicit_charge_is_preserved_even_when_not_needed(monkeypatch):
     planned = scheduler._charged_timeline([reserved])
     assert [b.entry.obsid for b in planned if b.is_charge] == [reserved.entry.obsid]
     assert reserved.entry.model_dump_json() == before
+
+
+@pytest.mark.parametrize(
+    "capacity,deficit,slew_watts,charges",
+    [
+        (12000, 0, 180, False),  # full battery and the horizon fits
+        (1000, 0, 180, True),  # full battery but a later deficit
+        (1000, 0, 50000, False),  # the turns cost more than the charge gains
+        (1000, 250, 180, False),  # passive generation at the charge pose recovers
+    ],
+)
+def test_a_charge_is_planned_only_when_it_improves_the_forecast(
+    monkeypatch, capacity, deficit, slew_watts, charges
+):
+    scheduler = builder(
+        monkeypatch, capacity=capacity, deficit=deficit, slew_watts=slew_watts
+    )
+    if deficit:
+        scheduler._origin.attitude_out = scheduler._battery.charging_attitude(T0)
+    candidates = scheduler._all_charge_timeline([])
+    planned = scheduler._charged_timeline([])
+    assert any(b.is_charge for b in planned) == charges
+    if slew_watts > 180:
+        assert candidates
+        assert scheduler._charge_excess(candidates) > scheduler._charge_excess([])
+    else:
+        assert scheduler._within_level(scheduler._timeline_energy([])) != charges
+        assert scheduler._within_level(scheduler._timeline_energy(planned))
+
+
+@pytest.mark.parametrize("reserved", ["visit", "charge"])
+def test_charge_planning_does_not_rewrite_a_reserved_block(monkeypatch, reserved):
+    from conops.schedulers.priority_scheduler import _Block
+    from conops.targets import PlanEntry
+
+    if reserved == "charge":
+        scheduler = builder(monkeypatch, capacity=12000)
+        [block] = scheduler._all_charge_timeline([])
+    else:
+        scheduler = builder(monkeypatch)
+        pose = (105.0, 10.0, 0.0)
+        start = T0 + 2 * HOUR
+        slew = scheduler.ctx.slew(pose, pose, start, obsid=100)
+        step = PlanEntry(
+            config=scheduler.config,
+            obsid=100,
+            obstype=ObsType.AT,
+            ra=pose[0],
+            dec=pose[1],
+            roll=pose[2],
+            begin=start,
+            end=start + 20 * MIN,
+            collection_begin=start,
+            collection_end=start + 20 * MIN,
+        )
+        block = _Block(
+            entry=step,
+            steps=[step],
+            step_slews=[slew],
+            slew=slew,
+            attitude_in=pose,
+            attitude_out=pose,
+            ready=start,
+            end=float(step.end),
+        )
+        assert scheduler._all_charge_timeline([block])  # speculative charges tried
+    before, step_slews = block.entry.model_dump_json(), list(block.step_slews)
+    planned = scheduler._charged_timeline([block])
+    assert block.entry.model_dump_json() == before
+    assert block.step_slews == step_slews
+    if reserved == "charge":  # kept although not needed
+        assert [b.entry.obsid for b in planned if b.is_charge] == [block.entry.obsid]

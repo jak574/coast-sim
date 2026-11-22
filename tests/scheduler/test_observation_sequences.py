@@ -356,6 +356,35 @@ class TestDispatch:
         assert burst and float(burst[0].begin) >= float(steps[-1].end)
         assert not any("cut short" in e.description for e in ditl.log.events)
 
+    def test_a_visit_with_an_inadmissible_later_roll_is_not_started(
+        self,
+    ) -> None:
+        config = _config(1)
+        config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg = 15.0
+        target = Pointing(
+            config=config,
+            obsid=500,
+            name="Roll sequence",
+            ra=TARGET[0],
+            dec=TARGET[1],
+            sequence=ObservationSequence(
+                steps=[
+                    SequenceStep(name="first", duration_seconds=300),
+                    SequenceStep(
+                        name="offset", duration_seconds=300, roll_offset_deg=120
+                    ),
+                ]
+            ),
+        )
+        end = BEGIN + timedelta(hours=1)
+        ctx = SchedulingContext(config, BEGIN, end, step_size=STEP)
+        target.roll_deg = ctx.optimum_roll(target, T0)
+        ditl = create_ditl(config, [target], BEGIN, end)
+        ditl.step_size = STEP
+        assert ditl.calc()
+        assert not any(e.step in ("first", "offset") for e in ditl.plan)
+        assert any("Protected visit rejected" in e.description for e in ditl.log.events)
+
 
 @pytest.mark.parametrize("engine", ["planned", "dispatch", "rolling"])
 @pytest.mark.parametrize("fixed_gb", [0.0, 0.2])

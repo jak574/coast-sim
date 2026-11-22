@@ -86,6 +86,34 @@ class TestRollDependence:
         constraint.invalidate_combined_constraint_cache()
         assert constraint.science_constraint_roll_dependent
 
+    @pytest.mark.parametrize(
+        ("science", "dependent"),
+        [
+            (BodyConstraint(body="Sun", fov_polygon=WEST_PATCH), True),
+            (
+                rust_ephem.SunConstraint(min_angle=30.0)
+                | BrightStarConstraint(stars=[(10.0, 10.0)], fov_polygon=WEST_PATCH),
+                True,
+            ),
+            (
+                ~rust_ephem.SunConstraint(min_angle=45.0).boresight_offset(
+                    yaw_deg=30.0
+                ),
+                True,
+            ),
+            (None, False),
+            (
+                rust_ephem.SunConstraint(min_angle=30.0)
+                & rust_ephem.MoonConstraint(min_angle=10.0),
+                False,
+            ),
+            (BrightStarConstraint(stars=[(10.0, 10.0)], fov_radius=2.0), False),
+        ],
+    )
+    def test_roll_dependence(self, science: object, dependent: bool) -> None:
+        constraint = Constraint(science_constraint=science)
+        assert constraint.science_constraint_roll_dependent == dependent
+
 
 class TestBodyRoll:
     """With the Sun due north and a +Y panel the power-optimal body roll is
@@ -244,3 +272,39 @@ class TestMountedRoll:
         )
         assert roll != unguarded
         assert not constraint.in_explicit_science(ra, dec, UTIME, target_roll=roll)
+
+
+@pytest.mark.parametrize("caller", ["identity_mount", "charger"])
+def test_engineering_guidance_keeps_science_only_patch_out_of_its_roll(
+    caller, example_ephem
+):
+    from conops.config import MissionConfig
+    from conops.simulation.emergency_charging import EmergencyCharging
+
+    ra, dec = _sun_north(example_ephem)
+    panels = _side_panel()
+    constraint = _constraint(
+        example_ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
+    )
+    assert constraint.in_explicit_science(ra, dec, UTIME, target_roll=90.0)
+    expected = optimum_body_roll(
+        ra, dec, UTIME, example_ephem, panels, constraint, science_attitude=False
+    )
+    assert expected == pytest.approx(90.0)
+    if caller == "identity_mount":
+        actual = optimum_instrument_roll(
+            ra,
+            dec,
+            UTIME,
+            example_ephem,
+            Telescope(),
+            panels,
+            constraint,
+            science_attitude=False,
+        )
+    else:
+        charger = EmergencyCharging(
+            MissionConfig(constraint=constraint, solar_panel=panels)
+        )
+        actual = charger._optimal_roll(ra, dec, UTIME, example_ephem)
+    assert actual == expected

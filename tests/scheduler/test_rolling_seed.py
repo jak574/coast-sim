@@ -125,6 +125,42 @@ class TestSeeding:
                 start_plan=plan,
             )
 
+    def test_a_scheduler_that_takes_no_start_plan_refuses_it(self) -> None:
+        """As a planned run does: the seed is not silently dropped."""
+        config = _config(HOURS)
+        with pytest.raises(ValueError, match="only the local-search schedulers"):
+            RollingHorizonDITL(
+                config,
+                _targets(config),
+                begin=BEGIN,
+                end=END,
+                scheduler=PriorityScheduler,
+                start_plan=_dispatch_plan(),
+            )
+        config.scheduler.mode = SchedulerMode.ROLLING
+        config.scheduler.kind = SchedulerKind.PRIORITY
+        with pytest.raises(ValueError, match="only the local-search schedulers"):
+            create_ditl(
+                config, _targets(config), BEGIN, END, start_plan=_dispatch_plan()
+            )
+
+    def test_nothing_is_seeded_without_a_plan(self) -> None:
+        config = _config(HOURS)
+        rolling = RollingHorizonDITL(
+            config,
+            _targets(config),
+            begin=BEGIN,
+            end=END,
+            horizon=timedelta(hours=6),
+            replan_interval=timedelta(hours=6),
+            scheduler=_Recording,
+            scheduler_options={"time_limit": 0.5},
+        )
+        rolling.step_size = STEP
+        assert rolling.calc()
+        assert all(s is None for s in _Recording.seeds)
+        assert all(r.seed_entries == 0 for r in rolling.replans)
+
 
 class TestFactory:
     def test_rolling_and_planned_take_the_plan_and_dispatch_refuses_it(self) -> None:

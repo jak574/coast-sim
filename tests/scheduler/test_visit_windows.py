@@ -611,6 +611,85 @@ class TestDispatch:
         _in_windows(visits)
         assert ditl.validate_plan_matches_execution() == []
 
+    def test_a_cut_visit_log_names_the_flown_window_after_the_next_opens(self) -> None:
+        config = _config(3)
+        target = Pointing(
+            config=config,
+            ra=PATCH[0][0],
+            dec=PATCH[0][1],
+            obsid=900,
+            name="Windowed target",
+            ss_min=600,
+            ss_max=600,
+            visit_windows=[
+                VisitWindow(start=T0 + 100, deadline=T0 + 200),
+                VisitWindow(start=T0 + 300, deadline=T0 + 400),
+            ],
+        )
+        run = create_ditl(config, [target])
+        assert isinstance(run, QueueDITL)
+        selected = run.queue.targets[0]
+        selected.visit = 0
+        selected.record_collection(T0 + 350, 200, visit=0)
+        run.ppt = selected
+        run._terminate_ppt(T0 + 350, "Interrupted", interrupted=True)
+        events = [
+            e.description for e in run.log.events if "cut short:" in e.description
+        ]
+        assert events == [
+            "Visit 1 of Windowed target cut short: its window has closed, so it is missed"
+        ]
+
+    @pytest.mark.parametrize("own_pointing", [False, True])
+    def test_an_interruption_after_the_next_window_opens_reopens_the_visit(
+        self, own_pointing: bool
+    ) -> None:
+        target = Pointing(
+            ss_min=600,
+            ss_max=600,
+            visit_windows=[
+                VisitWindow(
+                    start=100,
+                    deadline=200,
+                    **({"ra": 105, "dec": 10} if own_pointing else {}),
+                ),
+                VisitWindow(start=300, deadline=400),
+            ],
+        )
+        target.visit = 0
+        selected = target.visit_pointing(0)
+        # Still under way when the second window opens: a start window limits admission only.
+        selected.record_collection(350, 200, visit=0)
+        selected.record_interruption(350)
+        assert target.visits_done == set()
+        assert target.collected_seconds == 200
+        assert target.exptime == 1200
+
+    @pytest.mark.parametrize(
+        "own_request", [{"roll_offset_deg": 0}, {"ra": 105, "dec": 10}]
+    )
+    def test_window_pointing_keeps_custom_timing_and_opening_protection(
+        self, own_request
+    ):
+        config = _config(3)
+        timing = ObservationTiming(setup_seconds=600, cleanup_seconds=90)
+        target = Pointing(
+            config=config,
+            own_timing=timing,
+            protect_opening=True,
+            ss_min=600,
+            ss_max=600,
+            visit_windows=[
+                VisitWindow(start=T0 + HOUR, deadline=T0 + 2 * HOUR, **own_request)
+            ],
+        )
+        visit = target.visit_pointing(0)
+        assert visit is not target
+        assert visit.own_timing == timing
+        assert visit.observation_timing.setup_seconds == 600
+        assert visit.observation_timing.cleanup_seconds == 90
+        assert visit.protect_opening is True
+
 
 class TestYieldingToATimedRequest:
     """A higher-merit request with slack gives way to a lower-merit request

@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 
 from conops import DITL, create_ditl
-from conops.common import ACSMode
+from conops.common import ACSMode, ObsType
 from conops.config import ObservationTiming, TargetConfig
 from conops.ditl import QueueDITL, RollingHorizonDITL
+from conops.schedulers import PriorityScheduler
 from conops.simulation.attitude import AttitudeTrajectory
 from conops.targets import (
     MovingPointing,
@@ -259,3 +260,28 @@ def test_rapid_replan_does_not_lose_a_step_after_a_short_tracking_cut():
     )
     assert collected == 10 * MIN, f"collected {collected} of {10 * MIN} seconds"
     assert run.validate_plan_matches_execution() == []
+
+
+def test_planner_reserves_the_terminal_tracking_brake():
+    from .test_moving_pointing import END, HOURS, STEP, _config, _fillers, _mover
+
+    config = _config(HOURS)
+    mover = _mover(config)
+    scheduler = PriorityScheduler(
+        config, [mover, *_fillers(config)], BEGIN, END, step_size=STEP
+    )
+    scheduler.schedule()
+    [block] = [b for b in scheduler.timeline if b.entry.obsid == 700]
+    assert block.slew is not None
+    limits = config.spacecraft_bus.attitude_control
+    physical_slew = block.slew.model_copy(
+        update={"at": block.entry, "obstype": ObsType.PPT}
+    )
+    ingress = AttitudeTrajectory.from_slew(physical_slew, limits)
+    run = DITL(config=config, plan=Plan(entries=[block.entry]), begin=BEGIN, end=END)
+    motion = run.acs._tracking_after(physical_slew, ingress, limits)
+    assert motion is not None and motion.end > float(block.entry.end)
+    assert block.end == motion.end
+    assert block.attitude_out == pytest.approx(motion.state(motion.end).attitude)
+    following = [b for b in scheduler.timeline if b.entry.begin > block.entry.begin]
+    assert all(float(b.entry.begin) >= motion.end for b in following)
