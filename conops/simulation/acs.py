@@ -61,6 +61,9 @@ if TYPE_CHECKING:
 
 IDLE_OBSID = 0
 IDLE_SAFE_ATTITUDE_GRID_STEP_DEG = 15
+_INITIAL_POINTING_CANDIDATES = 50
+"""Idle hold candidates tried for the pointing a run starts at, where the
+default one cannot be held."""
 _PREPARED_ATTITUDE_TOLERANCE_DEG = 1e-8
 
 
@@ -242,37 +245,10 @@ class ACS:
     def _advance_attitude(self, utime: float) -> AttitudeExecutor:
         if self._executor is None:
             if not self._initial_roll_explicit:
-                frame = getattr(self.config.spacecraft_bus, "frame", None)
-                if (
-                    self._default_initial_pointing
-                    and isinstance(frame, SpacecraftFrame)
-                    and not frame.is_identity
-                ):
-                    # The default direction describes the science boresight,
-                    # rather than physical +X in every declared frame. Explicit
-                    # user-supplied initial attitudes remain body coordinates.
-                    ra, dec = self.ra, self.dec
-                    roll = optimum_instrument_roll(
-                        ra,
-                        dec,
-                        utime,
-                        self.ephem,
-                        Telescope(mounting=frame.mounting),
-                        self.solar_panel,
-                        drive_state=self.solar_array_drive_state,
-                    )
-                    self._initial_attitude = frame.mounting.body_attitude(ra, dec, roll)
-                else:
-                    self.roll = optimum_body_roll(
-                        self.ra,
-                        self.dec,
-                        utime,
-                        self.ephem,
-                        self.solar_panel,
-                        self.constraint,
-                        science_attitude=False,
-                        drive_state=self.solar_array_drive_state,
-                    )
+                ra, dec = self._initial_attitude[0], self._initial_attitude[1]
+                if self._default_initial_pointing:
+                    ra, dec = self._safe_default_pointing(ra, dec, utime)
+                self._initial_attitude = self._default_initial_pose(ra, dec, utime)
             executor = AttitudeExecutor(utime, self._initial_attitude)
             if (
                 self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_enabled
@@ -288,6 +264,80 @@ class ACS:
             self._executor = executor
         self._executor.advance(utime)
         return self._executor
+
+    def _default_initial_pose(self, ra: float, dec: float, utime: float) -> Attitude:
+        """The attitude the run starts at for a pointing with no roll given:
+        the pointing at the roll that is best for power."""
+        frame = getattr(self.config.spacecraft_bus, "frame", None)
+        if (
+            self._default_initial_pointing
+            and isinstance(frame, SpacecraftFrame)
+            and not frame.is_identity
+        ):
+            # The default direction describes the science boresight,
+            # rather than physical +X in every declared frame. Explicit
+            # user-supplied initial attitudes remain body coordinates.
+            roll = optimum_instrument_roll(
+                ra,
+                dec,
+                utime,
+                self.ephem,
+                Telescope(mounting=frame.mounting),
+                self.solar_panel,
+                drive_state=self.solar_array_drive_state,
+            )
+            return frame.mounting.body_attitude(ra, dec, roll)
+        return (
+            ra,
+            dec,
+            optimum_body_roll(
+                ra,
+                dec,
+                utime,
+                self.ephem,
+                self.solar_panel,
+                self.constraint,
+                science_attitude=False,
+                drive_state=self.solar_array_drive_state,
+            ),
+        )
+
+    def _safe_default_pointing(
+        self, ra: float, dec: float, utime: float
+    ) -> tuple[float, float]:
+        """The pointing the run starts at where none was given: away from
+        the Earth, or, where that pointing cannot be held in IDLE at
+        ``utime``, the first of the idle hold candidates that can.
+
+        A run that starts inside a keep-out has no time to slew out of it
+        before the first step is checked, and goes straight to safe mode.
+        The default pointing is the simulation's choice and not the
+        mission's, so it is chosen to be one the mission's own constraints
+        allow. A pointing given explicitly is left as it is.
+        """
+        scopes = self._idle_attitude_scopes()
+        if not scopes:
+            return ra, dec
+        candidates = self._idle_safe_attitude_candidates(utime)
+        for index, (candidate_ra, candidate_dec) in enumerate(
+            candidates[:_INITIAL_POINTING_CANDIDATES]
+        ):
+            pose = self._default_initial_pose(candidate_ra, candidate_dec, utime)
+            if self._idle_attitude_unsafe(*pose, utime, scopes):
+                continue
+            if index > 0:
+                self._log_or_print(
+                    utime,
+                    "ACS",
+                    f"{unixtime2date(utime)}: The default starting pointing "
+                    f"RA={ra:.2f} Dec={dec:.2f} cannot be held in IDLE; starting "
+                    f"at RA={candidate_ra:.2f} Dec={candidate_dec:.2f}",
+                )
+                if self.last_slew is not None:
+                    self.last_slew.endra = candidate_ra
+                    self.last_slew.enddec = candidate_dec
+            return candidate_ra, candidate_dec
+        return ra, dec
 
     @property
     def momentum_budget(self) -> MomentumBudget | None:

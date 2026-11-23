@@ -138,7 +138,17 @@ class TestAcceptance:
             scenario,
             [
                 dispatch(),
-                planned(CpSatScheduler, seeded_by_dispatch=True, solver_time_limit=2.0),
+                # A deterministic budget: with a wall-clock limit the result
+                # depends on how busy the machine is, and the test failed at
+                # times when run with the rest of the suite.
+                planned(
+                    CpSatScheduler,
+                    seeded_by_dispatch=True,
+                    solver_time_limit=60.0,
+                    solver_deterministic_time=20.0,
+                    workers=1,
+                    seed=2029,
+                ),
             ],
         )
         assert _weighted(
