@@ -482,3 +482,46 @@ def test_a_delayed_dump_does_not_hide_another_unstarted_activity():
     assert float(entries[1].end) == T0 + 2 * HOUR + 20 * MIN
     assert float(entries[2].end) == T0 + 2 * HOUR + 30 * MIN
     assert ditl.validate_plan_matches_execution() == []
+
+
+@pytest.mark.parametrize("fixed_start", [False, True])
+def test_a_fixed_attitude_activity_due_in_safe_mode_holds_what_safe_mode_has(
+    fixed_start: bool,
+) -> None:
+    """Safe mode takes no turn but its own, so an activity that asks for an
+    attitude cannot be flown there. It is held at the attitude safe mode has
+    and recorded that way. Before, it was recorded as flown at its own
+    attitude, and the run failed its plan and execution check."""
+    from conops import create_ditl
+
+    from .planning_scenario import PATCH, make_target
+
+    config = make_config(2)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    # A full recorder puts the spacecraft in safe mode a minute in. A low
+    # battery would not do: emergency charging then defers the activity.
+    config.recorder.current_volume_gb = 0.95 * config.recorder.capacity_gb
+    activity = ScheduledActivity(
+        name="Hold",
+        begin=T0 + 20 * MIN,
+        duration_seconds=40 * MIN,
+        attitude=ActivityAttitude(kind="fixed", ra_deg=150, dec_deg=20, roll_deg=0),
+        fixed=fixed_start,
+    )
+    target = make_target(config, 100, *PATCH[0], minutes=60, snapshot=20)
+    run = create_ditl(
+        config, [target], BEGIN, BEGIN + timedelta(hours=2), activities=[activity]
+    )
+    run.step_size = 60
+    assert run.calc()
+    assert run.acs.in_safe_mode
+    assert run.validate_plan_matches_execution() == []
+    [entry] = [e for e in run.plan if e.obstype == ObsType.ACTIVITY]
+    assert (entry.activity_hold_begin, entry.activity_hold_end) == (
+        activity.begin,
+        activity.end,
+    )
+    assert entry.slewtime == 0
+    assert (float(entry.ra), float(entry.dec)) != (150.0, 20.0)
+    assert any("begins in safe mode" in e.description for e in run.log.events)
