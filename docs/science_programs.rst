@@ -268,7 +268,9 @@ observation IDs and gives them something in common:
   the first of them and the last. A thruster dump or a ground contact may still fall
   between two members, which a single observation sequence does not allow inside a
   visit. Use it for a campaign whose later requests depend on its first, such as a
-  calibration followed by the observations that use it.
+  calibration followed by the observations that use it. A consecutive group with no
+  window waits for a request whose own window would close while the group runs; give
+  the group a window where it has to run by a given time (see :doc:`planning`).
 
 Use a group for requests that only make sense together, such as the tiles of a
 mosaic or the targets of one redshift bin. Groups are stored in the program, not in

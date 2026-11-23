@@ -17,7 +17,7 @@ from conops.config import (
 )
 from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 from conops.schedulers.priority_scheduler import StartState
-from conops.targets import Plan, PlanEntry, Pointing, TOORequest
+from conops.targets import Plan, PlanEntry, Pointing, TOORequest, VisitWindow
 
 from .planning_scenario import BEGIN, HOUR, MIN, PATCH, T0, make_config, make_target
 from .test_momentum_ledger import DUMP
@@ -389,3 +389,78 @@ def test_members_follow_a_member_finished_before_the_plan() -> None:
     first.done = True
     plan = PriorityScheduler(config, targets, BEGIN, END, step_size=60).schedule()
     assert _order(plan)[:2] == ORDER[1:]
+
+
+TIMED = 200
+WINDOW = (T0 + 30 * MIN, T0 + 60 * MIN)
+
+
+def _timed_against_group(config: MissionConfig) -> list[Pointing]:
+    """The three members, two hours of science together and observable from
+    the start, and one visit of twenty minutes that has to begin between 30
+    and 60 minutes in and ranks below every member."""
+    members = _targets(config)[:3]
+    timed = Pointing(
+        config=config,
+        obsid=TIMED,
+        name="Timed",
+        ra=PATCH[4][0],
+        dec=PATCH[4][1],
+        merit=30,
+        fom=30,
+        ss_min=20 * MIN,
+        ss_max=20 * MIN,
+        visit_windows=[VisitWindow(start=WINDOW[0], deadline=WINDOW[1])],
+    )
+    return [*members, timed]
+
+
+def _assert_window_kept(plan: Plan) -> None:
+    """The timed visit was collected whole, beginning in its window, and the
+    group ran in order after it with nothing between its members."""
+    timed = [e for e in _science(plan) if int(e.obsid) == TIMED]
+    assert sum(float(e.exposure or 0) for e in timed) == 20 * MIN
+    assert WINDOW[0] <= float(timed[0].collection_begin) <= WINDOW[1]
+    _assert_consecutive(plan, ORDER)
+    order = _order(plan)
+    assert order.index(TIMED) < order.index(ORDER[0])
+    for obsid in ORDER:
+        collected = sum(float(e.exposure or 0) for e in plan if int(e.obsid) == obsid)
+        assert collected == 40 * MIN
+
+
+class TestTimeBoundRequestsKeepTheirWindows:
+    """A consecutive group with no window of its own can begin later; a
+    request whose window would close while the group runs cannot. The group
+    waits for it."""
+
+    def test_dispatch_holds_the_group_for_a_closing_window(self) -> None:
+        config = _config()
+        ditl = _dispatch(config, _timed_against_group(config))
+        _assert_window_kept(ditl.plan)
+        assert any(
+            "has no window and waits for" in e.description for e in ditl.log.events
+        )
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_the_planners_begin_the_group_after_the_window(self, kind: str) -> None:
+        config = _config()
+        targets = _timed_against_group(config)
+        scheduler = _planner(kind, config, targets)
+        plan = scheduler.schedule()
+        _assert_window_kept(plan)
+        run = DITL(config=config, plan=plan, begin=BEGIN, end=END)
+        run.step_size = 60
+        assert run.calc()
+        assert run.validate_plan_matches_execution() == []
+
+    def test_a_group_with_a_window_of_its_own_is_not_held(self) -> None:
+        """Its window says when it runs, so it begins at once, as before."""
+        config = _config()
+        config.observation_groups.groups[0].window_start = T0
+        ditl = _dispatch(config, _timed_against_group(config))
+        order = _order(ditl.plan)
+        assert order[0] == ORDER[0]
+        assert not any(
+            "has no window and waits for" in e.description for e in ditl.log.events
+        )

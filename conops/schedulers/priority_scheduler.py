@@ -23,7 +23,7 @@ from ..common.vector import quaternion_attitude_delta
 from ..config import MissionConfig
 from ..config.acs import scheduled_slew_time
 from ..config.observation_categories import ObservationCategory
-from ..config.observation_groups import ObservationGroup
+from ..config.observation_groups import ObservationGroup, group_start_wait
 from ..config.observation_timing import ObservationTiming
 from ..config.solar_panel import SolarArrayDriveState
 from ..ditl.ditl_log import DITLLog
@@ -2029,6 +2029,49 @@ class PriorityScheduler:
                 closed.add(index)
         return lowest, highest, frozenset(closed)
 
+    def _group_start_wait(self, request: _Request, block: _Block) -> float | None:
+        """Until when the first observation of a consecutive group with no
+        window of its own waits, where ``block`` would begin the group and
+        close a time-bound request's window; None where the block may be
+        placed (see :func:`~conops.config.observation_groups.group_start_wait`).
+
+        The time-bound requests are the targets outside the group that
+        have visit windows still to visit, or a deadline. One can go before
+        the group where the group begins late enough to leave it a visit,
+        or its shortest snapshot, after its window opens.
+        """
+        group = request.group
+        if group is None or not group.consecutive or group.has_window:
+            return None
+        members = set(group.members)
+        if self._begun_before_horizon(group) or any(
+            not placed.is_fixed and int(placed.entry.obsid) in members
+            for placed in self.timeline
+        ):
+            return None
+        needed = self._group_needed.get(group.name, 0.0)
+        start = float(block.entry.collection_begin or block.ready)
+        windows: list[tuple[float, float]] = []
+        for target in self.targets:
+            if int(target.obsid) in members or target.done:
+                continue
+            if target.visit_windows:
+                windows.extend(
+                    (window.start + target.per_visit_seconds, window.deadline)
+                    for index, window in enumerate(target.visit_windows)
+                    if window.deadline >= self.ctx.ustart
+                    and not target.visit_complete(index)
+                )
+            elif target.deadline is not None and target.deadline >= self.ctx.ustart:
+                windows.append(
+                    (
+                        self.ctx.ustart
+                        + snapshot_min_seconds(target, self.ctx.step_size),
+                        float(target.deadline),
+                    )
+                )
+        return group_start_wait(start, needed, windows)
+
     def _begun_before_horizon(self, group: ObservationGroup) -> bool:
         """Whether a member of ``group`` collected science before this plan."""
         members = set(group.members)
@@ -3540,6 +3583,12 @@ class PriorityScheduler:
                     full = False
                     break
                 block, slew, succ_slew = candidate
+                wait = self._group_start_wait(request, block)
+                if wait is not None:
+                    # A group with no window does not begin where it would
+                    # close a time-bound request's window: try from later.
+                    after = self.ctx.ceil_step(wait)
+                    continue
                 # Include any change to the next tracking pass's ingress.
                 additions = [
                     *self._block_additions(block),

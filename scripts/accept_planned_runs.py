@@ -17,6 +17,12 @@ scheduler. Each case is checked for:
   the gate;
 * repeatability: the same executed plan and value from separate processes.
 
+A rolling run plans ``--horizon-hours`` ahead at each replan, 24 by default.
+A horizon shorter than the windows the requests must be observed in leaves a
+replan unable to tell two plans apart that differ later: on the ``program``
+scenario, whose visit windows are ten hours long, rolling local search is
+below dispatch with a 12 hour horizon and above it with 24.
+
 Example:
     .venv/bin/python scripts/accept_planned_runs.py --scenario program --hours 24
 """
@@ -167,14 +173,13 @@ def run_case(case: str, args: argparse.Namespace) -> dict[str, object]:
         simulation.step_size = builder.ctx.step_size
     else:
         hours = (scenario.end - scenario.begin).total_seconds() / 3600
-        interval = min(6.0, hours / 4)
         simulation = RollingHorizonDITL(
             config,
             targets,
             begin=scenario.begin,
             end=scenario.end,
-            horizon=timedelta(hours=min(hours, 2 * interval)),
-            replan_interval=timedelta(hours=interval),
+            horizon=timedelta(hours=min(hours, args.horizon_hours)),
+            replan_interval=timedelta(hours=min(hours, args.replan_hours)),
             scheduler=scheduler,
             scheduler_options=options,
             activities=scenario.activities,
@@ -228,6 +233,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--solver-seconds", type=float, default=600.0)
     parser.add_argument("--deterministic-time", type=float, default=20.0)
     parser.add_argument("--gate-seconds", type=float, default=1800.0)
+    parser.add_argument(
+        "--horizon-hours",
+        type=float,
+        default=24.0,
+        help="how far ahead each replan of a rolling run plans",
+    )
+    parser.add_argument(
+        "--replan-hours",
+        type=float,
+        default=6.0,
+        help="time between scheduled replans of a rolling run",
+    )
     parser.add_argument("--repeats", type=int, default=3, help="processes per case")
     parser.add_argument("--cases", nargs="+", choices=CASES, default=None)
     parser.add_argument("--child", choices=CASES, default=None, help=argparse.SUPPRESS)

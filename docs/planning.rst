@@ -920,10 +920,32 @@ The group ends early at a member that can no longer be observed. The members aft
 it are then not observed, because they follow it in the order. Members that are not
 among the run's targets are ignored when the order is applied.
 
+A group with no window of its own does not begin where doing so would close a
+time-bound request's window. A time-bound request is a target outside the group that
+has visit windows still to visit, or a deadline. The group takes no other science
+between its first observation and its last, so a request whose collection has to
+begin during that time could not be observed. The group can begin later and the
+request's window cannot be moved, so the group waits:
+
+* The time the group takes is counted as the exposure its members still have to
+  collect. This is a lower bound, because it leaves out slews and time a member is
+  not visible.
+* The group waits where a request's window closes before the group would end and
+  the request cannot be observed before the group begins.
+* The wait ends when the request has been observed or its window has closed.
+* Where time-bound windows keep closing within the time the group takes, the group
+  does not begin. Give such a group a ``window_start`` or a ``window_deadline``: a
+  group with a window of its own is not held, because its window says when it runs.
+* A group that has begun is not interrupted; the rule applies to its first
+  observation only.
+
 Dispatch applies the rule when it selects a target:
 
 * A member is not selected while a member before it is unfinished. The group's first
-  member competes on its own merit with every other target.
+  member competes on its own merit with every other target, and is held back while
+  a time-bound request's window would close before the group ends (see above).
+  Dispatch counts every unvisited window that is still open or yet to open, since at
+  the time of selection the request has not been observed.
 * Once any member has collected science, no target outside the group is selected
   until the group has finished. This includes a Target of Opportunity, which is
   queued and observed after the group. An observation of a member is not interrupted
@@ -938,6 +960,11 @@ science, whatever the members' merit:
 * A group's blocks need time that holds no other science, so they are placed while
   the timeline has only passes, activities, dumps and committed entries on it. Use
   the group's ``window_start`` to keep a group from the start of a plan.
+* The first block of a group with no window is placed no earlier than the time-bound
+  requests allow (see above). A request counts as observable before the group where
+  the group begins at least one visit, or one shortest snapshot, after the request's
+  window opens. The planners place the time-bound requests afterwards, in the time
+  the group left before it.
 * Each snapshot of a member goes after the group's last block and before the next
   committed science of another target.
 * The group's first block goes where the time before the next committed science of
@@ -1986,6 +2013,41 @@ Comparing a run with :class:`~conops.ditl.queue_ditl.QueueDITL` dispatch on the 
 targets shows what planning ahead gains or costs in science time and ToO response.
 A ``RollingHorizonDITL`` instance runs once; create a new one for each simulation.
 
+Choosing the horizon
+^^^^^^^^^^^^^^^^^^^^
+
+Each replan compares its candidate plans by their value inside its ``horizon`` and
+commits only the first ``replan_interval`` of the plan it keeps. A horizon shorter
+than the windows the requests have to be observed in leaves the comparison unable
+to tell apart two plans that use those windows differently after the horizon ends.
+The replan then changes plan for a gain it cannot measure, and the run can collect
+less than dispatch does.
+
+Make the horizon at least as long as the longest visit window or deadline span of
+the requests, and at least twice the replan interval. The default, one day, does
+this for requests with windows of up to a day.
+
+On the benchmark ``program`` scenario, whose campaign visits have ten-hour windows,
+a run that replans every six hours with local search collects less science value
+than dispatch with a 12-hour horizon and more than dispatch with a 24-hour horizon:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Run
+     - 12-hour horizon
+     - 24-hour horizon
+   * - One day
+     - 0.67% below dispatch
+     - 1.36% above dispatch
+   * - Three days
+     - 0.84% below dispatch
+     - 0.50% above dispatch
+
+Planning the whole of the three-day run at every replan gives 0.55% above dispatch,
+so a horizon longer than the windows adds little. ``scripts/accept_planned_runs.py``
+runs this comparison on any of the benchmark scenarios.
+
 Targets of Opportunity
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -2390,6 +2452,25 @@ them, with rolling replans every six hours (or four times in a shorter run) and 
 steered by an allocator with one-day bins::
 
    uv run python scripts/benchmark_schedulers.py --scenario all --time-limit 10
+
+``scripts/accept_planned_runs.py`` checks planned and rolling runs of one scenario
+against a dispatch run of the same scenario made afresh for each case. It runs four
+cases: one plan built up front and a rolling run, each with local search and with
+CP-SAT, and each seeded with the plan the dispatch run executed. A case is accepted
+where all of these hold:
+
+* its executed dynamic science value is above the dispatch run's for CP-SAT, and
+  equal to it or above for local search;
+* the plan and what was flown do not differ;
+* every scheduled activity was held for its whole length, starting inside its
+  window, with no science collected during the hold;
+* every plan, and every replan of a rolling run, was built within the time gate
+  (1,800 s by default);
+* separate processes produce the same executed plan and value.
+
+The script exits with a non-zero status where any case fails::
+
+   uv run python scripts/accept_planned_runs.py --scenario program --hours 24
 
 
 Cross-process dispatch verification

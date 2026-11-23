@@ -19,7 +19,7 @@ from ..config.acs import scheduled_slew_time
 from ..config.config import housekeeping_while_waiting
 from ..config.data_storage import RecorderView
 from ..config.observation_categories import ObservationCategories
-from ..config.observation_groups import ObservationGroups
+from ..config.observation_groups import ObservationGroups, group_start_wait
 from ..ditl.ditl_log import DITLLog
 from ..simulation.slew import Slew
 from . import Pointing
@@ -659,6 +659,26 @@ class TargetQueue:
             return True
         return any(float(window[1]) > utime for window in visibility)
 
+    def _windows_to_take(self, target: Pointing, utime: float) -> list[float]:
+        """When each chance ``target`` still has to be observed closes, at
+        ``utime``: the deadline of each visit window not yet visited and
+        not yet closed, or the target's own deadline where it has no visit
+        windows. Empty for a target with no deadline of either kind, and
+        for one that is finished."""
+        if self._finished(target):
+            return []
+        windows = getattr(target, "visit_windows", None)
+        if isinstance(windows, list) and windows:
+            return [
+                float(window.deadline)
+                for index, window in enumerate(windows)
+                if window.deadline >= utime and not target.visit_complete(index)
+            ]
+        deadline = getattr(target, "deadline", None)
+        if isinstance(deadline, (int, float)) and deadline >= utime:
+            return [float(deadline)]
+        return []
+
     def consecutive_holds(self, utime: float) -> dict[int, str]:
         """The targets that a consecutive observation group keeps from being
         selected at ``utime``, each with the reason.
@@ -705,6 +725,30 @@ class TargetQueue:
                 t.collected_seconds > 0 for t in present
             ):
                 open_to[int(current.obsid)] = group.name
+            elif not group.has_window:
+                # A group with no window of its own can begin later; a
+                # request whose window would close while the group runs
+                # cannot. The group waits for it (see group_start_wait).
+                members = set(group.members)
+                needed = sum(float(t.exptime or 0.0) for t in unfinished)
+                closing = [
+                    (obsid, closes)
+                    for obsid, target in queued.items()
+                    if obsid not in members
+                    for closes in self._windows_to_take(target, utime)
+                ]
+                wait = group_start_wait(
+                    utime, needed, [(float("inf"), closes) for _, closes in closing]
+                )
+                if wait is not None:
+                    first = min(
+                        (pair for pair in closing if utime <= pair[1] < utime + needed),
+                        key=lambda pair: pair[1],
+                    )
+                    held[int(current.obsid)] = (
+                        f"group {group.name!r} has no window and waits for "
+                        f"{first[0]}, whose window closes before the group would end"
+                    )
         if open_to:
             names = ", ".join(repr(name) for name in sorted(set(open_to.values())))
             for obsid in queued:

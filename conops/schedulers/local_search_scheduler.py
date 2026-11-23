@@ -299,6 +299,7 @@ class LocalSearchScheduler(PriorityScheduler):
         """
         self.incumbent_score = None
         self.incumbent_retained = False
+        self._seed_value: float | None = None
         incumbent: LocalSearchScheduler | None = None
         for seed in (self.start_plan, *self.additional_start_plans):
             if seed is None:
@@ -351,7 +352,11 @@ class LocalSearchScheduler(PriorityScheduler):
         ):
             incumbent = independent
 
-        self.incumbent_score = incumbent.score
+        self.incumbent_score = (
+            incumbent._seed_value
+            if incumbent._seed_value is not None
+            else incumbent.score
+        )
         committed = incumbent._selected_contract(
             [block for block in incumbent._fixed if not block.is_fixed]
         )
@@ -476,6 +481,14 @@ class LocalSearchScheduler(PriorityScheduler):
             return None
         trial.score = trial._complete_score(trial.timeline, freeze_merits=True)
         trial._set_unplaced(decoded.final.remaining)
+        # A seed can have unused time where the plan it came from observed a
+        # request this horizon does not have, such as a Target of Opportunity
+        # not yet submitted. Fill it before the seed is compared: with the
+        # hole left open a fresh plan can score a little higher and replace
+        # everything the seed held after it. The seed's own value, before
+        # the filling, is what is reported as the incumbent's.
+        trial._seed_value = trial.score
+        trial._augment_selected_plan(trial.plan)
         return trial
 
     def _seed_dumps(self, seed: Plan) -> list[ScheduledActivity]:
@@ -710,12 +723,33 @@ class LocalSearchScheduler(PriorityScheduler):
             if index > 0:
                 begin = max(begin, self._fixed[index - 1].end)
             settled = self._copy_block(block)
+            if (
+                settled.slew is not None
+                and settled.slew.slewtime > 0
+                and begin < self.ctx.ceil_step(float(settled.slew.slewend))
+            ):
+                # The block was reserved with a slew into it that arrives
+                # later than the plan held the activity. The slew is found
+                # again for the earlier hold; a block that no slew reaches
+                # then stays where it was reserved.
+                pred = self._fixed[index - 1] if index > 0 else self._origin
+                hold = max(
+                    activity.begin,
+                    self.ctx.ceil_step(self.ctx.ustart),
+                    self.ctx.ceil_step(begin),
+                )
+                settled.ready = hold
+                settled.end = self._activity_end(activity, hold)
+                slew = self._connect(pred, settled, self._earliest_start(pred))
+                if slew is None:
+                    continue
+                self._apply_slew(settled, slew)
             self._settle_block(settled, begin)
             following = self._fixed[index + 1] if index + 1 < len(self._fixed) else None
             if following is not None and settled.end > following.ready:
                 continue
-            self._settle_block(block, begin)
-            block.latest_ready = block.ready
+            settled.latest_ready = settled.ready
+            self._fixed[index] = settled
         changes = self._fixed_data_changes(original, self._fixed)
         self._initial_volumes = self._ledger.add_all(self._initial_volumes, changes)
         self._initial_energy = self._charged_energy(self._fixed)
