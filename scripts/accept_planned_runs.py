@@ -63,8 +63,13 @@ STRICT = {"planned:cp_sat", "rolling:cp_sat"}
 """Cases whose value must exceed dispatch; the others must equal or exceed it."""
 
 
-def _scheduler(kind: str, args: argparse.Namespace) -> tuple[type, dict[str, object]]:
-    """The scheduler class for ``kind`` and repeatable search settings."""
+def _scheduler(
+    kind: str, args: argparse.Namespace, plan_hours: float
+) -> tuple[type, dict[str, object]]:
+    """The scheduler class for ``kind`` and repeatable search settings for a
+    plan of ``plan_hours``. CP-SAT divides its deterministic budget among the
+    plan's chunks, so the budget grows with the plan's length and each chunk
+    gets the same search whatever the horizon."""
     if kind == "local_search":
         return LocalSearchScheduler, {
             "time_limit": args.search_seconds,
@@ -77,7 +82,7 @@ def _scheduler(kind: str, args: argparse.Namespace) -> tuple[type, dict[str, obj
         "time_limit": args.search_seconds,
         "max_iterations": args.iterations,
         "solver_time_limit": args.solver_seconds,
-        "solver_deterministic_time": args.deterministic_time,
+        "solver_deterministic_time": args.deterministic_time_per_hour * plan_hours,
         "workers": 1,
         "seed": args.seed,
     }
@@ -150,7 +155,9 @@ def run_case(case: str, args: argparse.Namespace) -> dict[str, object]:
     scenario = SCENARIOS[args.scenario](TLE, hours=args.hours, seed=args.scenario_seed)
     dispatched = _dispatch(scenario)
     dispatch_value = _value(dispatched)
-    scheduler, options = _scheduler(kind, args)
+    run_hours = (scenario.end - scenario.begin).total_seconds() / 3600
+    plan_hours = run_hours if mode == "planned" else min(run_hours, args.horizon_hours)
+    scheduler, options = _scheduler(kind, args, plan_hours)
     config = scenario.make_config()
     targets = scenario.make_targets(config)
     began = time.perf_counter()
@@ -231,7 +238,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--iterations", type=int, default=400)
     parser.add_argument("--search-seconds", type=float, default=600.0)
     parser.add_argument("--solver-seconds", type=float, default=600.0)
-    parser.add_argument("--deterministic-time", type=float, default=20.0)
+    parser.add_argument(
+        "--deterministic-time-per-hour",
+        type=float,
+        default=20.0 / 12.0,
+        help="CP-SAT's deterministic budget for each hour a plan covers",
+    )
     parser.add_argument("--gate-seconds", type=float, default=1800.0)
     parser.add_argument(
         "--horizon-hours",
