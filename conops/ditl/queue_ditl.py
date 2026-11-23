@@ -92,6 +92,10 @@ _ROOM_BISECTIONS = 40
 """What dispatch keeps the recorder below its planning limit by, as the
 schedulers' ledger does: the recorder's red alert fires at the threshold."""
 
+_SAFE_HOLD_CANDIDATES = 50
+"""Idle hold attitudes tried for an activity whose own attitude cannot be
+held, as the planners try (see ``priority_scheduler._SAFE_HOLD_CANDIDATES``)."""
+
 
 class _ObservationRequest(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -1251,7 +1255,10 @@ class QueueDITL(DITLMixin, DITLStats):
         elif (
             active is not None
             and active.desaturation
-            and active.attitude.fixed_pointing is not None
+            and (
+                active.attitude.fixed_pointing is not None
+                or self._activity_slew is not None
+            )
             and utime >= self._activity_hold_begin
         ):
             self.acs.begin_desaturation()
@@ -1421,6 +1428,81 @@ class QueueDITL(DITLMixin, DITLStats):
             obstype=ObsType.IDLE,
             obsid=activity.obsid,
         )
+
+    def _safe_hold_ingress(
+        self,
+        activity: ScheduledActivity,
+        utime: float,
+        attitude: tuple[float, float, float],
+        *,
+        resumed: bool,
+    ) -> Slew | None:
+        """The slew to a safe attitude for an activity that holds the
+        attitude it finds the spacecraft at, where that attitude cannot be
+        held through the activity; None where it can, or where no safe
+        attitude is reached in the activity's start window.
+
+        The planners do the same for a block that follows what precedes it
+        (see ``PriorityScheduler._connect``): the attitude is one of the
+        idle hold candidates, held without a violation from the slew's end
+        through the activity, and reached by a slew whose path is clear. A
+        thruster dump called for where the Earth's limb or the Sun is about
+        to cross the attitude held is the usual case. With none found the
+        activity holds the attitude it has, as before.
+        """
+        if resumed:
+            return None
+        assert activity.obsid is not None
+        ctx = self._activity_model()
+        mode = activity.hold_mode
+        start = ctx.ceil_step(self.acs.handoff_ready_time(utime))
+        hold_begin = max(self._activity_hold_begin, start)
+        end = min(hold_begin + activity.duration_seconds, self.uend)
+        if ctx.first_hold_violation(attitude, hold_begin, end, mode) is None:
+            return None
+        origin = self.acs.predicted_attitude(start)
+        candidates = ctx.idle_hold_candidates(origin, start)
+        for _, candidate in zip(range(_SAFE_HOLD_CANDIDATES), candidates):
+            slew = ctx.slew(
+                origin, candidate, start, obstype=ObsType.IDLE, obsid=activity.obsid
+            )
+            arrival = ctx.ceil_step(float(slew.slewend))
+            begin = max(self._activity_hold_begin, arrival)
+            if (activity.fixed and begin > activity.begin) or (
+                activity.slides and begin > activity.latest_start
+            ):
+                continue
+            hold_end = min(begin + activity.duration_seconds, self.uend)
+            if (
+                ctx.first_slew_violation(slew, ACSMode.SLEWING) is None
+                and ctx.first_hold_violation(
+                    candidate, slew.slewend, begin, ACSMode.IDLE
+                )
+                is None
+                and ctx.first_hold_violation(candidate, begin, hold_end, mode) is None
+            ):
+                self.log.log_event(
+                    utime=utime,
+                    event_type="ACTIVITY",
+                    description=(
+                        f"Scheduled activity {activity.name} cannot hold the "
+                        "attitude it has; slewing to a safe attitude for it"
+                    ),
+                    obsid=activity.obsid,
+                    acs_mode=self.acs.acsmode,
+                )
+                return slew
+        self.log.log_event(
+            utime=utime,
+            event_type="ACTIVITY",
+            description=(
+                f"Scheduled activity {activity.name} cannot hold the attitude it "
+                "has and no safe attitude is reached in time; holding it as it is"
+            ),
+            obsid=activity.obsid,
+            acs_mode=self.acs.acsmode,
+        )
+        return None
 
     def _activity_needing_ingress(self, utime: float) -> ScheduledActivity | None:
         """Prepare a future explicit hold before its latest start is missed."""
@@ -2073,9 +2155,14 @@ class QueueDITL(DITLMixin, DITLStats):
         else:
             self._activity_hold_begin = activity.begin
         self._activity_slew = None
-        if activity.attitude.kind != "inherited":
+        explicit = activity.attitude.kind != "inherited"
+        ingress = (
+            self._activity_ingress(activity, utime)
+            if explicit
+            else self._safe_hold_ingress(activity, utime, attitude, resumed=resumed)
+        )
+        if ingress is not None:
             ctx = self._activity_model()
-            ingress = self._activity_ingress(activity, utime)
             fixed = (
                 float(ingress.endra),
                 float(ingress.enddec),

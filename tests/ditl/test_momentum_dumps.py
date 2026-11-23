@@ -768,3 +768,45 @@ def test_sequence_momentum_forecast_uses_each_steps_physical_body_attitude(
             quaternion_to_rotation_matrix(attitude_to_quat(*expected)), abs=1e-12
         )
     assert end >= first.collection_begin + starts[-1] + 600
+
+
+@pytest.mark.parametrize("minutes", [40, 50])
+def test_a_dump_moves_to_a_safe_attitude_where_its_own_cannot_be_held(
+    minutes: int,
+) -> None:
+    """A dump holds the attitude the spacecraft has when it is called for.
+    At these orbit phases the Earth's limb crosses that attitude during the
+    dump, which the safety constraint forbids. Dispatch slews to a safe
+    attitude for the dump, as the planners do for a block that follows what
+    precedes it; before, it held the attitude through the violation."""
+    begin = BEGIN + timedelta(minutes=minutes)
+    end = begin + timedelta(hours=3)
+    config = _config(
+        capacity_n_m_s=10.0,
+        initial_momentum_body_n_m_s=(7.0, 0.0, 0.0),
+        thruster_dump=ThrusterDumpConfig(duration_seconds=600.0),
+    )
+    config.constraint.safety_constraint = EarthLimbConstraint(min_angle=10)
+    config.constraint.ephem = TLEEphemeris(
+        tle="examples/example.tle", begin=begin, end=end, step_size=STEP
+    )
+    target = Pointing(
+        config=config,
+        obsid=1,
+        name="Held",
+        ra=80.0,
+        dec=-20.0,
+        merit=100.0,
+        ss_min=600,
+        ss_max=3 * 3600,
+    )
+    target.exptime = 3 * 3600
+    ditl = create_ditl(config, [target], begin, end)
+    ditl.step_size = STEP
+    assert ditl.calc()
+    assert ditl.validate_plan_matches_execution() == []
+    dumps = [e for e in ditl.plan if e.desaturation]
+    assert len(dumps) == 1
+    assert dumps[0].slewtime > 0
+    assert (float(dumps[0].ra), float(dumps[0].dec)) != (80.0, -20.0)
+    assert any("slewing to a safe attitude" in e.description for e in ditl.log.events)
