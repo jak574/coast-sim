@@ -357,11 +357,30 @@ The attitude is used as it is given. COAST does not work one out from the
 thrusters' mounting or from the direction of the Sun.
 
 Dispatch does not start the slew to a fixed firing attitude while a visit of an
-observation sequence is under way. The dump waits for the visit to end. If the
-slew or the hold at the fixed attitude would violate the attitude constraints,
-the run stops with an activity scheduling error. The planners plan the slew from
-the attitude of whatever precedes the dump, and the dump begins when that slew
-ends.
+observation sequence is under way. The dump waits for the visit to end. The
+planners plan the slew from the attitude of whatever precedes the dump, and the
+dump begins when that slew ends.
+
+A fixed firing attitude can be blocked when a dump is called for: the Earth's limb
+crosses any inertial attitude once an orbit, for example. The dump then waits for
+the attitude, and neither dispatch nor the planners stop:
+
+* Dispatch moves the dump to the first time the attitude can be held for the whole
+  firing, and observes until then. If the slew or the firing is still not allowed
+  at that time, the dump waits a step and tries again.
+* The planners reserve the firing at the first time the attitude can be held for
+  it, one longest slew later, so that the slew to the attitude is flown while the
+  attitude is allowed. Where the firing attitude cannot be reached from what
+  precedes the dump, because the spacecraft can neither stay where it is nor wait
+  at the firing attitude, the plan holds a safe attitude just before the dump. The
+  hold is an entry named ``Hold before thruster dump``, at an attitude chosen as
+  for any activity that holds the attitude it finds.
+* The wait is not bounded by the wheels' capacity in dispatch. If the wheels reach
+  their capacity while a dump waits, the capacity fault is recorded as for any run
+  in which a dump comes too late. The planners look no later than where their
+  forecast reaches the capacity.
+* In safe mode no turn is made: a dump, or any activity with a fixed attitude, that
+  comes due in safe mode is held at the attitude safe mode has.
 
 The rest of this section describes when a thruster dump happens. Dispatch, which
 selects observations as a queue simulation runs, calls for dumps from the momentum
