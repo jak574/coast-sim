@@ -22,6 +22,7 @@ from ..common.numerics import ROLL_TOLERANCE_DEG, TIME_TOLERANCE_S
 from ..common.vector import quaternion_attitude_delta
 from ..config import MissionConfig
 from ..config.acs import scheduled_slew_time
+from ..config.activity_attitude import ActivityAttitude
 from ..config.observation_categories import ObservationCategory
 from ..config.observation_groups import ObservationGroup, group_start_wait
 from ..config.observation_timing import ObservationTiming
@@ -39,7 +40,7 @@ from ..targets import (
     ScheduledActivity,
     assign_obsids,
 )
-from ..targets.activity import CHARGE_OBSID, DUMP_WAIT_OBSID
+from ..targets.activity import CHARGE_OBSID, DUMP_WAIT_OBSID, SAFE_HOLD_OBSID
 from ..targets.merit import MeritBreakdown, MeritModel
 from ..targets.plan_entry import is_rounding_remainder, snapshot_min_seconds
 from .allocator import AllocatedTime
@@ -81,6 +82,20 @@ class _Verdict(Enum):
     WAIT_NOT_ALLOWED = auto()
     """The wait at the block's attitude fails; earlier starts only lengthen it."""
 
+
+_SAFE_HOLD_NAME = "Safe attitude hold"
+"""The name of the hold reserved after an entry whose attitude cannot be
+held (see :meth:`PriorityScheduler._park_tail`)."""
+
+_SAFE_HOLD_POINTINGS = 150
+"""The most pointings tried for a safe hold after an entry."""
+_SAFE_HOLD_TRIALS = 12
+"""Of those, the most whose slew is checked, longest hold first."""
+_SAFE_HOLD_LOOKAHEAD_S = 3 * 3600.0
+"""How far ahead a safe hold's attitude is checked when it is chosen; a hold
+that cannot be kept past this is followed by another."""
+_MAX_SAFE_HOLDS = 200
+"""The most safe holds reserved one after another at the end of a plan."""
 
 _SAFE_HOLD_CANDIDATES = 50
 """The most attitudes tried for an activity's safe hold (see
@@ -569,6 +584,9 @@ class PriorityScheduler:
         self.activities = assign_obsids(activities)
         """Fixed-time activities to reserve, in time order."""
         self.dumps: list[ScheduledActivity] = []
+        self._safe_hold_activities: dict[int, ScheduledActivity] = {}
+        """The safe holds the plan placed after entries whose attitude
+        cannot be held, by obsid (see :meth:`_park_tail`)."""
         self._dump_waits: dict[int, ScheduledActivity] = {}
         """For a reserved dump that has to wait for its fixed firing
         attitude, by the dump's obsid, the hold reserved before it (see
@@ -916,6 +934,113 @@ class PriorityScheduler:
             attitude=dump.attitude,
         )
 
+    def _park_tail(self) -> bool:
+        """Reserve a hold at a safe attitude after the timeline's last
+        entry, where the attitude that entry leaves cannot be held in IDLE
+        until the horizon ends; False where it can, where the timeline is
+        empty, or where no safe attitude is found.
+
+        An observation ends when its target is about to set, so the
+        attitude it leaves is often one a safety limit is about to cross,
+        the Earth's limb for one. Dispatch slews away from such an attitude
+        as it flies. A plan has to say so: executed as it stands, the run
+        would idle into the keep-out and enter safe mode. It also could not
+        place anything later, since the spacecraft could neither stay until
+        a later slew nor wait at the next target's attitude.
+
+        The hold is a short activity at a fixed attitude that can be held
+        from the slew's end until the horizon ends, reached by a slew whose
+        path is clear. The spacecraft stays there afterwards, so whatever is
+        placed later is reached from it.
+        """
+        if not self.timeline:
+            return False
+        last = self.timeline[-1]
+        ctx = self.ctx
+        step = ctx.step_size
+        bound = self._longest_slew_steps()
+        end = ctx.ceil_step(last.end)
+        if end + 2 * step >= ctx.uend:
+            return False
+        unsafe = ctx.first_hold_violation(
+            last.attitude_out, end, ctx.uend, ACSMode.IDLE
+        )
+        if unsafe is None:
+            return False
+        # The spacecraft stays where it is for as long as it can and still
+        # slew away.
+        depart = max(end, ctx.floor_step(unsafe - bound))
+        window = min(ctx.uend, depart + _SAFE_HOLD_LOOKAHEAD_S)
+        obsid = SAFE_HOLD_OBSID + sum(
+            1 for block in self.timeline if block.entry.name == _SAFE_HOLD_NAME
+        )
+        # One roll of each pointing, the first offered, and the pointings
+        # that can be held longest first.
+        scored: list[tuple[float, Attitude]] = []
+        seen: set[tuple[float, float]] = set()
+        for pose in ctx.idle_hold_candidates(last.attitude_out, depart):
+            pointing = (round(pose[0], 6), round(pose[1], 6))
+            if pointing in seen:
+                continue
+            seen.add(pointing)
+            if len(seen) > _SAFE_HOLD_POINTINGS:
+                break
+            violation = ctx.first_hold_violation(
+                pose, depart + bound, window, ACSMode.IDLE
+            )
+            scored.append((inf if violation is None else violation, pose))
+            # Enough pointings that can be held throughout: one of them is
+            # reached by a clear slew, as a rule.
+            if sum(1 for held, _ in scored if held == inf) >= _SAFE_HOLD_TRIALS:
+                break
+        scored.sort(key=lambda item: -item[0])
+        for held_until, pose in scored[:_SAFE_HOLD_TRIALS]:
+            if held_until < depart + 2 * bound:
+                break
+            slew = ctx.slew(
+                last.attitude_out, pose, depart, obstype=ObsType.IDLE, obsid=obsid
+            )
+            arrival = ctx.ceil_step(float(slew.slewend))
+            if (
+                arrival + step >= ctx.uend
+                or ctx.first_slew_violation(slew, ACSMode.SLEWING) is not None
+                or ctx.first_hold_violation(
+                    pose, float(slew.slewend), min(held_until, window), ACSMode.IDLE
+                )
+                is not None
+                or ctx.first_hold_violation(
+                    pose, arrival, arrival + step, ACSMode.ACTIVITY
+                )
+                is not None
+            ):
+                continue
+            hold = ScheduledActivity(
+                name=_SAFE_HOLD_NAME,
+                begin=arrival,
+                duration_seconds=step,
+                obsid=obsid,
+                attitude=ActivityAttitude(
+                    kind="fixed", ra_deg=pose[0], dec_deg=pose[1], roll_deg=pose[2]
+                ),
+            )
+            before = len(self.timeline)
+            try:
+                self._place_activity(hold)
+            except ActivitySchedulingError:
+                continue
+            if len(self.timeline) == before:
+                continue
+            self._safe_hold_activities = {**self._safe_hold_activities, obsid: hold}
+            self._log(
+                depart,
+                f"The attitude held after {last.entry.obsid} cannot be held past "
+                f"{unixtime2date(unsafe)}; a hold at a safe attitude is reserved "
+                f"at {unixtime2date(arrival)}",
+                obsid,
+            )
+            return True
+        return False
+
     def _activities_to_reserve(self) -> list[ScheduledActivity]:
         """The activities the plan reserves: the mission's, the dumps the
         planner called for, and the hold before each dump that waits for
@@ -923,6 +1048,21 @@ class PriorityScheduler:
         reserved = {dump.obsid for dump in self.dumps}
         waits = [wait for obsid, wait in self._dump_waits.items() if obsid in reserved]
         return [*self.activities, *self.dumps, *waits]
+
+    def _known_activity(self, obsid: int) -> ScheduledActivity | None:
+        """The activity with ``obsid`` among those reserved and the safe
+        holds this plan placed."""
+        return next(
+            (
+                activity
+                for activity in [
+                    *self._activities_to_reserve(),
+                    *self._safe_hold_activities.values(),
+                ]
+                if activity.obsid == obsid
+            ),
+            None,
+        )
 
     def _firing_start(
         self,
@@ -1744,7 +1884,13 @@ class PriorityScheduler:
         """Record and return the plan for a finished timeline, with its
         charging; the timeline, charged, is then the scheduler's, which the
         momentum forecast reads and the next pass keeps from."""
-        timeline = self._plan_charging(list(timeline))
+        # The plan's last entry leaves the spacecraft where it is until the
+        # horizon ends: at a safe attitude, if that one cannot be held.
+        self.timeline = list(timeline)
+        for _ in range(_MAX_SAFE_HOLDS):
+            if not self._park_tail():
+                break
+        timeline = self._plan_charging(list(self.timeline))
         self._settle_sliding_activities(timeline)
         for block in timeline:
             for step in block.steps:
@@ -1872,6 +2018,12 @@ class PriorityScheduler:
                 if request.wants_more
                 else None
             )
+            if block is None and request.wants_more and self._park_tail():
+                # Nothing could follow the last entry, whose attitude cannot
+                # be held: the spacecraft could neither stay there until a
+                # later slew nor wait at the request's attitude. From a hold
+                # at a safe attitude it can, so the request is tried again.
+                block = self._place_snapshot(request, not_before)
             self._reactivate_cut_short(active, order)
             continuing = continue_from = None
             if block is None and request.timed and request.visit is not None:
@@ -3365,11 +3517,10 @@ class PriorityScheduler:
                 block.attitude_out, block.ready, self.ctx.ceil_step(block.end), mode
             )
             if block.arrival > block.ready or violation is not None:
-                activity = block.activity or next(
-                    a
-                    for a in self._activities_to_reserve()
-                    if a.obsid == block.entry.obsid
+                activity = block.activity or self._known_activity(
+                    int(block.entry.obsid)
                 )
+                assert activity is not None
                 raise ActivitySchedulingError(
                     activity, "the settled hold is unsafe or its ingress arrives late"
                 )
@@ -4232,6 +4383,49 @@ class PriorityScheduler:
         return block.latest_ready if block.latest_ready is not None else block.ready
 
     def _fit_in_gap(
+        self,
+        request: _Request,
+        pred: _Block | None,
+        succ: _Block | None,
+        not_before: float | None = None,
+        until: float | None = None,
+        beyond: Sequence[_Block] = (),
+    ) -> tuple[_Block, Slew, Slew | None] | None:
+        """Find the earliest snapshot of ``request`` between ``pred`` and
+        ``succ`` (see :meth:`_fit_in_gap_once`), leaving time to slew away
+        after a snapshot that nothing follows.
+
+        A snapshot with nothing after it can run until its target sets. The
+        attitude it leaves may then be one a safety limit crosses a step
+        later, and no slew away from it is clear. Such a snapshot ends one
+        longest slew before its attitude can no longer be held in IDLE, as
+        dispatch ends an observation to keep its way out. Where no snapshot
+        fits that ends by then, the one found is kept.
+        """
+        fit = self._fit_in_gap_once(request, pred, succ, not_before, until, beyond)
+        if fit is None or succ is not None or until is not None:
+            return fit
+        leave_by = self._leave_by(fit[0])
+        if leave_by is None or fit[0].end <= leave_by:
+            return fit
+        earlier = self._fit_in_gap_once(
+            request, pred, None, not_before, leave_by, beyond
+        )
+        return fit if earlier is None else earlier
+
+    def _leave_by(self, block: _Block) -> float | None:
+        """By when the spacecraft has to have begun slewing away from the
+        attitude ``block`` leaves: one longest slew before that attitude can
+        no longer be held in IDLE, where that is within one longest slew of
+        the block's end; None where the attitude can be held that long."""
+        bound = self._longest_slew_steps()
+        end = self.ctx.ceil_step(block.end)
+        violation = self.ctx.first_hold_violation(
+            block.attitude_out, end, min(end + bound, self.ctx.uend), ACSMode.IDLE
+        )
+        return None if violation is None else violation - bound
+
+    def _fit_in_gap_once(
         self,
         request: _Request,
         pred: _Block | None,

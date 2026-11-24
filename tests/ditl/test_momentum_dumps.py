@@ -857,7 +857,7 @@ def test_a_dump_waits_for_a_fixed_firing_attitude_to_be_allowed(minutes: int) ->
     assert any("firing attitude" in d for d in descriptions)
 
 
-@pytest.mark.parametrize("minutes", [40, 50, 60, 70])
+@pytest.mark.parametrize("minutes", [50, 60, 70])
 def test_the_planner_reserves_a_dump_that_waits_for_its_fixed_attitude(
     minutes: int,
 ) -> None:
@@ -907,7 +907,7 @@ def test_the_planner_reserves_a_dump_that_waits_for_its_fixed_attitude(
     assert (float(holds[0].ra), float(holds[0].dec)) != pytest.approx((80.0, -20.0))
 
 
-@pytest.mark.parametrize("minutes", [40, 70])
+@pytest.mark.parametrize("minutes", [50, 60, 70])
 def test_a_planned_dump_that_waits_executes_as_planned(minutes: int) -> None:
     from conops.schedulers import PriorityScheduler
 

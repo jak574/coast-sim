@@ -378,6 +378,38 @@ Requests left with at least ``ss_min`` of exposure unplanned are listed in
 ``scheduler.unplaced``. Every placement and rejection is logged to ``scheduler.log``.
 The input targets are not modified.
 
+Leaving an attitude that cannot be held
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An observation can run until its target sets. Where the limit that sets the target
+is also a safety limit, such as an Earth-limb keep-out in the hardware-safety
+scope, the attitude the observation leaves cannot be held in ``IDLE`` a step
+later. Dispatch slews away from such an attitude as it flies. A plan has to say
+so, or the run would idle into the keep-out and enter safe mode, and the planner
+could place nothing later: the spacecraft could neither stay until a later slew
+nor wait at the next target's attitude before that target is visible.
+
+The planners do two things:
+
+* A snapshot that nothing follows ends one longest slew before its attitude can
+  no longer be held in ``IDLE``, where that is within one longest slew of its end.
+  This leaves time to slew away, as dispatch ends an observation to keep its way
+  out. A snapshot whose attitude can be held that long is not shortened.
+* After an entry whose attitude cannot be held until the horizon ends, the plan
+  reserves an entry named ``Safe attitude hold``: a slew to an attitude that can
+  be held, and a hold of one step there. The spacecraft stays at that attitude
+  afterwards, so the next entry is reached from it. The planner chooses, among
+  the idle hold candidates dispatch uses, the pointing that can be held longest
+  over the next three hours and is reached by a clear slew. Where that attitude
+  cannot be held to the end of the horizon either, another hold follows it.
+
+The priority-first scheduler tries a request again from such a hold where nothing
+could follow the last entry, so a target that sets is observed again when it next
+rises. Every planner ends its plan with such a hold where the last entry's
+attitude cannot be held. No hold is added, and no snapshot shortened, where the
+attitude can be held: a mission with no safety limit that sweeps across the sky
+gets the plans it had.
+
 Moving snapshots later to make room
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
