@@ -213,3 +213,27 @@ class TestGroups:
             int(e.obsid) for e in _at(_dispatch(plain, _group_targets(plain)).plan)
         ]
         assert order[:2] == [1, 100]
+
+
+def test_dispatch_keeps_no_time_for_a_request_over_its_budget() -> None:
+    """A request with a deadline whose category has no budget left for it is
+    never observed, so dispatch keeps no time for its latest start: the
+    targets that can be observed would otherwise be passed over and the
+    spacecraft would stand idle until the deadline had gone."""
+    config = _config(HOURS, categories=[CAPPED])
+    first = _target(config, 1, *PATCH[1], merit=100, minutes=40)
+    # 10 minutes of the budget are left once the first has been observed.
+    # Its latest start falls inside the filler's first visit.
+    refused = _target(
+        config, 2, *PATCH[2], merit=90, minutes=40, deadline=T0 + 100 * MIN
+    )
+    # Whole visits of an hour: one cannot be cut to end at a protected start.
+    filler = _target(config, 100, *PATCH[4], merit=10, minutes=300, snapshot=60)
+    ditl = _dispatch(config, [first, refused, filler])
+    science = sorted(science_entries(ditl.plan), key=lambda e: float(e.begin))
+    assert not [e for e in science if int(e.obsid) == 2]
+    gaps = [
+        float(later.begin) - float(earlier.end)
+        for earlier, later in zip(science, science[1:], strict=False)
+    ]
+    assert max(gaps) < 20 * MIN

@@ -668,9 +668,11 @@ class TargetQueue:
         """When each chance ``target`` still has to be observed closes, at
         ``utime``: the deadline of each visit window not yet visited and
         not yet closed, or the target's own deadline where it has no visit
-        windows. Empty for a target with no deadline of either kind, and
-        for one that is finished."""
+        windows. Empty for a target with no deadline of either kind, for one
+        that is finished and for one its budget has no room for."""
         if self._finished(target):
+            return []
+        if not self._within_budget(target):
             return []
         windows = getattr(target, "visit_windows", None)
         if isinstance(windows, list) and windows:
@@ -981,6 +983,10 @@ class TargetQueue:
             if other.done or other.merit <= 0:
                 continue
             if int(other.obsid) in held_outside:
+                continue
+            # A request its budget has no room for is never selected, so no
+            # time is kept for it either.
+            if not self._within_budget(other):
                 continue
             # A windowed request is kept for the visit it would be selected
             # for now, which its window may point elsewhere.
