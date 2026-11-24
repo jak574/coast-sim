@@ -200,3 +200,31 @@ def test_a_rolling_run_skips_it_and_reports_it() -> None:
     assert not _held(ditl.plan)
     assert [a.name for a in ditl.skipped_activities] == [CALIBRATION]
     assert max(_group_gaps(ditl.plan)) < 15 * MIN
+
+
+def test_a_rolling_run_does_not_offer_a_skipped_activity_again() -> None:
+    """A replan can begin after a skipped activity's start window has closed
+    and before the activity would have ended. The activity was skipped, so
+    it is not reserved then: reserving it would fail, its window being
+    closed."""
+    config = _config()
+    late = ScheduledActivity(
+        name=CALIBRATION,
+        begin=T0 + 50 * MIN,
+        duration_seconds=40 * MIN,
+        for_instrument=OTHER,
+        skip_if_unused_seconds=1.5 * HOUR,
+    )
+    ditl = RollingHorizonDITL(
+        config,
+        _targets(config),
+        begin=BEGIN,
+        end=END,
+        horizon=timedelta(hours=4),
+        replan_interval=timedelta(hours=1),
+        activities=[late],
+    )
+    ditl.step_size = 60
+    assert ditl.calc()
+    assert not _held(ditl.plan)
+    assert [a.name for a in ditl.skipped_activities] == [CALIBRATION]

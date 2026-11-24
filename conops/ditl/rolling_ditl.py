@@ -956,6 +956,12 @@ class RollingHorizonDITL(DITL):
         for activity in self.activities:
             if activity.obsid in reserved_activities:
                 continue
+            if activity.skippable and activity.latest_start < start:
+                # Its start window closed without the activity being
+                # committed: an earlier plan skipped it, its instrument not
+                # being in use. It is not offered again, since it could no
+                # longer be reserved.
+                continue
             begin = activity.begin
             # A hold due during another activity follows that activity, even
             # when its predecessor was committed by an earlier horizon.

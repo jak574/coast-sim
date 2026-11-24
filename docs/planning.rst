@@ -672,6 +672,9 @@ again without it. A group that began before the plan extends the stretch back to
 instrument's last observation (``StartState.instrument_last_used``, which a rolling
 run fills in).
 
+In a rolling run an activity that a plan skipped is not offered to the later plans
+once its start window has closed.
+
 A thruster dump or a safe hold cannot be skipped. ``skipped_activities`` on the run
 and on the scheduler lists the activities skipped, and the log says when the
 instrument was unused.
