@@ -96,6 +96,7 @@ class TargetQueue:
         self._requests_by_obsid: dict[int, Pointing] = {}
         """The requests behind those openings."""
         self._due_requests: list[Pointing] = []
+        self._held_outside_group: frozenset[int] = frozenset()
         """The requests whose protected start had come when the openings
         were computed."""
         self._openings: list[tuple[float, float, int]] | None = None
@@ -749,11 +750,14 @@ class TargetQueue:
                         f"group {group.name!r} has no window and waits for "
                         f"{first[0]}, whose window closes before the group would end"
                     )
+        outside: set[int] = set()
         if open_to:
             names = ", ".join(repr(name) for name in sorted(set(open_to.values())))
             for obsid in queued:
                 if obsid not in open_to and obsid not in held:
                     held[obsid] = f"group {names} is under way"
+                    outside.add(obsid)
+        self._held_outside_group = frozenset(outside)
         return held
 
     def science_budget_left(self, target: Pointing) -> float | None:
@@ -939,8 +943,16 @@ class TargetQueue:
         self._opening_utime = utime
         self._requests_by_obsid = {}
         self._due_requests = []
+        # A consecutive group under way takes no other science until it has
+        # finished, so no time is kept for a request it holds back: the
+        # group's own members would otherwise give way to a request that
+        # cannot be observed, and the group would stand idle.
+        self.consecutive_holds(utime)
+        held_outside = self._held_outside_group
         for other in self.targets:
             if other.done or other.merit <= 0:
+                continue
+            if int(other.obsid) in held_outside:
                 continue
             # A windowed request is kept for the visit it would be selected
             # for now, which its window may point elsewhere.

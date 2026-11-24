@@ -970,6 +970,10 @@ request's window cannot be moved, so the group waits:
   group with a window of its own is not held, because its window says when it runs.
 * A group that has begun is not interrupted; the rule applies to its first
   observation only.
+* A group under way does not wait for a request it holds back. Dispatch keeps no
+  time for such a request, so a member that is one whole visit is not passed over
+  because the request's latest start falls inside it. The request is observed
+  after the group if its window is still open.
 
 Dispatch applies the rule when it selects a target:
 

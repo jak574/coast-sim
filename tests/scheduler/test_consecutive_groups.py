@@ -464,3 +464,51 @@ class TestTimeBoundRequestsKeepTheirWindows:
         assert not any(
             "has no window and waits for" in e.description for e in ditl.log.events
         )
+
+
+def _gaps_in_group(plan: Plan) -> list[float]:
+    """The idle time, in seconds, between each two science entries from the
+    group's first observation to its last."""
+    science = [e for e in _science(plan) if int(e.obsid) in ORDER]
+    return [
+        float(later.begin) - float(earlier.end)
+        for earlier, later in zip(science, science[1:], strict=False)
+    ]
+
+
+def test_a_group_under_way_does_not_wait_for_a_request_it_holds_back() -> None:
+    """A time-bound request ranked below the members has to begin while the
+    group runs. The group holds it back, so its members must not give way to
+    it: they would wait for a request that cannot be observed, and the group
+    would stand idle until the request's window had closed."""
+    config = _config()
+    # The group's own window starts it at once, before the timed window.
+    config.observation_groups.groups[0].window_start = T0
+    # Each member is one whole visit of 40 minutes, so it cannot be fitted
+    # into the time before the timed request's latest start.
+    members = [
+        make_target(config, k, *PATCH[k], merit=m, minutes=40)
+        for k, m in zip((1, 2, 3), (60, 50, 40), strict=True)
+    ]
+    late = (T0 + 50 * MIN, T0 + 110 * MIN)
+    timed = Pointing(
+        config=config,
+        obsid=TIMED,
+        name="Timed",
+        ra=PATCH[4][0],
+        dec=PATCH[4][1],
+        merit=30,
+        fom=30,
+        ss_min=20 * MIN,
+        ss_max=20 * MIN,
+        visit_windows=[VisitWindow(start=late[0], deadline=late[1])],
+    )
+    ditl = _dispatch(config, [*members, timed])
+    _assert_consecutive(ditl.plan, ORDER)
+    for obsid in ORDER:
+        collected = sum(
+            float(e.exposure or 0) for e in ditl.plan if int(e.obsid) == obsid
+        )
+        assert collected == 40 * MIN
+    # Slews and settling between the members, and no wait for the timed visit.
+    assert max(_gaps_in_group(ditl.plan)) < 15 * MIN
