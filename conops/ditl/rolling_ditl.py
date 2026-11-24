@@ -1457,14 +1457,53 @@ class RollingHorizonDITL(DITL):
             rest_time, attitude = max(
                 (self._rest_after(e) for e in pending), key=lambda rest: rest[0]
             )
-            return StartState(time=max(cutoff, rest_time), attitude=attitude)
+            return StartState(
+                time=max(cutoff, rest_time),
+                attitude=attitude,
+                instrument_last_used=self._instrument_last_used(committed, cutoff),
+            )
         # Before the first command, the real ACS may already have an explicit
         # initial pose. With no pending entry, keep the pose it actually holds;
         # constructing a fresh ACS would silently replace that boundary state.
         return StartState(
             time=cutoff,
             attitude=(float(self.acs.ra), float(self.acs.dec), float(self.acs.roll)),
+            instrument_last_used=self._instrument_last_used(committed, cutoff),
         )
+
+    def _instrument_last_used(
+        self, committed: Sequence[PlanEntry], cutoff: float
+    ) -> dict[str, float]:
+        """When each instrument last observes before ``cutoff``, among the
+        science flown and the science committed, by instrument name."""
+        last: dict[str, float] = {}
+        for entry in [*self.plan.entries, *committed]:
+            name = entry.instrument_name
+            if name is None or entry_obstype(entry) not in PLAN_SCIENCE_OBSTYPES:
+                continue
+            if float(entry.begin) >= cutoff:
+                continue
+            ended = min(float(entry.end), cutoff)
+            last[name] = max(last.get(name, ended), ended)
+        return last
+
+    @property
+    def skipped_activities(self) -> list[ScheduledActivity]:
+        """The activities that may be skipped while their instrument is
+        unused (``ScheduledActivity.skip_if_unused_seconds``), are past
+        their latest end and were not held."""
+        held = {
+            entry.obsid
+            for entry in self.plan.entries
+            if entry_obstype(entry) == ObsType.ACTIVITY
+        }
+        return [
+            activity
+            for activity in self.activities
+            if activity.skippable
+            and activity.obsid not in held
+            and activity.latest_start + activity.duration_seconds <= self.uend
+        ]
 
     def _rest_after(self, entry: PlanEntry) -> tuple[float, Attitude]:
         """Return when an entry leaves the spacecraft at rest, and where.

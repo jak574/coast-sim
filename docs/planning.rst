@@ -633,6 +633,49 @@ rejects a window that needs different poses. Infeasibility raises
 ``ActivitySchedulingError``. The requested policy is not silently changed and the
 hold is not omitted.
 
+Skipping an activity whose instrument is not in use
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An activity can serve one instrument, as a lamp calibration serves a spectrograph.
+Holding it while that instrument observes nothing for a day or more costs time and
+gives nothing. Such an activity names the instrument and an interval::
+
+    ScheduledActivity(
+        name="Lamp calibration",
+        begin=start,
+        duration_seconds=3900,
+        for_instrument="IFS",
+        skip_if_unused_seconds=36 * 3600,
+    )
+
+The activity is skipped where its start falls inside a stretch of at least
+``skip_if_unused_seconds`` in which ``for_instrument`` observes nothing. A skipped
+activity reserves no time, is not held and puts no data on the recorder. An
+observation uses an instrument where it names it, or where a step of its sequence
+does.
+
+Only a stretch that is known when the activity is decided counts, so the rule never
+depends on science that has not been placed:
+
+* The stretch begins at the instrument's last observation, or at the start of the
+  run where it has made none.
+* It ends at the end of a consecutive group under way that does not use the
+  instrument, because no other science is observed until that group has finished.
+  Where no such group is under way it ends now.
+
+Dispatch decides at every step, so an activity inside a group is skipped as soon as
+the group has begun and the stretch is long enough, before the group's next visit is
+selected. The planners decide once the consecutive groups are on the timeline: an
+activity inside a group that does not use its instrument is skipped where the group,
+from its first block to its last, is long enough, and the timeline is then laid out
+again without it. A group that began before the plan extends the stretch back to the
+instrument's last observation (``StartState.instrument_last_used``, which a rolling
+run fills in).
+
+A thruster dump or a safe hold cannot be skipped. ``skipped_activities`` on the run
+and on the scheduler lists the activities skipped, and the log says when the
+instrument was unused.
+
 Sliding and fixed activities
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

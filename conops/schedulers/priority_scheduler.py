@@ -40,7 +40,12 @@ from ..targets import (
     ScheduledActivity,
     assign_obsids,
 )
-from ..targets.activity import CHARGE_OBSID, DUMP_WAIT_OBSID, SAFE_HOLD_OBSID
+from ..targets.activity import (
+    CHARGE_OBSID,
+    DUMP_WAIT_OBSID,
+    SAFE_HOLD_OBSID,
+    uses_instrument,
+)
 from ..targets.merit import MeritBreakdown, MeritModel
 from ..targets.plan_entry import is_rounding_remainder, snapshot_min_seconds
 from .allocator import AllocatedTime
@@ -196,6 +201,9 @@ class StartState(BaseModel):
 
     time: float
     attitude: Attitude
+    instrument_last_used: dict[str, float] = Field(default_factory=dict)
+    """When each instrument last observed before ``time``, in Unix seconds,
+    by name; an instrument that has not observed in the run is absent."""
 
 
 class _Request(BaseModel):
@@ -584,6 +592,10 @@ class PriorityScheduler:
         self.activities = assign_obsids(activities)
         """Fixed-time activities to reserve, in time order."""
         self.dumps: list[ScheduledActivity] = []
+        self.skipped_activities: list[ScheduledActivity] = []
+        """Activities the plan does not reserve, the instrument each serves
+        observing nothing around it (see :meth:`_skip_unused_activities`)."""
+        self._skipped_activity_ids: set[int] = set()
         self._safe_hold_activities: dict[int, ScheduledActivity] = {}
         """The safe holds the plan placed after entries whose attitude
         cannot be held, by obsid (see :meth:`_park_tail`)."""
@@ -1047,7 +1059,82 @@ class PriorityScheduler:
         its firing attitude."""
         reserved = {dump.obsid for dump in self.dumps}
         waits = [wait for obsid, wait in self._dump_waits.items() if obsid in reserved]
-        return [*self.activities, *self.dumps, *waits]
+        held = [a for a in self.activities if a.obsid not in self._skipped_activity_ids]
+        return [*held, *self.dumps, *waits]
+
+    def _skip_unused_activities(self) -> bool:
+        """Skip each activity that falls inside a consecutive group which
+        does not use the activity's instrument, where the group leaves the
+        instrument unused for long enough (``skip_if_unused_seconds``).
+        Returns whether an activity was newly skipped.
+
+        The groups are on the timeline before any other science, and no
+        other science is placed between a group's first block and its last,
+        so the instrument is known to observe nothing there. A group that
+        began before the plan extends the stretch back to the instrument's
+        last observation (``StartState.instrument_last_used``), or to the
+        plan's start where it has made none.
+        """
+        pending = [
+            activity
+            for activity in self.activities
+            if activity.skippable
+            and activity.obsid not in self._skipped_activity_ids
+            and activity.begin < self.ctx.uend
+            and activity.latest_start + activity.duration_seconds > self.ctx.ustart
+        ]
+        if not pending:
+            return False
+        last_used = (
+            self.start_state.instrument_last_used
+            if self.start_state is not None
+            else {}
+        )
+        found = False
+        for group in self.config.observation_groups.consecutive:
+            members = set(group.members)
+            blocks = [
+                block
+                for block in self.timeline
+                if not block.is_fixed and int(block.entry.obsid) in members
+            ]
+            if not blocks:
+                continue
+            targets = [
+                self._targets_by_obsid[obsid]
+                for obsid in group.members
+                if obsid in self._targets_by_obsid
+            ]
+            begin = min(float(block.entry.begin) for block in blocks)
+            end = max(float(block.end) for block in blocks)
+            begun = any(
+                target.collected_seconds > 0.0
+                or self.reserved_seconds.get(int(target.obsid), 0.0) > 0.0
+                for target in targets
+            )
+            for activity in pending:
+                instrument = activity.for_instrument
+                if instrument is None or activity.obsid is None:
+                    continue
+                if activity.obsid in self._skipped_activity_ids:
+                    continue
+                if any(uses_instrument(target, instrument) for target in targets):
+                    continue
+                since = begin
+                if begun:
+                    since = min(begin, last_used.get(instrument, self.ctx.ustart))
+                if not activity.skipped_in(since, end):
+                    continue
+                self._skipped_activity_ids.add(activity.obsid)
+                self.skipped_activities.append(activity)
+                found = True
+                self._log(
+                    self.ctx.ustart,
+                    f"Scheduled activity {activity.name} skipped: {instrument} "
+                    f"observes nothing from {unixtime2date(since)} to "
+                    f"{unixtime2date(end)}, through group {group.name!r}",
+                )
+        return found
 
     def _known_activity(self, obsid: int) -> ScheduledActivity | None:
         """The activity with ``obsid`` among those reserved and the safe
@@ -1547,6 +1634,10 @@ class PriorityScheduler:
                 )
         self._energy = self._charged_energy(self.timeline)
         self._place_consecutive_groups()
+        if self._skip_unused_activities():
+            # The group was laid out around an activity that is now skipped:
+            # lay the timeline out again without it.
+            self._reserve_fixed()
 
     def _place_consecutive_groups(self) -> None:
         """Place the requests of consecutive observation groups, before any

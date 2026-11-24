@@ -105,6 +105,28 @@ class ScheduledActivity(BaseModel):
         ),
     )
 
+    for_instrument: str | None = Field(
+        default=None,
+        description=(
+            "The instrument the activity serves, such as the one a "
+            "calibration is for. With skip_if_unused_seconds, the activity is "
+            "skipped where that instrument is not observing around it"
+        ),
+    )
+    skip_if_unused_seconds: float | None = Field(
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Skip the activity where its start falls in a stretch of at least "
+            "this many seconds in which for_instrument observes nothing. The "
+            "stretch counted is the one known when the activity is decided: "
+            "from the instrument's last observation to the end of a "
+            "consecutive group under way that does not use it. None: the "
+            "activity is always held"
+        ),
+    )
+
     @field_validator("begin", mode="before")
     @classmethod
     def _begin_as_unix(cls, value: float | int | str | datetime) -> float:
@@ -124,7 +146,31 @@ class ScheduledActivity(BaseModel):
             raise ValueError("a safe hold cannot also be a desaturation")
         if self.fixed and self.slide_seconds > 0.0:
             raise ValueError("a fixed activity begins at its start and cannot slide")
+        if (self.for_instrument is None) != (self.skip_if_unused_seconds is None):
+            raise ValueError(
+                "for_instrument and skip_if_unused_seconds are given together"
+            )
+        if self.skip_if_unused_seconds is not None and (
+            self.desaturation or self.safe_hold
+        ):
+            raise ValueError("a thruster dump or a safe hold cannot be skipped")
         return self
+
+    @property
+    def skippable(self) -> bool:
+        """Whether the activity may be skipped while its instrument is unused."""
+        return self.skip_if_unused_seconds is not None
+
+    def skipped_in(self, unused_from: float, unused_to: float) -> bool:
+        """Whether the activity is skipped, its instrument being known to
+        observe nothing from ``unused_from`` to ``unused_to``: its start is
+        inside that stretch and the stretch is long enough."""
+        if self.skip_if_unused_seconds is None:
+            return False
+        return (
+            unused_from <= self.begin <= unused_to
+            and unused_to - unused_from >= self.skip_if_unused_seconds
+        )
 
     @property
     def hold_mode(self) -> ACSMode:
@@ -195,6 +241,29 @@ class ScheduledActivity(BaseModel):
         return entry
 
 
+def uses_instrument(item: object, instrument: str) -> bool:
+    """Whether a request or a plan entry observes with ``instrument``: it
+    names the instrument, or a step of its observation sequence does."""
+    if getattr(item, "instrument_name", None) == instrument:
+        return True
+    sequence = getattr(item, "sequence", None)
+    steps = getattr(sequence, "steps", None)
+    return isinstance(steps, list) and any(
+        getattr(step, "instrument_name", None) == instrument for step in steps
+    )
+
+
+def visit_seconds(target: object) -> float:
+    """How long the science a request still has to collect takes, at the
+    least: the science and calibration of a sequence visit, else the
+    exposure it has left."""
+    sequence = getattr(target, "sequence", None)
+    if sequence is not None:
+        return float(sequence.science_seconds) + float(sequence.calibration_seconds)
+    left = getattr(target, "exptime", None)
+    return float(left) if isinstance(left, (int, float)) else 0.0
+
+
 def assign_obsids(
     activities: Sequence[ScheduledActivity],
 ) -> list[ScheduledActivity]:
@@ -222,11 +291,14 @@ def periodic_activities(
     slide_seconds: float = 0.0,
     attitude: ActivityAttitude | None = None,
     safe_hold: bool = False,
+    for_instrument: str | None = None,
+    skip_if_unused_seconds: float | None = None,
 ) -> list[ScheduledActivity]:
     """Activities named ``name`` every ``interval_seconds`` from ``first``,
     each ``duration_seconds`` long, ``count`` of them or as many as begin by
-    ``until``; the instrument modes, data, ``fixed`` and ``slide_seconds``
-    apply to each. A campaign's twice-daily calibration is one call."""
+    ``until``; the instrument modes, data, ``fixed``, ``slide_seconds`` and
+    the skip rule (``for_instrument``, ``skip_if_unused_seconds``) apply to
+    each. A campaign's twice-daily calibration is one call."""
     if interval_seconds <= 0.0:
         raise ValueError("interval_seconds must be positive")
     if (count is None) == (until is None):
@@ -249,6 +321,8 @@ def periodic_activities(
                 slide_seconds=slide_seconds,
                 attitude=attitude or ActivityAttitude(),
                 safe_hold=safe_hold,
+                for_instrument=for_instrument,
+                skip_if_unused_seconds=skip_if_unused_seconds,
             )
         )
         k += 1

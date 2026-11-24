@@ -67,6 +67,7 @@ from ..targets import (
     TargetSlewEstimate,
     assign_obsids,
 )
+from ..targets.activity import uses_instrument, visit_seconds
 from ..targets.merit import MeritBreakdown, MeritModel
 from ..targets.plan_entry import (
     ActivityInterruption,
@@ -299,6 +300,9 @@ class QueueDITL(DITLMixin, DITLStats):
         self._activity_slew: Slew | None = None
         self._activity_context: SchedulingContext | None = None
         self._started_activity_ids: set[int] = set()
+        self.skipped_activities: list[ScheduledActivity] = []
+        """Activities not held because the instrument each serves observed
+        nothing around it (``ScheduledActivity.skip_if_unused_seconds``)."""
         self._activity_end: float = 0.0
         self._activity_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._paused_activity: _PausedActivity | None = None
@@ -1235,6 +1239,53 @@ class QueueDITL(DITLMixin, DITLStats):
             and activity.latest_start + activity.duration_seconds > self.ustart
         )
 
+    def _instrument_unused(self, instrument: str, utime: float) -> tuple[float, float]:
+        """The stretch around ``utime`` in which ``instrument`` is known to
+        observe nothing: from its last observation in this run, or the run's
+        start where it has made none, to the end of a consecutive group
+        under way that does not use it, or ``utime`` where there is none."""
+        since = self.ustart
+        for entry in reversed(self.plan.entries):
+            if entry_obstype(entry) != ObsType.AT or not uses_instrument(
+                entry, instrument
+            ):
+                continue
+            # An observation under way ends later than now: in use now.
+            since = min(float(entry.end), utime) if entry.end else utime
+            break
+        until = utime
+        under_way = getattr(self.queue, "groups_under_way", None)
+        for _, members in under_way() if callable(under_way) else []:
+            if any(uses_instrument(member, instrument) for member in members):
+                continue
+            until = max(until, utime + sum(visit_seconds(m) for m in members))
+        return since, until
+
+    def _skip_unused_activities(self, utime: float) -> None:
+        """Skip each activity whose instrument is known to observe nothing
+        for long enough around it (``skip_if_unused_seconds``). A skipped
+        activity is not held and reserves no time."""
+        for activity in list(self._unstarted_activities()):
+            if not activity.skippable or activity.for_instrument is None:
+                continue
+            since, until = self._instrument_unused(activity.for_instrument, utime)
+            if not activity.skipped_in(since, until):
+                continue
+            assert activity.obsid is not None
+            self._started_activity_ids.add(activity.obsid)
+            self.skipped_activities.append(activity)
+            self.log.log_event(
+                utime=utime,
+                event_type="ACTIVITY",
+                description=(
+                    f"Scheduled activity {activity.name} skipped: "
+                    f"{activity.for_instrument} observes nothing from "
+                    f"{unixtime2date(since)} to {unixtime2date(until)}"
+                ),
+                obsid=activity.obsid,
+                acs_mode=self.acs.acsmode,
+            )
+
     def _manage_activities(
         self, utime: float, ra: float, dec: float, roll: float
     ) -> bool:
@@ -1245,6 +1296,7 @@ class QueueDITL(DITLMixin, DITLStats):
         another activity is under way begins when that one ends, for its
         full length. Returns whether the spacecraft's state changed."""
         changed = False
+        self._skip_unused_activities(utime)
         active = self._active_activity
         if active is not None and utime >= self._activity_end:
             self._end_activity(utime)

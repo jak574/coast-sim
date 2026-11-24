@@ -19,7 +19,11 @@ from ..config.acs import scheduled_slew_time
 from ..config.config import housekeeping_while_waiting
 from ..config.data_storage import RecorderView
 from ..config.observation_categories import ObservationCategories
-from ..config.observation_groups import ObservationGroups, group_start_wait
+from ..config.observation_groups import (
+    ObservationGroup,
+    ObservationGroups,
+    group_start_wait,
+)
 from ..ditl.ditl_log import DITLLog
 from ..simulation.slew import Slew
 from . import Pointing
@@ -759,6 +763,30 @@ class TargetQueue:
                     outside.add(obsid)
         self._held_outside_group = frozenset(outside)
         return held
+
+    def groups_under_way(self) -> list[tuple[ObservationGroup, list[Pointing]]]:
+        """Each consecutive group that has begun and has members still to
+        observe, with those members in order. No science of a target outside
+        the group is observed until they have finished."""
+        groups = getattr(self.merit_model, "groups", None)
+        consecutive = (
+            groups.consecutive if isinstance(groups, ObservationGroups) else []
+        )
+        queued = {
+            int(target.obsid): target
+            for target in self.targets
+            if isinstance(getattr(target, "obsid", None), (int, float))
+        }
+        under_way = []
+        for group in consecutive:
+            present = [queued[obsid] for obsid in group.members if obsid in queued]
+            unfinished = [t for t in present if not self._finished(t)]
+            if unfinished and (
+                len(unfinished) < len(present)
+                or any(t.collected_seconds > 0 for t in present)
+            ):
+                under_way.append((group, unfinished))
+        return under_way
 
     def science_budget_left(self, target: Pointing) -> float | None:
         """Science the target's category may still collect within its time
