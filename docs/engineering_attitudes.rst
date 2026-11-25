@@ -1,38 +1,36 @@
-Engineering attitude exports
-============================
+Executed attitude exports
+=========================
 
-A retained simulation can sample its executed attitude at a finer interval than
-its command or telemetry step. Sampling evaluates the flown slew, tracking and
-hold trajectories, including interrupted motion. It does not interpolate between
-coarse telemetry quaternions or regenerate a commanded plan.
+A simulation retains the attitude trajectory it actually executed. After the
+simulation has advanced, ``run.sample_attitude`` evaluates that retained
+trajectory at an interval you choose, independently of the telemetry step.
+Here ``run`` is the simulation object.
 
-Export a retained run
----------------------
+``sample_attitude`` recalls interrupted slews, braking arcs, tracking and holds
+through ``AttitudeExecutor.flown``. It does not interpolate the coarse
+housekeeping quaternions.
 
-After a successful ``run.calc()``, sample the interval needed for analysis::
+.. code-block:: python
 
-    from conops.targets import Plan
+   attitude = run.sample_attitude(
+       begin="2029-03-01T01:00:00+00:00",
+       end="2029-03-01T01:10:00+00:00",
+       interval_seconds=1.0,
+   )
+   attitude.save_stk("attitude.a", reference_frame="J2000")
+   attitude.save_euler_csv("attitude.csv", reference_frame="J2000")
 
-    attitude = run.sample_attitude(interval_seconds=1.0)
-    attitude.save_stk("executed_attitude.a", reference_frame="J2000")
-    attitude.save_euler_csv("executed_attitude.csv", reference_frame="J2000")
+The ``begin`` and ``end`` bounds accept UTC datetimes, ISO strings or Unix
+seconds. Both must lie within ``run.acs._executor.flown_interval``, and an
+export that asks for future or unflown times is rejected. If you omit ``end``,
+it defaults to the last time to which the executor physically advanced. That
+time may precede the requested simulation end by one step.
 
-    run.plan.attitude_timeseries = attitude
-    saved = run.plan.save("executed_plan.json")
-    loaded = Plan.load(saved, load_timeseries=True)
-    loaded.attitude_timeseries.save_stk("reopened_attitude.a")
-
-``begin`` and ``end`` accept UTC datetimes, ISO strings or Unix seconds.
-Both endpoints are included. Motion boundaries and executed handoffs are also
-included unless ``include_transitions=False``. Consequently a nominal one-second
-series may contain additional samples between its regular ticks.
-
-The requested interval must have been flown and remain covered by the ephemeris.
-The default final time is the last time physically advanced by the attitude
-executor; it may precede the configured run end by one simulation step. Sampling
-before execution or beyond the retained interval raises ``ValueError``. Export
-or save the fine series before discarding the run: loading a coarse sidecar
-cannot reconstruct finer motion.
+Both endpoints are included in the samples. By default the samples also include
+the boundaries of each executed motion and the handoffs between motions, so
+adjacent samples are at most the requested interval apart. Set
+``include_transitions=False`` to retain only the regular grid and the final
+endpoint.
 
 A series holds one record for each sample in memory, about 2 kB each, so a day at
 one second is about 170 MB and a month about 5 GB. The time to sample depends on
@@ -40,47 +38,130 @@ the number of samples and not on the length of the ephemeris. For a long run,
 sample and save it a day or so at a time with ``begin`` and ``end``, or use a
 coarser interval where the motion allows.
 
-Frames and file conventions
----------------------------
+Lifecycle and body frame
+------------------------
 
-Quaternions describe the physical spacecraft body frame declared by
-``SpacecraftBus.frame``. Every body-frame configuration vector and hardware
-mounting must use that same frame. The auxiliary RA/Dec/roll fields keep their
-existing body-X parameterization; use the quaternion for the complete physical
-orientation.
+Keeping and reloading a series
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* STK ``.a`` files use ``AttitudeTimeQuatScalarFirst``, elapsed UTC seconds from
-  ``ScenarioEpoch``, and scalar-first Shuster quaternions. The Hamilton vector
-  components are conjugated to preserve the reference-to-body rotation in
-  STK's convention. Adjacent quaternion signs remain continuous.
-* Euler CSV files contain intrinsic 1-2-3 angles in degrees, with the convention
-  ``R_reference_to_body = (Rx(a) Ry(b) Rz(c)).T``. At gimbal lock the final angle
-  is zero and the ``gimbal_lock`` column is true; the equivalent rotation is
-  preserved. The body +X and +Z angles to the Sun are included when the series
-  contains a Sun vector.
-* ``reference_frame="ICRF"`` uses the GCRS reference axes directly.
-  ``reference_frame="J2000"`` converts to the FK5/IAU76/80 realization used by
-  STK through its Earth-fixed relation. UTC, TT and UT1 are kept distinct;
-  sampled series retain UT1-UTC for repeatable re-export. Older telemetry
-  sidecars without UT1-UTC can use ICRF, but J2000 export raises instead of
-  inventing a conversion. See STK's `central-body reference frames
-  <https://help.agi.com/stk/content/stk/referenceFramesCentralBodies.htm>`_.
+Sampling needs the run, so keep the run until sampling is complete. After that,
+either retain the returned series or attach it to a plan so that it is saved
+with the plan:
 
-Each export has a ``.metadata.json`` companion recording the rotation convention,
-reference and spacecraft frames, sampling source and interval, and origin offset.
-``origin_offset_m`` records a translation in metadata only; it does not modify
-attitude. Supply the actual vector components when an analysis requires them.
-No displacement direction is inferred from a distance.
+.. code-block:: python
 
-Sidecars and downstream checks
+   run.plan.attitude_timeseries = attitude
+   run.plan.save("plan.json")
+
+   from conops.targets import Plan
+   loaded = Plan.load("plan.json", load_timeseries=True)
+   loaded.attitude_timeseries.save_stk("reloaded.a")
+
+A series attached to a plan is saved in a separate sidecar file beside the plan.
+``Plan.load`` loads only the plan entries by default, so request the sidecars
+explicitly with ``load_timeseries=True``. A sidecar's name cannot lead outside
+the plan's directory.
+
+A saved fine series can be exported again. A saved coarse series does not
+contain enough information to recover finer executed motion. The export
+metadata records ``sample_source`` and the requested interval, so you can tell
+which kind of series you have.
+
+Body frame
+~~~~~~~~~~
+
+The quaternions already map GCRS coordinates into the configured physical body
+frame. If the configuration declares
+``SpacecraftFrame(boresight=(0, 0, 1), sun_side=(1, 0, 0))``, for example, the
+notebook needs no additional quaternion rotation. The series records this frame
+explicitly.
+
+The series also has legacy RA/Dec/roll fields. These parameterize physical body
++X. They do not redefine the configured telescope boresight.
+
+Origin offset
+~~~~~~~~~~~~~
+
+``origin_offset_m`` is optional metadata: a vector of three components in
+metres. It does not change an orientation, and it does not translate the
+exported orbit. A scalar distance from another spacecraft origin does not
+determine this vector, so supply its components only when they are known.
+
+Reference axes and quaternion convention
+----------------------------------------
+
+Reference frame
+~~~~~~~~~~~~~~~
+
+The ``reference_frame`` argument chooses the axes in which the attitude is
+exported:
+
+* ``reference_frame="ICRF"`` preserves the GCRS orientation axes. The origin
+  remains geocentric.
+* ``"J2000"`` explicitly converts to the FK5/IAU76/80 Earth J2000 realization
+  described in the `STK frame documentation
+  <https://help.agi.com/stk/Content/stk/referenceFramesCBdescriptions.htm>`_.
+
+The J2000 conversion relates the IAU2006/2000A GCRS-to-Earth-fixed rotation to
+the IAU76/80 J2000-to-Earth-fixed rotation, including the
+equation-of-equinoxes correction. Polar motion is common to both rotations and
+cancels.
+
+UTC, TT and UT1 are distinct time scales, and newly sampled series retain
+UT1-UTC for every sample. An older sidecar may lack this information. J2000
+export rejects such a sidecar; it does not relabel the sidecar's GCRS
+quaternions as J2000.
+
+These conversions are rotations of the attitude axes. Stellar aberration and
+origin translations are not applied.
+
+STK attitude file
+~~~~~~~~~~~~~~~~~
+
+The STK file uses ``AttitudeTimeQuatScalarFirst``, with an explicit UTC
+``ScenarioEpoch``, Earth central body, coordinate axes, count and relative
+seconds.
+
+STK's `orientation documentation
+<https://help.agi.com/stk/Content/stk/sn-orientation.htm>`_ specifies Shuster
+quaternions, whereas COASTSim uses Hamilton quaternions. The exporter therefore
+conjugates the vector part as well as putting the scalar first, which preserves
+the reference-to-body DCM. Quaternion signs remain continuous through 180
+degrees.
+
+The accompanying ``.metadata.json`` records representation, reference frame and
+spacecraft axes. See also the `STK attitude file specification
+<https://help.agi.com/stk/content/stk/importfiles-01.htm>`_.
+
+Euler CSV for thermal analysis
 ------------------------------
 
-``Plan.load(path, load_timeseries=True)`` reads linked sibling attitude and orbit
-sidecars; normal plan-only loading remains the default. Sidecar names cannot
-escape the plan's directory. A reloaded fine series can be exported without the
-original live executor.
+The CSV contains the following columns: UTC timestamp, elapsed seconds, Euler
+angles 1/2/3 in degrees, a gimbal-lock flag, and the angles of body +X and +Z
+to the Sun.
 
-Rotation round trips, quaternion conventions, frame transforms, gimbal lock,
-interrupted trajectories and a real planned flight are covered by library tests.
-Import settings and axis/origin assumptions still need checking in the intended
-STK and thermal-analysis installations.
+Euler angle convention
+~~~~~~~~~~~~~~~~~~~~~~
+
+Rotations are intrinsic: a physical rotation about X, then Y', then Z''.
+Precisely, ``R_reference_to_body = (Rx(a) Ry(b) Rz(c)).T``.
+
+At gimbal lock the third angle is zero and the other two preserve the same
+orientation. The decomposition uses ``atan2`` near the singularity to avoid
+loss of precision from ``asin``. Euler angles themselves can wrap or change
+branch at a singularity. The underlying quaternion remains continuous.
+
+Sun angles
+~~~~~~~~~~
+
+The Sun direction is linearly interpolated from the orbit ephemeris and
+expressed using the executed quaternion. Missing Sun vectors produce empty
+angle columns.
+
+Importing into a thermal tool
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Map the declared columns and rotation convention when importing into the
+thermal-analysis tool. Validate that import in the intended STK/Thermal Desktop
+installation before using the files as release evidence. A numerical round
+trip does not show that a downstream application imports the files correctly.

@@ -78,7 +78,7 @@ Then open http://127.0.0.1:8000 in your browser.
 - `fault_management.rst` - Fault management
 - `predictive_idle_safety.md` - Predictive idle safety
 - `attitude_execution.rst` - Physical attitude execution
-- `attitude_exports.rst` - Executed attitude exports
+- `engineering_attitudes.rst` - Executed attitude exports
 - `momentum.rst` - Stored momentum
 - `radiator_shadowing.rst` - Radiator thermal modelling and panel shadowing
 - `target_of_opportunity.rst` - Targets of Opportunity
