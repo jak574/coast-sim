@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from math import isinf
 
 from pydantic import Field, field_serializer, field_validator, model_validator
 
@@ -131,14 +132,24 @@ def group_start_wait(
     a window of its own is not held this way: its window says when it runs.
 
     The time returned is the earliest at which the first such window no
-    longer holds the group: when the request can go first, or just after
-    the window has closed.
+    longer holds the group: when the request can go first. A request that
+    begins by ``closes`` may still be collecting after it, so the group
+    does not begin between the two either. Where no time is known from
+    which the request can go first (``precedes_from`` is infinite, as in
+    dispatch, which selects the request itself once its window is open),
+    the group waits until just after the window has closed.
     """
     wait: float | None = None
     for precedes_from, closes in windows:
-        if start < precedes_from and start <= closes < start + needed:
-            until = min(precedes_from, closes + 1.0)
-            wait = until if wait is None else min(wait, until)
+        if start >= precedes_from or closes >= start + needed:
+            continue
+        if isinf(precedes_from):
+            if start > closes:
+                continue
+            until = closes + 1.0
+        else:
+            until = precedes_from
+        wait = until if wait is None else min(wait, until)
     return wait
 
 

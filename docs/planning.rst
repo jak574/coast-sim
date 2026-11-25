@@ -1010,6 +1010,10 @@ request's window cannot be moved, so the group waits:
   not visible.
 * The group waits where a request's window closes before the group would end and
   the request cannot be observed before the group begins.
+* A planner leaves the request room for a whole visit, or its shortest snapshot,
+  from when its window opens, and then for the longest slew to the group. A visit
+  that begins by the end of its window may still be collecting after it, so the
+  group does not begin just after the window has closed.
 * The wait ends when the request has been observed or its window has closed.
 * Where time-bound windows keep closing within the time the group takes, the group
   does not begin. Give such a group a ``window_start`` or a ``window_deadline``: a

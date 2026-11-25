@@ -395,9 +395,9 @@ TIMED = 200
 WINDOW = (T0 + 30 * MIN, T0 + 60 * MIN)
 
 
-def _timed_against_group(config: MissionConfig) -> list[Pointing]:
+def _timed_against_group(config: MissionConfig, minutes: int = 20) -> list[Pointing]:
     """The three members, two hours of science together and observable from
-    the start, and one visit of twenty minutes that has to begin between 30
+    the start, and one visit of ``minutes`` that has to begin between 30
     and 60 minutes in and ranks below every member."""
     members = _targets(config)[:3]
     timed = Pointing(
@@ -408,18 +408,18 @@ def _timed_against_group(config: MissionConfig) -> list[Pointing]:
         dec=PATCH[4][1],
         merit=30,
         fom=30,
-        ss_min=20 * MIN,
-        ss_max=20 * MIN,
+        ss_min=minutes * MIN,
+        ss_max=minutes * MIN,
         visit_windows=[VisitWindow(start=WINDOW[0], deadline=WINDOW[1])],
     )
     return [*members, timed]
 
 
-def _assert_window_kept(plan: Plan) -> None:
+def _assert_window_kept(plan: Plan, minutes: int = 20) -> None:
     """The timed visit was collected whole, beginning in its window, and the
     group ran in order after it with nothing between its members."""
     timed = [e for e in _science(plan) if int(e.obsid) == TIMED]
-    assert sum(float(e.exposure or 0) for e in timed) == 20 * MIN
+    assert sum(float(e.exposure or 0) for e in timed) == minutes * MIN
     assert WINDOW[0] <= float(timed[0].collection_begin) <= WINDOW[1]
     _assert_consecutive(plan, ORDER)
     order = _order(plan)
@@ -453,6 +453,19 @@ class TestTimeBoundRequestsKeepTheirWindows:
         run.step_size = 60
         assert run.calc()
         assert run.validate_plan_matches_execution() == []
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_the_planners_leave_room_for_a_visit_longer_than_its_window(
+        self, kind: str
+    ) -> None:
+        """The visit is an hour and has to begin within half an hour, so it
+        is still collecting after its window has closed. The group begins
+        after the visit can have ended, not just after the window closes:
+        the visit would otherwise have no room and be lost."""
+        config = _config()
+        targets = _timed_against_group(config, minutes=60)
+        plan = _planner(kind, config, targets).schedule()
+        _assert_window_kept(plan, minutes=60)
 
     def test_a_group_with_a_window_of_its_own_is_not_held(self) -> None:
         """Its window says when it runs, so it begins at once, as before."""
