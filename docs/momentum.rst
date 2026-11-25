@@ -366,21 +366,34 @@ crosses any inertial attitude once an orbit, for example. The dump then waits fo
 the attitude, and neither dispatch nor the planners stop:
 
 * Dispatch moves the dump to the first time the attitude can be held for the whole
-  firing, and observes until then. If the slew or the firing is still not allowed
-  at that time, the dump waits a step and tries again.
-* The planners reserve the firing at the first time the attitude can be held for
-  it, one longest slew later, so that the slew to the attitude is flown while the
-  attitude is allowed. Where the firing attitude cannot be reached from what
-  precedes the dump, because the spacecraft can neither stay where it is nor wait
-  at the firing attitude, the plan holds a safe attitude just before the dump. The
-  hold is an entry named ``Hold before thruster dump``, at an attitude chosen as
-  for any activity that holds the attitude it finds.
+  firing, clear of any activity still to begin. If the slew or the firing is still
+  not allowed at that time, the dump waits a step and tries again. Only one dump
+  waits at a time, and observing goes on until it, as long as the forecast over
+  each observation stays under the wheels' capacity.
+* The planners reserve the firing when the slew to the attitude arrives, where the
+  attitude can be held for the firing from then. Otherwise they reserve it at the
+  first time the attitude can be held for it, one longest slew later, so that the
+  slew to the attitude is flown while the attitude is allowed. Where the firing
+  attitude cannot be reached from what precedes the dump, because the spacecraft
+  can neither stay where it is nor wait at the firing attitude, the plan holds a
+  safe attitude just before the dump. The hold is an entry named
+  ``Hold before thruster dump``, at an attitude chosen as for any activity that
+  holds the attitude it finds.
+* Where a mandatory activity or a pass holds the firing time chosen, a planner
+  looks for the next firing time after it.
+* Where the attitude cannot be held for a firing in the rest of the run or the
+  plan, no dump is made, as for a dump that would end past the horizon. The log
+  says so, and the next run or plan calls for it again. Observing goes on within
+  the capacity.
 * The wait is not bounded by the wheels' capacity in dispatch. If the wheels reach
   their capacity while a dump waits, the capacity fault is recorded as for any run
   in which a dump comes too late. The planners look no later than where their
   forecast reaches the capacity.
 * In safe mode no turn is made: a dump, or any activity with a fixed attitude, that
-  comes due in safe mode is held at the attitude safe mode has.
+  comes due in safe mode is held at the attitude safe mode has. Where safe mode
+  begins while such an activity slews to its attitude or holds it, the activity
+  ends there and is recorded as far as it went. A dump that ends early unloads
+  nothing.
 
 The rest of this section describes when a thruster dump happens. Dispatch, which
 selects observations as a queue simulation runs, calls for dumps from the momentum

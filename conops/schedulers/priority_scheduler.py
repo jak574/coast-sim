@@ -599,6 +599,10 @@ class PriorityScheduler:
         self._safe_hold_activities: dict[int, ScheduledActivity] = {}
         """The safe holds the plan placed after entries whose attitude
         cannot be held, by obsid (see :meth:`_park_tail`)."""
+        self._firing_not_before = -inf
+        """The earliest a dump at a fixed firing attitude may begin firing in
+        this schedule: after a firing time the plan could not reserve one at
+        (see :meth:`_build_with_dumps`)."""
         self._dump_waits: dict[int, ScheduledActivity] = {}
         """For a reserved dump that has to wait for its fixed firing
         attitude, by the dump's obsid, the hold reserved before it (see
@@ -790,6 +794,9 @@ class PriorityScheduler:
         self._sequence_pointings.clear()
         self._momentum_cache: SpanCache = {}
         self._momentum_seed = None
+        self._firing_not_before = -inf
+        once = build
+        build = lambda: self._build_with_dumps(once)  # noqa: E731
         plan = build()
         forecast = self._momentum
         if forecast is None:
@@ -914,6 +921,45 @@ class PriorityScheduler:
             f"{_MAX_DUMPS} thruster dumps reserved; the plan may still fill the wheels",
         )
         return plan
+
+    def _build_with_dumps(self, build: Callable[[], Plan]) -> Plan:
+        """Build the plan with the dumps reserved so far. Where a dump at a
+        fixed firing attitude, or the hold before it, cannot be reserved at
+        the firing time chosen, because a mandatory activity or a pass holds
+        that time for one, the dump is taken out and the plan built without
+        it. The next pass calls for it again and :meth:`_firing_start` gives
+        it the next firing time, or none where no later one fits; before,
+        the plan failed with an ``ActivitySchedulingError``."""
+        while True:
+            try:
+                return build()
+            except ActivitySchedulingError as error:
+                failed = error.activity
+                dump = next(
+                    (
+                        d
+                        for d in self.dumps
+                        if d.attitude.fixed_pointing is not None
+                        and (
+                            d.obsid == failed.obsid
+                            or self._dump_waits.get(d.obsid or -1) is failed
+                        )
+                    ),
+                    None,
+                )
+                if dump is None:
+                    raise
+                self._log(
+                    dump.begin,
+                    "The thruster dump cannot be reserved with its firing at "
+                    f"{unixtime2date(dump.begin)} ({error.reason}); a later "
+                    "firing is looked for",
+                    dump.obsid,
+                )
+                self._firing_not_before = dump.begin + dump.duration_seconds
+                self.dumps = [d for d in self.dumps if d is not dump]
+                if dump.obsid is not None:
+                    self._dump_waits.pop(dump.obsid, None)
 
     def _dump_activity(self, begin: float, obsid: int) -> ScheduledActivity:
         """Reserve a dump's firing after any configured ingress from ``begin``."""
@@ -1173,18 +1219,44 @@ class PriorityScheduler:
         the attitude it has. The firing begins one longest slew after the
         hold ends, so the slew to the firing attitude is flown wholly while
         that attitude is allowed.
+
+        A firing time the plan could not reserve the dump at is not tried
+        again (see :meth:`_build_with_dumps`): the search goes on after it.
+        Where no firing fits before the horizon or the capacity, the time
+        returned is the horizon's end, and the dump is not reserved.
         """
         self._dump_waits.pop(obsid, None)
         bound = self._longest_slew_steps()
+        not_before = self._firing_not_before
+        if (
+            arrival >= not_before
+            and self.ctx.first_hold_violation(
+                fixed, arrival, arrival + duration, ACSMode.DESAT
+            )
+            is None
+        ):
+            return arrival
+        # A later firing is reached from a hold at a safe attitude, by a
+        # slew of up to the longest slew's time, so the attitude has to be
+        # allowed for that long before the firing as well. The firing
+        # itself, not the start of that slew, is what the latest start
+        # bounds.
         legal = self.ctx.first_legal_hold(
             fixed,
-            arrival,
+            max(arrival, not_before - bound),
             duration + bound,
             ACSMode.DESAT,
-            self._dump_latest_start(called, duration),
+            self._dump_latest_start(called, duration) - bound,
         )
-        if legal is None or legal <= arrival:
-            return arrival
+        if legal is None:
+            self._log(
+                called,
+                "The dump's firing attitude cannot be held for a firing in the "
+                "rest of this plan; the dump is left to the next plan",
+                obsid,
+            )
+            # Past the horizon: not reserved, as for any dump that ends past it.
+            return self.ctx.uend
         self._log(
             called,
             "The dump's firing attitude cannot be held from "

@@ -319,6 +319,9 @@ class QueueDITL(DITLMixin, DITLStats):
         self._dump_pending = False
         """A thruster dump called for at the planning level, to begin once the
         observation under way has ended and before another starts."""
+        self._dump_out_of_reach = False
+        """Whether a dump was called for whose fixed firing attitude cannot
+        be held for a firing in the rest of the run: none is called for again."""
         """How many thruster dumps dispatch has called for."""
         self._sequence: _SequenceRun | None = None
         """The sequence visit under way, if the observation is one of its steps."""
@@ -1307,6 +1310,29 @@ class QueueDITL(DITLMixin, DITLStats):
             changed = True
         elif (
             active is not None
+            and self._activity_slew is not None
+            and not active.safe_hold
+            and self.acs.in_safe_mode
+        ):
+            # Safe mode began while the activity slewed to its attitude or
+            # held it. Safe mode takes the spacecraft to its own attitude, so
+            # the rest of the hold is not flown: the activity stops here and
+            # is recorded as far as it went, not as held at its attitude to
+            # its end. A dump that stops early unloads nothing.
+            self.log.log_event(
+                utime=utime,
+                event_type="ACTIVITY",
+                description=(
+                    f"Safe mode began during scheduled activity {active.name}: "
+                    "the hold at its attitude ends here"
+                ),
+                obsid=active.obsid,
+                acs_mode=self.acs.acsmode,
+            )
+            self._end_activity(utime)
+            changed = True
+        elif (
+            active is not None
             and active.safe_hold
             and utime >= self._activity_hold_begin
         ):
@@ -1650,7 +1676,6 @@ class QueueDITL(DITLMixin, DITLStats):
             activity.obsid in self._automatic_dumps
             and activity.attitude.kind != "inherited"
             and not self.acs.in_safe_mode
-            and utime + activity.duration_seconds < self.uend
             and not self._explicit_attitude_allowed(activity, utime)
         ):
             # A dump the simulation called for has no start it must keep.
@@ -1696,7 +1721,7 @@ class QueueDITL(DITLMixin, DITLStats):
         tracker = self._stored_momentum_tracker
         if level is None or tracker is None:
             return
-        if any(a.desaturation for a in self._unstarted_activities()):
+        if self._awaited_dump() is not None or self._dump_out_of_reach:
             return
         stored = tracker.stored_momentum_load_n_m_s
         capacity = self.config.spacecraft_bus.attitude_control.stored_momentum.total_capacity_n_m_s
@@ -1754,10 +1779,22 @@ class QueueDITL(DITLMixin, DITLStats):
             self._dump_pending = False
             self._add_dump(utime)
 
+    def _awaited_dump(self) -> ScheduledActivity | None:
+        """The thruster dump called for and still to begin, if there is one."""
+        return next((a for a in self._unstarted_activities() if a.desaturation), None)
+
     def _add_dump(self, begin: float) -> None:
         """Add a thruster dump due at ``begin`` to the activities."""
         dump = self.config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump
         assert dump is not None
+        if self._awaited_dump() is not None or self._dump_out_of_reach:
+            # One at a time: the dump still to begin empties the wheels for
+            # whatever calls for one meanwhile. A dump can wait for its
+            # firing attitude, and each observation refused in that time
+            # would otherwise add another. A dump whose firing attitude
+            # cannot be held again in this run is not called for again.
+            self._dump_pending = False
+            return
         obsid = DESATURATION_OBSID + self._desaturations
         fixed = dump.attitude.fixed_pointing
         if fixed is not None and not self.acs.in_safe_mode:
@@ -1775,21 +1812,70 @@ class QueueDITL(DITLMixin, DITLStats):
                 obsid=obsid,
             )
             arrival = ctx.ceil_step(float(slew.slewend))
-            legal = ctx.first_legal_hold(
-                fixed,
-                arrival,
-                dump.duration_seconds,
-                ACSMode.DESAT,
-                self.uend - dump.duration_seconds,
+            # The slew to the firing attitude and the firing keep clear of
+            # each activity still to begin, with the time of a slew of this
+            # length on either side: an activity's start is not the dump's
+            # to take, and the dump has no start it must keep.
+            margin = arrival - start + self.step_size
+            others = sorted(
+                (
+                    (
+                        a.begin - margin,
+                        a.latest_start + a.duration_seconds + margin,
+                    )
+                    for a in self._unstarted_activities()
+                    if not a.desaturation
+                ),
             )
-            if legal is not None and legal > arrival:
+            last = self.uend - dump.duration_seconds
+            search = arrival
+            while True:
+                legal = ctx.first_legal_hold(
+                    fixed, search, dump.duration_seconds, ACSMode.DESAT, last
+                )
+                if legal is None:
+                    break
+                taken = next(
+                    (
+                        free
+                        for busy, free in others
+                        if busy < legal + dump.duration_seconds
+                        and legal - (arrival - start) < free
+                    ),
+                    None,
+                )
+                if taken is None:
+                    break
+                # The slew to the attitude begins once the activity is over.
+                search = ctx.ceil_step(max(taken + (arrival - start), legal + 1.0))
+            if legal is None:
+                # The attitude cannot be held for a firing in what is left
+                # of the run. The dump is left to the next run, as one that
+                # falls past the horizon is; science goes on within the
+                # capacity (see _within_momentum).
+                self._dump_out_of_reach = True
+                self._dump_pending = False
                 self.log.log_event(
                     utime=begin,
                     event_type="MOMENTUM",
                     description=(
-                        "The dump's firing attitude cannot be held from "
-                        f"{unixtime2date(arrival)}; the firing begins at "
-                        f"{unixtime2date(legal)}"
+                        "The dump's firing attitude cannot be held for a firing "
+                        "in the rest of this run: no thruster dump before "
+                        f"{unixtime2date(self.uend)}"
+                    ),
+                    obsid=obsid,
+                    acs_mode=self.acs.acsmode,
+                )
+                return
+            if legal > arrival:
+                self.log.log_event(
+                    utime=begin,
+                    event_type="MOMENTUM",
+                    description=(
+                        "The dump cannot fire from "
+                        f"{unixtime2date(arrival)}, where its firing attitude "
+                        "cannot be held or an activity is due; the firing "
+                        f"begins at {unixtime2date(legal)}"
                     ),
                     obsid=obsid,
                     acs_mode=self.acs.acsmode,
@@ -1852,6 +1938,31 @@ class QueueDITL(DITLMixin, DITLStats):
         )
         if len(norms) == 0 or norms.max() < level:
             return True
+        awaited = self._awaited_dump()
+        if (awaited is not None and awaited.begin > utime) or self._dump_out_of_reach:
+            # A dump is called for and waits, for its firing attitude or for
+            # its start, or none can fire in the rest of the run. Science
+            # goes on, within the capacity.
+            if norms.max() < capacity:
+                return True
+            self.log.log_event(
+                utime=utime,
+                event_type="MOMENTUM",
+                description=(
+                    f"Stored momentum would reach the {capacity} N m s capacity "
+                    f"during observation {ppt.obsid}, before "
+                    + (
+                        f"the thruster dump due at {unixtime2date(awaited.begin)}"
+                        if awaited is not None
+                        else "a thruster dump can fire"
+                    )
+                    + ": not observed"
+                ),
+                obsid=ppt.obsid,
+                acs_mode=self.acs.acsmode,
+            )
+            self._retry_fetch_without_current_ppt(utime, ra, dec)
+            return False
         visit = self._sequence is not None
         name = (
             f"the visit of {self._sequence.parent.obsid}"
