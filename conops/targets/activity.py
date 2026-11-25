@@ -39,9 +39,10 @@ DESATURATION_OBSID = 997000
 SAFE_HOLD_OBSID = 996000
 """Obsids given to the holds a planner reserves at a safe attitude after an
 entry whose own attitude cannot be held until the next one, in order."""
-DUMP_WAIT_OBSID = 997500
+DUMP_WAIT_OBSID = 995000
 """Obsids given to the holds a planner reserves before a thruster dump that
-has to wait for its firing attitude, in the order of the dumps."""
+has to wait for its firing attitude, in the order of the dumps. They lie
+below the dumps' own, so the two never meet however many dumps there are."""
 
 
 class ScheduledActivity(BaseModel):
