@@ -137,7 +137,8 @@ communications default. Under this policy the link is handed over from one
 station to the next, and overlapping station windows are all kept.
 
 :class:`~conops.simulation.PassTimes` retains all available visibility windows,
-including their overlapping tails and windows shorter than eight minutes. It then
+including their overlapping tails and windows shorter than the whole-pass
+minimum. It then
 chooses one station at a time, as follows:
 
 * It selects the station with the highest instantaneous effective downlink rate.
@@ -177,8 +178,9 @@ Scheduled passes
 """"""""""""""""
 
 Set ``contact_policy="scheduled"`` to use whole-pass booking instead.
-:class:`~conops.simulation.PassTimes` then applies its eight-minute minimum
-and selects whole non-overlapping passes. It prefers passes by downlink volume,
+:class:`~conops.simulation.PassTimes` then drops visibility windows shorter than
+``min_pass_seconds`` (default 480, eight minutes) and selects whole
+non-overlapping passes. It prefers passes by downlink volume,
 then duration, then earlier start. Range-dependent effective rates contribute to
 that volume.
 
@@ -301,6 +303,10 @@ system. It has these fields:
 * ``contact_policy``: ``continuous`` (default) for station handovers without
   dropping overlaps, or ``scheduled`` for whole-pass booking. Fixed antennas
   always use tracking passes.
+* ``min_pass_seconds``: Shortest visibility window booked as a whole pass, for fixed
+  antennas and the ``scheduled`` policy (default 480). The window length is counted on
+  the ephemeris steps. Shorter passes return more data but each takes science time for
+  its slews. The ``continuous`` policy keeps windows of any length
 * ``acquisition_seconds``: Seconds to acquire the link during passes without
   spacecraft tracking (default 0). No data is downlinked during acquisition.
 * ``handover_seconds``: Seconds to switch the link straight from one ground station to

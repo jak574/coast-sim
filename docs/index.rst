@@ -25,6 +25,7 @@ constraints before launch.
    predictive_idle_safety
    attitude_execution
    attitude_exports
+   engineering_attitudes
    momentum
    radiator_shadowing
    target_of_opportunity

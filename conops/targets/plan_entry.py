@@ -207,6 +207,7 @@ class PlanEntry(BaseModel):
             "track_end_ra",
             "track_end_dec",
             "track_end_roll",
+            "contact_ingress",
         }
     )
     """The fields a run fills in as it schedules and executes an entry; a
@@ -371,6 +372,9 @@ class PlanEntry(BaseModel):
     track_end_ra: float | None = None
     track_end_dec: float | None = None
     track_end_roll: float | None = None
+    contact_ingress: Literal["reposition"] | None = None
+    """How a contact's ingress is flown where not as a ``PASS`` slew: as a
+    reposition, in ``SLEWING`` and then holding in ``IDLE`` until the contact."""
     saa: SAA | None = Field(default=None, exclude=True)
     merit: float = 101
     step: str | None = Field(
@@ -1213,6 +1217,37 @@ class PlanEntry(BaseModel):
         if cursor < end:
             missing.append((cursor, end))
         return missing
+
+    def visibility_in(
+        self,
+        begin: float | int | str | datetime,
+        end: float | int | str | datetime,
+    ) -> list[list[float]]:
+        """Visibility windows within ``[begin, end]`` only, leaving
+        :attr:`windows` and the windows already known untouched.
+
+        Only the ephemeris samples inside the interval, plus one sample of halo
+        on each side, are evaluated, so the result equals the whole-ephemeris
+        windows clipped to the interval. Bounds are UTC datetimes, ISO strings
+        or Unix seconds.
+        """
+        assert self.ephem is not None, "Ephemeris must be set to calculate visibility"
+        first, last = unixtime_from(begin), unixtime_from(end)
+        if not (np.isfinite(first) and np.isfinite(last)) or first > last:
+            raise ValueError("Visibility bounds must be finite and begin <= end")
+        times = list(self.ephem.timestamp)
+        grid = [t.timestamp() for t in times]
+        left = max(0, bisect_left(grid, first) - 1)
+        right = min(len(grid), bisect_right(grid, last) + 1)
+        held = self.windows
+        try:
+            self._evaluate_visibility(times[left:right])
+            found = self.windows
+        finally:
+            self.windows = held
+        return [
+            [max(a, first), min(b, last)] for a, b in found if a <= last and b >= first
+        ]
 
     @staticmethod
     def _merge_visibility(windows: Sequence[Sequence[float]]) -> list[list[float]]:

@@ -386,6 +386,10 @@ class SchedulingContext:
         Mounted instruments are checked with science and body constraints in
         their own frames, as DITL records them.
         """
+        if entry.forbids_eclipse() is True and self.config.constraint.in_eclipse(
+            0, 0, utime
+        ):
+            return "science_eclipse"
         if entry.moves:
             attitude = entry.target_body_attitude(entry.roll, at=utime)
         if entry.forbids_eclipse() is True and self.config.constraint.in_eclipse(

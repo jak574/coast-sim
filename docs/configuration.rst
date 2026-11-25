@@ -2222,13 +2222,19 @@ places no restriction on observing in eclipse.
 The resolved policy for an observation is available through
 ``config.science_in_eclipse_for(obsid)``. The same policy is shared by request
 visibility, dispatch, all three planners and rolling replanning, and it covers
-Targets of Opportunity and moving targets. A protected sequence is a target's
+Targets of Opportunity and moving targets. ``Constraint.in_science_constraint``,
+``science_constraint_name`` and ``in_science_constraint_batch`` apply the mission
+default unless they are given a policy. Pass
+``science_in_eclipse=config.science_in_eclipse_for(obsid)`` to check one request
+as the planners do. A protected sequence is a target's
 observation sequence, whose steps are observed in order as one visit that is
 not cut short. A protected sequence must fit wholly inside a permitted window. Setup and cleanup hold times must also fit
 inside that window. The slew into the window may start earlier if the slew
 rules permit it.
 
-Both the ephemeris's natural eclipses and ``eclipse_intervals`` apply. The
+Both the ephemeris's natural eclipses and ``eclipse_intervals`` apply. A natural
+eclipse is the umbra only, as it is for the panel and radiator constraints: the
+spacecraft counts as sunlit in the penumbra. The
 boundaries of natural eclipses use rust-ephem's ephemeris resolution. Injected
 intervals use half-open bounds, and their boundaries can fall between
 simulation ticks. Science credit and data collection are clipped before a
@@ -2267,6 +2273,8 @@ roll. Two things follow from this:
   optimiser takes the power-optimal roll.
 
 Charging, safe-mode and idle attitudes take the power-optimal roll regardless.
+
+A :class:`~rust_ephem.constraints.StrayLightConstraint` (rust_ephem 0.18 or later) on ``science_constraint`` is roll-dependent in the same way: it is checked at each attitude's roll and steers the roll optimiser. Given no roll, rust_ephem evaluates it at one nominal attitude, so visibility windows leave it out; in an OR with other rules the other rules still shape the windows. Testing a roll takes a light integral, far more than a proximity rule. It cannot be used on a telescope-local constraint, which must be roll-independent.
 
 .. code-block:: python
 

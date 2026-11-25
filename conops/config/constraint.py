@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -222,7 +222,11 @@ class Constraint(ConfigModel):
     )
     science_in_eclipse: bool = Field(
         default=True,
-        description="Whether observations may run in eclipse; categories can override this default",
+        description=(
+            "Whether observations may run in eclipse; categories can override "
+            "this default. A natural eclipse is the umbra only: the penumbra "
+            "counts as sunlit"
+        ),
     )
     eclipse_intervals: list[tuple[float, float]] = Field(
         default_factory=list,
@@ -687,10 +691,7 @@ class Constraint(ConfigModel):
             self.orbit_constraint,
             self.anti_sun_constraint,
         ]
-        if self.science_constraint is not None and not self._contains_boresight_offset(
-            self.science_constraint
-        ):
-            components.append(self.science_constraint)
+        components.append(self._roll_free_part(self.science_constraint))
         return self._combine_constraints(components)
 
     @cached_property
@@ -703,7 +704,8 @@ class Constraint(ConfigModel):
         """Combined constraint from roll-independent components only.
 
         Excludes star-tracker constraints (which are roll-dependent via
-        BoresightOffsetConstraint) so that the result can be passed to
+        BoresightOffsetConstraint) and stray light (which is evaluated at one
+        nominal roll when none is given) so that the result can be passed to
         ``ConstraintConfig.evaluate()`` without triggering the "visible only
         if visible at ALL rolls" semantics that ``evaluate(target_roll=None)``
         applies to roll-dependent constraints.
@@ -725,43 +727,76 @@ class Constraint(ConfigModel):
             self.anti_sun_constraint,
         ]
         components.extend(
-            constraint
+            self._roll_free_part(constraint)
             for constraint in (
                 self.science_constraint,
                 self.safety_constraint,
                 self.ground_contact_constraint,
             )
-            if constraint is not None
-            and not self._contains_boresight_offset(constraint)
         )
         return self._combine_constraints(components)
 
     @cached_property
     def science_constraint_roll_dependent(self) -> bool:
-        """Whether the explicit science constraint depends on the roll: a
-        boresight offset or a field-of-view polygon somewhere in its tree. A
-        polygon, as a stray-light patch beside the boresight is written,
-        turns with the instrument, and ``roll_range`` does not sweep it, so
-        the roll optimiser tests such a constraint roll by roll."""
-        return self.science_constraint is not None and (
-            self._contains_boresight_offset(self.science_constraint)
-            or self._contains_field_of_view(self.science_constraint)
+        """Whether the explicit science constraint depends on the roll."""
+        return self.science_constraint is not None and self._tree_contains(
+            self.science_constraint, self._is_roll_dependent_node
         )
 
     @staticmethod
-    def _contains_field_of_view(constraint: ConstraintConfig) -> bool:
-        """Return whether a constraint tree contains a field-of-view polygon."""
+    def _is_roll_dependent_node(constraint: ConstraintConfig) -> bool:
+        """Whether this node's result depends on the roll."""
+        return (
+            getattr(constraint, "type", None)
+            in {"boresight_offset", "solar_roll", "stray_light"}
+            or getattr(constraint, "fov_polygon", None) is not None
+        )
+
+    @staticmethod
+    def _is_stray_light(constraint: ConstraintConfig) -> bool:
+        """Whether this node is a rust_ephem stray-light constraint.
+
+        Matched by type name, which releases without the class also accept.
+        """
+        return getattr(constraint, "type", None) == "stray_light"
+
+    @staticmethod
+    def _roll_free_part(constraint: ConstraintConfig | None) -> ConstraintConfig | None:
+        """The part of a tree that can be evaluated without a roll, if any.
+
+        A tree holding a boresight offset has none. Stray light given no roll is
+        evaluated at its nominal attitude, not at any roll, so a tree holding it
+        has none either, unless it is an OR: each other member is then a
+        violation whatever the roll, and those members are kept.
+        """
+        if constraint is None or Constraint._contains_boresight_offset(constraint):
+            return None
+        if not Constraint._tree_contains(constraint, Constraint._is_stray_light):
+            return constraint
+        if isinstance(constraint, OrConstraint):
+            return Constraint._combine_constraints(
+                [Constraint._roll_free_part(c) for c in constraint.constraints]
+            )
+        return None
+
+    @staticmethod
+    def _tree_contains(
+        constraint: ConstraintConfig, leaf: Callable[[ConstraintConfig], bool]
+    ) -> bool:
+        """Return whether any node of a constraint tree satisfies ``leaf``."""
+        if leaf(constraint):
+            return True
         if isinstance(constraint, NotConstraint):
-            return Constraint._contains_field_of_view(constraint.constraint)
+            return Constraint._tree_contains(constraint.constraint, leaf)
         if isinstance(
             constraint,
             (AndConstraint, OrConstraint, XorConstraint, AtLeastConstraint),
         ):
             return any(
-                Constraint._contains_field_of_view(subconstraint)
+                Constraint._tree_contains(subconstraint, leaf)
                 for subconstraint in constraint.constraints
             )
-        return getattr(constraint, "fov_polygon", None) is not None
+        return False
 
     @staticmethod
     def _contains_boresight_offset(constraint: ConstraintConfig) -> bool:
@@ -894,6 +929,11 @@ class Constraint(ConfigModel):
             (unixtime_from(start), unixtime_from(end))
             for start, end in self.eclipse_intervals
         ]
+
+    def _science_allowed_in_eclipse(self, override: bool | None) -> bool:
+        """The eclipse observing policy to apply: ``override`` where one is
+        given, else the mission default."""
+        return self.science_in_eclipse if override is None else override
 
     def in_eclipse_interval(self, time: float) -> bool:
         """Whether ``time`` falls in an interval given as eclipse."""
@@ -1125,9 +1165,21 @@ class Constraint(ConfigModel):
         utime: float,
         target_roll: float | None = None,
         acs_mode: ACSMode | int | None = None,
+        *,
+        science_in_eclipse: bool | None = None,
     ) -> bool:
-        """Check imaging-quality and power-generation constraints."""
-        if not self.science_in_eclipse and self.in_eclipse(ra, dec, utime):
+        """Check imaging-quality and power-generation constraints.
+
+        ``science_in_eclipse`` is the eclipse observing policy to apply.
+        None applies the mission default, :attr:`science_in_eclipse`. An
+        observation category can override that default, and this class
+        does not hold the categories, so for one request pass
+        ``config.science_in_eclipse_for(obsid)`` to get the answer the
+        planners and dispatch use for it.
+        """
+        if not self._science_allowed_in_eclipse(science_in_eclipse) and (
+            self.in_eclipse(ra, dec, utime)
+        ):
             return True
         return in_attitude_constraint_scopes(
             self,
@@ -1227,9 +1279,19 @@ class Constraint(ConfigModel):
         utime: float,
         target_roll: float | None = None,
         acs_mode: ACSMode | int | None = None,
+        *,
+        science_in_eclipse: bool | None = None,
     ) -> str | None:
-        """Return the first violated science/scheduling constraint name."""
-        if not self.science_in_eclipse and self.in_eclipse(ra, dec, utime):
+        """Return the first violated science/scheduling constraint name.
+
+        ``science_in_eclipse`` is the eclipse observing policy to apply:
+        None for the mission default, or a request's own from
+        ``config.science_in_eclipse_for(obsid)`` (see
+        :meth:`in_science_constraint`).
+        """
+        if not self._science_allowed_in_eclipse(science_in_eclipse) and (
+            self.in_eclipse(ra, dec, utime)
+        ):
             return "science_eclipse"
         return science_attitude_constraint_name(
             self, ra, dec, utime, target_roll=target_roll, acs_mode=acs_mode
@@ -1403,8 +1465,16 @@ class Constraint(ConfigModel):
         decs: list[float],
         utime: float,
         target_rolls: list[float] | None = None,
+        *,
+        science_in_eclipse: bool | None = None,
     ) -> npt.NDArray[np.bool_]:
-        """Check imaging-quality and power-generation constraints."""
+        """Check imaging-quality and power-generation constraints.
+
+        ``science_in_eclipse`` is the eclipse observing policy to apply to
+        every pointing: None for the mission default, or a request's own
+        from ``config.science_in_eclipse_for(obsid)`` (see
+        :meth:`in_science_constraint`).
+        """
         result = self._in_constraint_batch_for_components(
             ras,
             decs,
@@ -1422,7 +1492,9 @@ class Constraint(ConfigModel):
             target_rolls=target_rolls,
         )
 
-        if not self.science_in_eclipse and self.in_eclipse(0, 0, utime):
+        if not self._science_allowed_in_eclipse(science_in_eclipse) and (
+            self.in_eclipse(0, 0, utime)
+        ):
             return np.ones_like(result, dtype=bool)
         return result
 

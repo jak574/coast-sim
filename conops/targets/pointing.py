@@ -760,3 +760,14 @@ class MovingPointing(Pointing):
         if not self.track and self.body is not None:
             self.fetch_track()
         return super().visibility(begin=begin, end=end)
+
+    def visibility_in(
+        self,
+        begin: float | int | str | datetime,
+        end: float | int | str | datetime,
+    ) -> list[list[float]]:
+        """As :meth:`PlanEntry.visibility_in`, after the body's track is
+        looked up when none was given."""
+        if not self.track and self.body is not None:
+            self.fetch_track()
+        return super().visibility_in(begin, end)
