@@ -779,12 +779,14 @@ def test_a_dump_moves_to_a_safe_attitude_where_its_own_cannot_be_held(
     At these orbit phases the Earth's limb crosses that attitude during the
     dump, which the safety constraint forbids. Dispatch slews to a safe
     attitude for the dump, as the planners do for a block that follows what
-    precedes it; before, it held the attitude through the violation."""
+    precedes it; before, it held the attitude through the violation. The
+    starting momentum brings the dump on while the target is observed, at
+    any phase from 30 to 70 minutes."""
     begin = BEGIN + timedelta(minutes=minutes)
     end = begin + timedelta(hours=3)
     config = _config(
         capacity_n_m_s=10.0,
-        initial_momentum_body_n_m_s=(7.0, 0.0, 0.0),
+        initial_momentum_body_n_m_s=(7.6, 0.0, 0.0),
         thruster_dump=ThrusterDumpConfig(duration_seconds=600.0),
     )
     config.constraint.safety_constraint = EarthLimbConstraint(min_angle=10)
