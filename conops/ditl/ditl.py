@@ -31,6 +31,7 @@ from ..simulation.passes import Pass
 from ..simulation.roll import optimum_body_roll, optimum_instrument_roll
 from ..simulation.slew import Slew
 from ..targets import PlanEntry
+from ..targets.plan_entry import observing_constraint_of
 from .ditl_log import DITLLog
 from .ditl_mixin import DITLMixin
 from .ditl_stats import DITLStats
@@ -370,6 +371,14 @@ class DITL(DITLMixin, DITLStats):
                 if science_target is not None and science_target.uses_mounted_attitude()
                 else None
             )
+            # The target whose own attitude check applies: one on a mounted
+            # instrument, or one observed under constraints of its own.
+            checked_target = (
+                science_target
+                if science_target is not None
+                and (mounted_target is not None or science_target.has_own_constraints())
+                else None
+            )
             instrument_roll = (
                 mounted_target.roll if mounted_target is not None else roll
             )
@@ -391,7 +400,7 @@ class DITL(DITLMixin, DITLStats):
                     self.ephem,
                     telescope,
                     self.solar_panel,
-                    self.constraint,
+                    observing_constraint_of(mounted_target, self.constraint),
                     drive_state=self.acs.solar_array_drive_state,
                 )
             else:
@@ -436,8 +445,8 @@ class DITL(DITLMixin, DITLStats):
                 if self.calculate_field_of_regard
                 else None
             )
-            if mounted_target is not None:
-                all_names = mounted_target.attitude_constraint_names(
+            if checked_target is not None:
+                all_names = checked_target.attitude_constraint_names(
                     list(AttitudeConstraintScope),
                     (ra, dec, roll),
                     self.utime[i],
@@ -463,16 +472,16 @@ class DITL(DITLMixin, DITLStats):
                     )
             scopes = self.config.attitude_constraint_scopes_for_mode(mode)
             scoped_names = (
-                mounted_target.attitude_constraint_names(
+                checked_target.attitude_constraint_names(
                     scopes,
                     (ra, dec, roll),
                     self.utime[i],
                     mode,
                 )
-                if mounted_target is not None
+                if checked_target is not None
                 else []
             )
-            if mounted_target is not None:
+            if checked_target is not None:
                 scope_constraint_name = scoped_names[0] if scoped_names else None
             else:
                 scope_constraint_name = attitude_constraint_name_for_scopes(
@@ -1014,7 +1023,7 @@ class DITL(DITLMixin, DITLStats):
                     self.ephem,
                     telescope,
                     self.solar_panel,
-                    self.constraint,
+                    observing_constraint_of(entry, self.constraint),
                     drive_state=self.acs.solar_array_drive_state,
                 )
                 if telescope is not None
@@ -1024,7 +1033,7 @@ class DITL(DITLMixin, DITLStats):
                     utime,
                     self.ephem,
                     self.solar_panel,
-                    self.constraint,
+                    observing_constraint_of(entry, self.constraint),
                     drive_state=self.acs.solar_array_drive_state,
                 )
             )

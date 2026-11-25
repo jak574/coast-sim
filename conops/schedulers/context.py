@@ -41,6 +41,7 @@ from ..simulation.safe_hold import power_positive_attitudes
 from ..simulation.slew import Slew
 from ..simulation.target_tracking import target_tracking
 from ..targets import MovingPointing, PlanEntry, Pointing, ScheduledActivity
+from ..targets.plan_entry import observing_constraint_of
 from ..targets.track import TrackPoint, positions_along
 
 Attitude = tuple[float, float, float]
@@ -263,7 +264,7 @@ class SchedulingContext:
             utime,
             self.ephem,
             self.config.solar_panel,
-            self.config.constraint,
+            observing_constraint_of(target, self.config.constraint),
             telescope=target.science_telescope(),
         )
 
@@ -391,7 +392,7 @@ class SchedulingContext:
             0, 0, utime
         ):
             return "science_eclipse"
-        if entry.uses_mounted_attitude():
+        if entry.uses_mounted_attitude() or entry.has_own_constraints():
             names = entry.attitude_constraint_names(
                 self.config.attitude_constraint_scopes_for_mode(ACSMode.SCIENCE),
                 attitude,
@@ -520,7 +521,8 @@ class SchedulingContext:
         )
         stop = end if eclipse is None else eclipse
         times = [float(utime) for utime in self.steps(begin, stop)]
-        with self.config.constraint.held_over(times):
+        constraint = observing_constraint_of(entry, self.config.constraint)
+        with constraint.held_over(times):
             for utime in times:
                 if self.science_violation(entry, attitude, utime) is not None:
                     return utime
@@ -551,6 +553,7 @@ class SchedulingContext:
             getattr(target, "step", None),
             target.instrument_name,
             tuple((point.utime, point.ra, point.dec) for point in target.track),
+            target.own_constraints_key(),
         )
         cached = self._window_cache.get(key)
         if (

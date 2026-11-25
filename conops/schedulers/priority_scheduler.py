@@ -2401,7 +2401,8 @@ class PriorityScheduler:
         The time-bound requests are the targets outside the group that
         have visit windows still to visit, or a deadline. One can go before
         the group where the group begins late enough to leave it a visit,
-        or its shortest snapshot, after its window opens.
+        or its shortest snapshot, after its window opens, and then the
+        longest slew, from the request to the group.
         """
         group = request.group
         if group is None or not group.consecutive or group.has_window:
@@ -2414,13 +2415,17 @@ class PriorityScheduler:
             return None
         needed = self._group_needed.get(group.name, 0.0)
         start = float(block.entry.collection_begin or block.ready)
+        slew = self._longest_slew_steps()
         windows: list[tuple[float, float]] = []
         for target in self.targets:
             if int(target.obsid) in members or target.done:
                 continue
             if target.visit_windows:
                 windows.extend(
-                    (window.start + target.per_visit_seconds, window.deadline)
+                    (
+                        window.start + target.per_visit_seconds + slew,
+                        window.deadline,
+                    )
                     for index, window in enumerate(target.visit_windows)
                     if window.deadline >= self.ctx.ustart
                     and not target.visit_complete(index)
@@ -2429,7 +2434,8 @@ class PriorityScheduler:
                 windows.append(
                     (
                         self.ctx.ustart
-                        + snapshot_min_seconds(target, self.ctx.step_size),
+                        + snapshot_min_seconds(target, self.ctx.step_size)
+                        + slew,
                         float(target.deadline),
                     )
                 )
@@ -5073,6 +5079,9 @@ class PriorityScheduler:
                 instrument_name=pointing.instrument_name,
                 instrument_modes=dict(pointing.instrument_modes),
                 science_data=pointing.science_data,
+                science_constraint=pointing.science_constraint,
+                extra_constraint=pointing.extra_constraint,
+                stray_light_max_ratio=pointing.stray_light_max_ratio,
                 own_timing=target.own_timing,
                 track=list(pointing.track),
                 ra=ra,
@@ -5125,6 +5134,9 @@ class PriorityScheduler:
             instrument_name=first.instrument_name,
             instrument_modes=dict(target.instrument_modes),
             science_data=target.science_data,
+            science_constraint=first.science_constraint,
+            extra_constraint=first.extra_constraint,
+            stray_light_max_ratio=first.stray_light_max_ratio,
             own_timing=target.own_timing,
             track=list(first.track),
             ra=first.ra,
@@ -5174,6 +5186,9 @@ class PriorityScheduler:
             own_timing=target.own_timing,
             track=list(target.track),
             science_data=target.science_data,
+            science_constraint=target.science_constraint,
+            extra_constraint=target.extra_constraint,
+            stray_light_max_ratio=target.stray_light_max_ratio,
             ra=ra,
             dec=dec,
             roll=instrument_roll,
