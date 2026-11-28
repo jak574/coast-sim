@@ -206,7 +206,7 @@ def test_charge_trials_reconnect_an_activity_in_its_hold_mode(
     assert planner._replace_charge(candidates, index, None) is None
     trial = planner._replace_charge(candidates[: index + 2], index, None)
     assert trial is not None
-    assert hold_modes[-1] == (ACSMode.DESAT if desaturation else ACSMode.IDLE)
+    assert hold_modes[-1] == (ACSMode.DESAT if desaturation else ACSMode.ACTIVITY)
     reconnected = next(b for b in trial if b.is_activity)
     assert reconnected.ready == T0 + 2 * HOUR
     assert reconnected.end - reconnected.ready == 30 * MIN

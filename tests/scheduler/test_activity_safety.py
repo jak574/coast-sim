@@ -132,7 +132,7 @@ def test_an_unsafe_inherited_hold_is_reserved_and_executed(
         < entry.activity_hold_end
     ]
     assert len(modes) == HOUR // config.constraint.ephem.step_size
-    assert set(modes) <= {int(ACSMode.IDLE), int(ACSMode.SAA)}
+    assert set(modes) <= {int(ACSMode.ACTIVITY), int(ACSMode.SAA)}
 
 
 @pytest.mark.parametrize(
@@ -337,7 +337,7 @@ def test_a_calibration_after_tracking_holds_the_final_attitude(kind, rolling):
         < entry.activity_hold_end
     ]
     assert len(modes) == 60
-    assert set(modes) == {int(ACSMode.IDLE)}
+    assert set(modes) == {int(ACSMode.ACTIVITY)}
     assert ditl.validate_plan_matches_execution() == []
     assert entry.activity_requires_stationary
     index = next(

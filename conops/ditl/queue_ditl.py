@@ -277,7 +277,7 @@ class QueueDITL(DITLMixin, DITLStats):
 
         self.activities = assign_obsids(activities)
         """Fixed-time activities, in time order: the observation under way
-        ends when one begins, the spacecraft holds its attitude in IDLE for
+        ends when one begins, the spacecraft holds its attitude in ACTIVITY mode for
         its length, and no observation starts before it ends."""
         self._active_activity: ScheduledActivity | None = None
         self._activities_left: list[ScheduledActivity] = list(self.activities)
@@ -1125,6 +1125,12 @@ class QueueDITL(DITLMixin, DITLStats):
             and utime >= self._activity_hold_begin
         ):
             self.acs.begin_desaturation()
+        elif (
+            active is not None
+            and not active.desaturation
+            and utime >= self._activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
         if self._active_activity is None:
             self._call_for_desaturation(utime)
             due = next(
@@ -1226,7 +1232,7 @@ class QueueDITL(DITLMixin, DITLStats):
         pose = (float(ingress.endra), float(ingress.enddec), float(ingress.endroll))
         hold_begin = max(activity.begin, utime, ctx.ceil_step(float(ingress.slewend)))
         end = min(hold_begin + activity.duration_seconds, self.uend)
-        mode = ACSMode.DESAT if activity.desaturation else ACSMode.IDLE
+        mode = activity.hold_mode
         return (
             ctx.first_slew_violation(ingress, ACSMode.SLEWING) is None
             and ctx.first_hold_violation(
@@ -2104,7 +2110,7 @@ class QueueDITL(DITLMixin, DITLStats):
                     activity,
                     "its requested attitude cannot be reached in its start window",
                 )
-            mode = ACSMode.DESAT if activity.desaturation else ACSMode.IDLE
+            mode = activity.hold_mode
             end = min(hold_begin + activity.duration_seconds, self.uend)
             if (
                 ctx.first_slew_violation(ingress, ACSMode.SLEWING) is not None
@@ -2132,6 +2138,8 @@ class QueueDITL(DITLMixin, DITLStats):
         self._activity_end = self._activity_hold_begin + activity.duration_seconds
         if activity.desaturation and utime >= self._activity_hold_begin:
             self.acs.begin_desaturation()
+        if not activity.desaturation and utime >= self._activity_hold_begin:
+            self.acs.begin_activity_hold()
         if not resumed:
             self._add_activity_data(float(activity.data_gb), activity)
         description = (
@@ -2198,6 +2206,7 @@ class QueueDITL(DITLMixin, DITLStats):
             acs_mode=self.acs.acsmode,
         )
         self._active_activity = None
+        self.acs.end_activity_hold()
         if activity.desaturation:
             self.acs.end_desaturation()
             if entry.activity_finishes and not interrupted:
@@ -3504,7 +3513,11 @@ class QueueDITL(DITLMixin, DITLStats):
             self.config.spacecraft_bus.attitude_control.stored_momentum.capacity_enabled
             is True
         ):
-            if self.acs.get_mode(utime) not in (ACSMode.IDLE, ACSMode.SAA):
+            if self.acs.get_mode(utime) not in (
+                ACSMode.IDLE,
+                ACSMode.ACTIVITY,
+                ACSMode.SAA,
+            ):
                 return
             recovery = self._momentum_recovery
             self._momentum_recovery = None
@@ -3522,6 +3535,7 @@ class QueueDITL(DITLMixin, DITLStats):
         planner = self._idle_safety
         if planner is None or self.acs.get_mode(utime) not in (
             ACSMode.IDLE,
+            ACSMode.ACTIVITY,
             ACSMode.SAA,
         ):
             return

@@ -53,6 +53,7 @@ def _default_attitude_constraint_scopes() -> dict[str, list[AttitudeConstraintSc
         ],
         ACSMode.IDLE.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
         ACSMode.DESAT.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
+        ACSMode.ACTIVITY.name: [AttitudeConstraintScope.HARDWARE_SAFETY],
     }
 
 
@@ -77,6 +78,7 @@ def _normalize_attitude_constraint_scopes(
     scopes = _default_attitude_constraint_scopes()
     if value is None:
         return scopes
+    activity_configured = False
     for mode, configured_scopes in value.items():
         normalized: list[AttitudeConstraintScope] = []
         for scope in configured_scopes:
@@ -84,6 +86,10 @@ def _normalize_attitude_constraint_scopes(
             if enum_scope not in normalized:
                 normalized.append(enum_scope)
         scopes[_mode_name(mode)] = normalized
+        activity_configured |= _mode_name(mode) == ACSMode.ACTIVITY.name
+    if not activity_configured:
+        # An activity is held under the IDLE scopes unless it has its own.
+        scopes[ACSMode.ACTIVITY.name] = list(scopes[ACSMode.IDLE.name])
     return scopes
 
 

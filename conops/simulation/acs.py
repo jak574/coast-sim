@@ -149,6 +149,8 @@ class ACS:
         self.science_observation_active = False
         self.desaturation_active = False
         """Whether the held attitude is a thruster momentum dump's."""
+        self.activity_active = False
+        """Whether a scheduled activity other than a dump is being held."""
         self.in_eclipse = False  # Initialize eclipse state
         self.in_safe_mode = False  # Safe mode flag - once True, cannot be exited
 
@@ -802,6 +804,15 @@ class ACS:
         """The thruster momentum dump ends."""
         self.desaturation_active = False
 
+    def begin_activity_hold(self) -> None:
+        """A scheduled activity's hold begins: the mode is ACTIVITY once any
+        slew into it is over."""
+        self.activity_active = True
+
+    def end_activity_hold(self) -> None:
+        """The scheduled activity's hold ends."""
+        self.activity_active = False
+
     def cancel_pending_slews(self, obsid: int) -> None:
         """Drop queued target slews for ``obsid`` that have not started yet."""
         self.command_queue = [
@@ -1063,6 +1074,7 @@ class ACS:
         self.current_pass = None
         self.science_observation_active = False
         self.desaturation_active = False
+        self.activity_active = False
         self.current_slew = None
         executor = self._advance_attitude(utime)
         self.last_slew = Slew.idle_hold(self.config, *executor.state.attitude, utime)
@@ -1157,6 +1169,10 @@ class ACS:
         if self.saa is not None and self.saa.insaa(utime):
             return ACSMode.SAA
 
+        # Holding for a scheduled activity
+        if self.activity_active:
+            return ACSMode.ACTIVITY
+
         if self.last_slew is not None:
             if self._is_science_pointing(self.last_slew):
                 return (
@@ -1247,12 +1263,12 @@ class ACS:
 
     def _enforce_idle_constraint_safe_attitude(self, utime: float) -> None:
         """Fault unsafe execution; a scheduler should command recovery in advance."""
-        if self.acsmode != ACSMode.IDLE:
+        if self.acsmode not in (ACSMode.IDLE, ACSMode.ACTIVITY):
             return
         if self.current_pass is not None or self.in_safe_mode:
             return
 
-        scopes = self._idle_attitude_scopes()
+        scopes = self.config.attitude_constraint_scopes_for_mode(self.acsmode)
         if not scopes:
             return
 
@@ -1261,7 +1277,7 @@ class ACS:
 
         self.report_idle_safety_fault(
             utime,
-            f"Unsafe IDLE attitude at {unixtime2date(utime)}; "
+            f"Unsafe {self.acsmode.name} attitude at {unixtime2date(utime)}; "
             "a validated recovery slew did not start before the keepout was entered",
         )
 
@@ -1279,9 +1295,6 @@ class ACS:
             self.request_safe_mode(utime, reason=cause)
             self._process_commands(utime)
             self._update_mode(utime)
-
-    def _idle_attitude_scopes(self) -> list[AttitudeConstraintScope]:
-        return self.config.attitude_constraint_scopes_for_mode(ACSMode.IDLE)
 
     def _idle_attitude_unsafe(
         self,
@@ -1392,6 +1405,7 @@ class ACS:
         self.last_slew = hold
         self.science_observation_active = False
         self.desaturation_active = False
+        self.activity_active = False
 
     def _is_in_charging_mode(self, utime: float) -> bool:
         """Check if spacecraft is in charging mode (dwelling at charge pointing).

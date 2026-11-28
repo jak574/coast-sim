@@ -243,11 +243,13 @@ How a plan is built
    reach safely. Pass ``include_passes=False`` to plan science only.
    **Scheduled activities** (the ``activities`` argument, a list of
    :class:`~conops.targets.ScheduledActivity`) are reserved the same way: each is a
-   fixed block from its start for its duration, in ``IDLE`` mode (``DESAT`` for a
-   thruster momentum dump), so no science is placed across it. An activity holds the attitude of whatever precedes it in the
+   fixed block from its start for its duration, in ``ACTIVITY`` mode (``DESAT`` for a
+   thruster momentum dump), so no science is placed across it. ``ACTIVITY`` takes the
+   attitude constraint scopes, bus power and housekeeping rate configured for ``IDLE``
+   unless it is given its own. An activity holds the attitude of whatever precedes it in the
    plan: the science before it ends at the block with no slew back, the block holds
    that science's attitude, and the science after it slews from there. A snapshot
-   whose attitude ``IDLE`` cannot hold through the block, or from which the block
+   whose attitude cannot be held in that mode through the block, or from which the block
    after the activity cannot be reached, is not placed before it. With nothing
    before it, the activity holds the attitude the plan starts from, or the one the
    fixed block before it leaves; where that cannot be held through the activity and
@@ -273,7 +275,7 @@ How a plan is built
    rejects slewing or unexpected safe mode during the hold. Legacy flexible holds
    retain their idle-safety recovery semantics. Dispatch takes the same list: it ends the observation under
    way when an activity begins, marking it interrupted so it is revisited, holds the
-   attitude it has in ``IDLE`` until the activity ends, and starts no observation
+   attitude it has in ``ACTIVITY`` mode until the activity ends, and starts no observation
    whose slew or collection would run into the next activity. A slew under way when an
    activity is due, such as one into a charging attitude, delays the activity to the
    slew's end, and the activity then runs its full length from there; an activity that

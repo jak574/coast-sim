@@ -828,6 +828,15 @@ class DITL(DITLMixin, DITLStats):
         if self.acs.in_safe_mode:
             return False
         changed = False
+        active = self._active_entry
+        if (
+            active is not None
+            and entry_obstype(active) == ObsType.ACTIVITY
+            and not active.desaturation
+            and active.activity_hold_begin is not None
+            and utime >= active.activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
         if (
             self._active_pass is not None
             and self.acs.current_pass is None
@@ -883,6 +892,7 @@ class DITL(DITLMixin, DITLStats):
             self.acs.cancel_pending_slews(entry.obsid)
             self.acs.request_end_battery_charge(utime)
         elif obstype == ObsType.ACTIVITY:
+            self.acs.end_activity_hold()
             self.acs.cancel_pending_slews(entry.obsid)
             entry.end = min(float(entry.end), utime)
             self.log.log_event(
@@ -937,8 +947,8 @@ class DITL(DITLMixin, DITLStats):
         return True
 
     def _command_activity_entry(self, entry: PlanEntry, utime: float) -> None:
-        """Hold the entry's attitude in IDLE for the activity, slewing to it
-        first where the spacecraft is elsewhere."""
+        """Hold the entry's attitude for the activity in its mode, slewing to
+        it first where the spacecraft is elsewhere."""
         self.acs.end_science_observation(utime)
         if entry.desaturation:
             self.acs.begin_desaturation()
@@ -946,6 +956,8 @@ class DITL(DITLMixin, DITLStats):
             entry.activity_hold_begin = float(entry.begin) + entry.slewtime
         if entry.activity_hold_end is None:
             entry.activity_hold_end = float(entry.end)
+        if not entry.desaturation and utime >= entry.activity_hold_begin:
+            self.acs.begin_activity_hold()
         resumed = entry.activity_hold_begin < max(float(entry.begin), self.ustart)
         entry.begin = max(float(entry.begin), self.ustart)
         entry.end = min(float(entry.end), self.uend)

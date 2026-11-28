@@ -524,8 +524,9 @@ class PlanExecutionValidator:
     ) -> list[PlanExecutionMismatch]:
         """Check that no science, contact or charge ran during an activity.
 
-        From the end of its slew to its end the spacecraft holds in ``IDLE``
-        mode, or in ``SAA`` mode where it crosses the SAA. Reserved stationary
+        From the end of its slew to its end the spacecraft holds in ``ACTIVITY``
+        mode, or in ``SAA`` mode where it crosses the SAA; a thruster dump
+        holds in ``DESAT``. Reserved stationary
         holds reject slewing and unexpected SAFE; flexible legacy holds retain
         idle-safety recovery.
         """
@@ -536,10 +537,9 @@ class PlanExecutionValidator:
         mismatches: list[PlanExecutionMismatch] = []
         if end <= start:
             return mismatches
-        # A thruster dump holds in DESAT; any other activity holds in IDLE.
-        expected = ACSMode.DESAT if entry.desaturation else ACSMode.IDLE
+        expected = entry.activity_mode
         wrong = {ACSMode.SCIENCE, ACSMode.PASS, ACSMode.CHARGING}
-        wrong.add(ACSMode.IDLE if entry.desaturation else ACSMode.DESAT)
+        wrong.update({ACSMode.IDLE, ACSMode.ACTIVITY, ACSMode.DESAT} - {expected})
         if entry.activity_requires_stationary:
             wrong.update((ACSMode.SLEWING, ACSMode.SAFE))
         for i in self._window_indices(start, end):

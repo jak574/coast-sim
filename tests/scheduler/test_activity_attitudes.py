@@ -151,7 +151,7 @@ def test_explicit_hold_attitude_is_flown_for_the_full_duration(
         if entry.activity_hold_begin <= hk.timestamp.timestamp() < float(entry.end)
     ]
     assert len(samples) == 20
-    assert {int(hk.acs_mode) for hk in samples} == {int(ACSMode.IDLE)}
+    assert {int(hk.acs_mode) for hk in samples} == {int(ACSMode.ACTIVITY)}
     assert all(
         quaternion_attitude_delta(hk.ra, hk.dec, hk.roll, *POSE.fixed_pointing)[0]
         < 1e-6

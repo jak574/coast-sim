@@ -514,7 +514,7 @@ class BatteryLedger(ConsumableLedger[Additions, Addition]):
         elif obstype == ObsType.CHARGE:
             mode = ACSMode.CHARGING
         elif obstype == ObsType.ACTIVITY:
-            mode = ACSMode.DESAT if entry.desaturation else ACSMode.IDLE
+            mode = entry.activity_mode
         else:
             self._addition_cache[key] = None
             return None

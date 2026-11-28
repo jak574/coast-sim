@@ -3,7 +3,7 @@
 A maintenance window, a calibration that needs the spacecraft still, or a
 block set aside for an engineering test is a :class:`ScheduledActivity`: it
 has a start and a duration, the spacecraft holds the attitude it has in
-``IDLE`` mode for its length, and no science is observed meanwhile. The
+``ACTIVITY`` mode for its length, and no science is observed meanwhile. The
 schedulers reserve activities as fixed blocks, as they reserve ground passes,
 and both simulations execute them: dispatch ends the observation under way at
 the activity's start, starts none whose slew or collection would run into it,
@@ -18,7 +18,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..common import ObsType
+from ..common import ACSMode, ObsType
 from ..config import ActivityAttitude, MissionConfig
 from .plan_entry import PlanEntry
 
@@ -117,6 +117,12 @@ class ScheduledActivity(BaseModel):
     @property
     def slides(self) -> bool:
         return self.slide_seconds > 0.0
+
+    @property
+    def hold_mode(self) -> ACSMode:
+        """The ACS mode the activity is held in: DESAT for a thruster
+        momentum dump, ACTIVITY for any other."""
+        return ACSMode.DESAT if self.desaturation else ACSMode.ACTIVITY
 
     def hold_start_for_run(self, run_begin: float) -> float:
         """Start assumed by an independent run without prior execution state."""

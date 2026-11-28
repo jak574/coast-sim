@@ -21,7 +21,7 @@ Important fields:
 - `label_font_size` (int)
 - `legend_font_size` (int)
 - `tick_font_size` (int)
-- `mode_colors` (dict[str, str]): Mode color mapping for ACS modes (e.g. `SCIENCE`, `SLEWING`, `SAA`).
+- `mode_colors` (dict[str, str]): Color of each ACS mode, by mode name (e.g. `SCIENCE`, `SLEWING`, `SAA`). Every mode has a default color of its own; a mode left out of a supplied mapping keeps its default.
 
 Key plotting utilities
 ----------------------

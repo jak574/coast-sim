@@ -2276,7 +2276,7 @@ class PriorityScheduler:
             earliest = max(earliest, floor)
         slew = self._connect_to(pred, block, earliest, attitude_in)
         if slew is None and block.follows and attitude_in is None:
-            mode = ACSMode.DESAT if block.entry.desaturation else ACSMode.IDLE
+            mode = block.entry.activity_mode
             for target in self.ctx.idle_hold_candidates(
                 self._start_attitude(pred, earliest), block.ready
             ):
@@ -2387,7 +2387,7 @@ class PriorityScheduler:
                 target, slew.slewend, self.ctx.ceil_step(block.ready), ACSMode.IDLE
             )
             if wait_violation is None:
-                mode = ACSMode.DESAT if block.entry.desaturation else ACSMode.IDLE
+                mode = block.entry.activity_mode
                 wait_violation = self.ctx.first_hold_violation(
                     target,
                     block.ready,
@@ -2695,7 +2695,7 @@ class PriorityScheduler:
                 continue
             previous = timeline[index - 1] if index > 0 else None
             self._settle_block(block, previous.end if previous is not None else None)
-            mode = ACSMode.DESAT if block.entry.desaturation else ACSMode.IDLE
+            mode = block.entry.activity_mode
             violation = self.ctx.first_hold_violation(
                 block.attitude_out,
                 block.ready,
@@ -2777,7 +2777,7 @@ class PriorityScheduler:
         return ready
 
     def _place_activity(self, activity: ScheduledActivity) -> None:
-        """Reserve an activity as a fixed block in IDLE mode.
+        """Reserve an activity as a fixed block in its hold mode.
 
         It holds the attitude of whatever precedes it: as reserved, the
         block before it or the start attitude, and later the science placed
@@ -2823,7 +2823,7 @@ class PriorityScheduler:
                 else self.ctx.initial_attitude(self.ctx.ustart)
             )
         )
-        mode = ACSMode.DESAT if activity.desaturation else ACSMode.IDLE
+        mode = activity.hold_mode
         fixed_attitude = activity.attitude.fixed_pointing
         if fixed_attitude is not None:
             attitude = fixed_attitude
@@ -4183,7 +4183,7 @@ class PriorityScheduler:
                     first.attitude_out,
                     first.ready,
                     self.ctx.ceil_step(first.end),
-                    ACSMode.DESAT if first.entry.desaturation else ACSMode.IDLE,
+                    first.entry.activity_mode,
                 )
                 is not None
             ):

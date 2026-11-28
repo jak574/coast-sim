@@ -108,6 +108,11 @@ class HousekeepingData(ConfigModel):
         """
         if mode is None:
             return self.rate_gbps
+        if mode == ACSMode.ACTIVITY:
+            # An activity generates at the IDLE rate unless it has its own.
+            return self.rate_mode.get(
+                mode, self.rate_mode.get(ACSMode.IDLE, self.rate_gbps)
+            )
         return self.rate_mode.get(mode, self.rate_gbps)
 
     def data_generated(

@@ -55,6 +55,23 @@ class TestACSInitialization:
         assert acs.current_pass is None
         assert acs.slew_dists == []
 
+    def test_activity_hold_mode_and_the_modes_that_take_precedence(self, acs):
+        acs.saa = None
+        assert acs.get_mode(1000.0) == ACSMode.IDLE
+        acs.begin_activity_hold()
+        assert acs.get_mode(1000.0) == ACSMode.ACTIVITY
+        acs.current_slew = Mock(obstype=ObsType.IDLE)
+        with patch.object(acs, "_is_actively_slewing", return_value=True):
+            assert acs.get_mode(1000.0) == ACSMode.SLEWING
+        acs.current_slew = None
+        with patch.object(acs, "_is_in_charging_mode", return_value=True):
+            assert acs.get_mode(1000.0) == ACSMode.CHARGING
+        acs.begin_desaturation()
+        assert acs.get_mode(1000.0) == ACSMode.DESAT
+        acs.end_desaturation()
+        acs.end_activity_hold()
+        assert acs.get_mode(1000.0) == ACSMode.IDLE
+
     def test_acs_requires_constraint(self, mock_config) -> None:
         """Test that ACS requires a constraint."""
         mock_config.constraint = None

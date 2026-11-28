@@ -543,6 +543,12 @@ class PlanEntry(BaseModel):
             return None
         return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
 
+    @property
+    def activity_mode(self) -> ACSMode:
+        """The ACS mode an activity entry is held in: DESAT for a thruster
+        momentum dump, ACTIVITY for any other."""
+        return ACSMode.DESAT if self.desaturation else ACSMode.ACTIVITY
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def exptime(self) -> float | None:
