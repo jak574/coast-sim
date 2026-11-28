@@ -2,7 +2,6 @@ conops.config.scheduler
 =======================
 
 .. automodule:: conops.config.scheduler
-   :members: SchedulerConfig, SchedulerMode, SchedulerKind, ReplanSettings
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

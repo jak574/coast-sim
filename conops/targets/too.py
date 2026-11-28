@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from ..common import unixtime_from
 from ..config.data_generator import ScienceData
@@ -32,7 +39,19 @@ _REQUEST_FIELDS = (
 
 
 class TOORequest(BaseModel):
-    """A Target of Opportunity: a request with its submit time, deadline and interrupt flag."""
+    """A Target of Opportunity: any request, with the time it is submitted,
+    the latest time its collection may begin, and whether it may cut short
+    the observation in progress. The request is a :class:`Pointing` or a
+    :class:`MovingPointing`, with everything a request can have: a sequence,
+    an instrument, its own timing, a roll offset, a track or a body.
+
+    The request's own ``deadline`` is taken as the ToO's when none is given
+    here, and the ToO's deadline is written onto the request when the run
+    takes it up. The flat fields a ToO was once given (``obsid``, ``ra``,
+    ``dec``, ``merit``, ``exptime``, ``name``, ``science_data``,
+    ``instrument_modes``) still build a plain pointing, bound to a ``config``
+    when one is given with them.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -69,7 +88,9 @@ class TOORequest(BaseModel):
             fields = {name: data.pop(name) for name in _REQUEST_FIELDS if name in data}
             exptime = fields.pop("exptime", None)
             config = data.pop("config", None)
-            # A plain pointing observed in one snapshot, bound to the configuration if given.
+            # A plain pointing observed in one snapshot, as the dispatch queue
+            # builds one from the same fields; bound to the configuration when
+            # one is given, so its body attitude is the run's.
             request = Pointing(
                 config=config,
                 ss_min=PLAIN_SNAPSHOT_MIN_S,
@@ -93,6 +114,12 @@ class TOORequest(BaseModel):
     def _coerce_deadline(cls, v: float | int | str | datetime | None) -> float | None:
         return None if v is None else unixtime_from(v)
 
+    @field_serializer("submit_time", "deadline", when_used="json")
+    def _serialize_time(self, v: float | None) -> str | None:
+        if v is None:
+            return None
+        return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+
     @model_validator(mode="after")
     def _deadline_from_request(self) -> TOORequest:
         request = self.request
@@ -100,7 +127,8 @@ class TOORequest(BaseModel):
             self.deadline = float(request.deadline)  # type: ignore[attr-defined]
         return self
 
-    # The request's fields, read by runs and settable before a run.
+    # The request's fields, as the dispatch and rolling runs read them, and
+    # set on the request when a caller changes a ToO before a run.
     @property
     def obsid(self) -> int:
         return int(self.request.obsid)
@@ -160,8 +188,10 @@ class TOORequest(BaseModel):
         return self.request.instrument_modes
 
     def target_for(self, config: object) -> PlanEntry:
-        """A copy of the request bound to ``config`` with the ToO's deadline."""
-        # Rebuilt from its fields so the bound ephemeris is not deep-copied.
+        """A copy of the request bound to ``config``, its constraint and its
+        ephemeris, for a run to take up, with the ToO's deadline."""
+        # Rebuilt from its own fields: a fresh object with its own state,
+        # where a deep copy would carry the bound ephemeris along.
         target = type(self.request).model_validate(self.request.model_dump())
         target.config = config  # type: ignore[assignment]
         # Bound as a program binds a request, so its visibility can be computed.

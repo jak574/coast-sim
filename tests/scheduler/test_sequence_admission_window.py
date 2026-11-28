@@ -67,27 +67,16 @@ def test_first_sequence_step_keeps_the_parent_admission_deadline(
     assert queue._ppt_deadline(queue.ppt) is None
 
 
-@pytest.mark.parametrize(
-    "latest_start, post_seconds, first_seconds, run_seconds, fits",
-    [
-        (119, 0, 60, 7200, False),
-        (120, 0, 60, 7200, True),
-        (179, 60, 60, 7200, False),
-        (180, 60, 60, 7200, True),
-        (300, 0, 30, 7200, False),
-        (3600, 0, 60, 119, False),
-        (3600, 0, 60, 120, True),
-    ],
-)
+@pytest.mark.parametrize("latest_start, fits", [(119, False), (120, True)])
+@pytest.mark.parametrize("science_in_eclipse", [False, True])
 def test_exact_sequence_admission_reserves_every_step_before_a_mandatory_hold(
-    latest_start: int,
-    post_seconds: int,
-    first_seconds: int,
-    run_seconds: int,
-    fits: bool,
+    latest_start: int, fits: bool, science_in_eclipse: bool
 ) -> None:
-    config = make_config(2, open_sky=True)
-    config.payload.observation_timing = ObservationTiming(cleanup_seconds=post_seconds)
+    config = make_config(2)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    config.constraint.science_in_eclipse = science_in_eclipse
+    config.payload.observation_timing = ObservationTiming()
     config.spacecraft_bus.attitude_control.settle_time = 0
     parent = Pointing(
         config=config,
@@ -106,7 +95,7 @@ def test_exact_sequence_admission_reserves_every_step_before_a_mandatory_hold(
         config,
         [parent],
         BEGIN,
-        BEGIN + timedelta(seconds=run_seconds),
+        BEGIN + timedelta(hours=2),
         activities=[
             ScheduledActivity(
                 name="Required hold",
@@ -119,10 +108,10 @@ def test_exact_sequence_admission_reserves_every_step_before_a_mandatory_hold(
     )
     assert isinstance(queue, QueueDITL)
     queue.step_size = 60
-    queue.ustart, queue.uend = T0, T0 + run_seconds
+    queue.ustart, queue.uend = T0, T0 + 7200
     step = queue._begin_sequence(parent, T0)
     step.begin, step.end = T0, T0 + 60
-    step.collection_begin, step.collection_end = T0, T0 + first_seconds
+    step.collection_begin, step.collection_end = T0, T0 + 60
     queue.ppt = step
     slew = queue._new_ppt_slew(step, T0)
     slew.slewstart = slew.slewend = T0

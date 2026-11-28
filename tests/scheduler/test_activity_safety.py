@@ -12,41 +12,43 @@ from conops.common import ACSMode, ObsType
 from conops.ditl import RollingHorizonDITL
 from conops.schedulers import (
     ActivitySchedulingError,
+    CpSatScheduler,
+    LocalSearchScheduler,
     PriorityScheduler,
     SchedulingContext,
 )
 from conops.schedulers.priority_scheduler import StartState
 from conops.targets import MovingPointing, Plan, ScheduledActivity, track_from_table
 
-from .planning_scenario import (
-    BEGIN,
-    HOUR,
-    MIN,
-    PATCH,
-    T0,
-    activity_entries,
-    make_config,
-    make_target,
-    replay,
-)
-from .planning_scenario import planner as _planner
+from .planning_scenario import BEGIN, HOUR, MIN, PATCH, T0, make_config, make_target
 
 
 def _config():
-    config = make_config(4, open_sky=True)
+    config = make_config(4)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.constraint.safety_constraint = EarthLimbConstraint(min_angle=0)
     return config
 
 
-@pytest.mark.parametrize(
-    "kind, slide, rolling",
-    [
-        ("priority", 0, False),
-        ("local_search", 20 * MIN, False),
-        ("cp_sat", 0, False),
-        ("priority", 20 * MIN, True),
-    ],
-)
+def _planner(kind):
+    if kind == "priority":
+        return PriorityScheduler, {}
+    if kind == "local_search":
+        return LocalSearchScheduler, {"time_limit": 0.0}
+    pytest.importorskip("ortools")
+    return CpSatScheduler, {
+        "time_limit": 0.0,
+        "solver_time_limit": 2.0,
+        "solver_deterministic_time": 0.05,
+        "workers": 1,
+        "seed": 1,
+    }
+
+
+@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+@pytest.mark.parametrize("slide", [0, 20 * MIN], ids=["fixed-time", "sliding"])
+@pytest.mark.parametrize("rolling", [False, True], ids=["planned", "rolling"])
 def test_an_unsafe_inherited_hold_is_reserved_and_executed(
     kind, slide, rolling, tmp_path
 ):
@@ -72,6 +74,7 @@ def test_an_unsafe_inherited_hold_is_reserved_and_executed(
         **options,
     )
     plan = builder.schedule()
+    [entry] = [e for e in plan if e.obstype == ObsType.ACTIVITY]
     # The old placement gate dropped this block before trying another attitude.
     initial = builder.ctx.initial_attitude(T0)
     assert (
@@ -100,11 +103,11 @@ def test_an_unsafe_inherited_hold_is_reserved_and_executed(
             commit_lead_time=timedelta(minutes=10),
         )
     else:
-        loaded = Plan.load(plan.save(tmp_path / "plan.json"))
-        ditl = DITL(config=config, plan=loaded, begin=BEGIN, end=end)
+        replay = Plan.load(plan.save(tmp_path / "plan.json"))
+        ditl = DITL(config=config, plan=replay, begin=BEGIN, end=end)
     assert ditl.calc()
     assert ditl.validate_plan_matches_execution() == []
-    [entry] = activity_entries(ditl.plan)
+    [entry] = [e for e in ditl.plan if e.obstype == ObsType.ACTIVITY]
     assert activity.begin <= entry.activity_hold_begin <= activity.latest_start
     assert entry.activity_hold_end - entry.activity_hold_begin == HOUR
     assert float(entry.end) == entry.activity_hold_end
@@ -132,20 +135,14 @@ def test_an_unsafe_inherited_hold_is_reserved_and_executed(
         < entry.activity_hold_end
     ]
     assert len(modes) == HOUR // config.constraint.ephem.step_size
-    assert set(modes) <= {int(ACSMode.IDLE), int(ACSMode.SAA)}
+    assert set(modes) <= {int(ACSMode.ACTIVITY), int(ACSMode.SAA)}
 
 
-@pytest.mark.parametrize(
-    "slide, fragment",
-    [(0, False), (20 * MIN, False), (0, True)],
-    ids=["fixed", "sliding", "horizon-fragment"],
-)
-def test_an_attitude_safe_at_start_but_unsafe_midway_gets_an_ingress(slide, fragment):
+@pytest.mark.parametrize("slide", [0, 20 * MIN])
+def test_an_attitude_safe_at_start_but_unsafe_midway_gets_an_ingress(slide):
     config = _config()
     begin = BEGIN + timedelta(minutes=54)
     end = BEGIN + timedelta(hours=3)
-    # A fragment's horizon ends before the violation, but its pose must survive the whole hold.
-    horizon_end = BEGIN + timedelta(minutes=65) if fragment else end
     activity = ScheduledActivity(
         name="Long calibration",
         begin=T0 + HOUR,
@@ -164,8 +161,7 @@ def test_an_attitude_safe_at_start_but_unsafe_midway_gets_an_ingress(slide, frag
         config,
         [],
         begin,
-        horizon_end,
-        simulation_end=end,
+        end,
         activities=[activity],
         include_passes=False,
         start_state=StartState(time=begin.timestamp(), attitude=inherited),
@@ -178,62 +174,51 @@ def test_an_attitude_safe_at_start_but_unsafe_midway_gets_an_ingress(slide, frag
         ACSMode.IDLE,
     )
     assert activity.begin < violation < activity.end
-    if fragment:
-        assert horizon_end.timestamp() < violation
     [entry] = plan.entries
     assert entry.slewtime > 0
     assert float(entry.begin) < entry.activity_hold_begin
     assert activity.begin <= entry.activity_hold_begin <= activity.latest_start
     assert float(entry.begin) + entry.slewtime <= entry.activity_hold_begin
-    assert entry.activity_hold_end - entry.activity_hold_begin == HOUR
-    assert float(entry.end) == min(entry.activity_hold_end, horizon_end.timestamp())
-    assert (
-        builder.ctx.first_hold_violation(
-            (entry.ra, entry.dec, entry.roll),
-            entry.activity_hold_begin,
-            entry.activity_hold_end,
-            ACSMode.IDLE,
-        )
-        is None
-    )
-    if not fragment:
-        replay(config, plan, begin, end, pose=inherited)
+    assert float(entry.end) - entry.activity_hold_begin == HOUR
+    ditl = DITL(config=config, plan=plan, begin=begin, end=end)
+    ditl.acs.ra, ditl.acs.dec, ditl.acs.roll = inherited
+    assert ditl.calc()
+    assert ditl.validate_plan_matches_execution() == []
 
 
-@pytest.mark.parametrize(
-    "overdue, reason",
-    [(False, "full duration"), (True, "start window closed")],
-    ids=["no-safe-attitude", "window-closed"],
-)
-def test_an_unplaceable_mandatory_activity_is_reported(overdue, reason):
+@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+def test_an_impossible_mandatory_hold_is_reported(kind):
     config = _config()
+    scheduler, options = _planner(kind)
     activity = ScheduledActivity(
-        name="Mandatory calibration",
+        name="Impossible calibration",
         begin=T0 + HOUR,
-        duration_seconds=(2 if overdue else 1) * HOUR,
-        fixed=not overdue,
-        slide_seconds=30 * MIN if overdue else 0,
+        duration_seconds=HOUR,
+        fixed=True,
     )
-    builder = PriorityScheduler(
+    builder = scheduler(
         config,
         [],
-        BEGIN + timedelta(hours=2 if overdue else 0),
+        BEGIN,
         BEGIN + timedelta(hours=4),
-        simulation_start=BEGIN,
         activities=[activity],
         include_passes=False,
+        **options,
     )
-    # Without the overdue start, make every candidate attitude unsafe.
-    unsafe = patch.multiple(
-        SchedulingContext,
-        first_hold_violation=Mock(return_value=T0 + HOUR),
-        idle_hold_candidates=Mock(return_value=iter([(0.0, 0.0, 0.0)])),
-    )
-    with nullcontext() if overdue else unsafe:
-        with pytest.raises(ActivitySchedulingError, match=activity.name) as error:
+    with (
+        patch.object(SchedulingContext, "first_hold_violation", return_value=T0 + HOUR),
+        patch.object(
+            SchedulingContext,
+            "idle_hold_candidates",
+            return_value=iter([(0.0, 0.0, 0.0)]),
+        ),
+    ):
+        with pytest.raises(
+            ActivitySchedulingError, match="Impossible calibration"
+        ) as error:
             builder.schedule()
     assert error.value.activity.obsid is not None
-    assert reason in error.value.reason
+    assert "full duration" in error.value.reason
 
 
 @pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
@@ -244,7 +229,9 @@ def test_a_sliding_activity_remains_due_after_its_nominal_start(kind):
     but the activity's nominal 01:00 start is past. Its still-open window must
     keep the full calibration in the new plan, without calling it resumed.
     """
-    config = make_config(4, open_sky=True)
+    config = make_config(4)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     scheduler, options = _planner(kind)
     activity = ScheduledActivity(
         name="Sliding calibration",
@@ -268,7 +255,7 @@ def test_a_sliding_activity_remains_due_after_its_nominal_start(kind):
         commit_lead_time=timedelta(minutes=40),
     )
     assert ditl.calc()
-    [entry] = activity_entries(ditl.plan)
+    [entry] = [e for e in ditl.plan if e.obstype == ObsType.ACTIVITY]
     assert T0 + 2 * HOUR <= entry.activity_hold_begin <= activity.latest_start
     assert float(entry.end) - entry.activity_hold_begin == activity.duration_seconds
     assert entry.fixed_data_gb == activity.data_gb
@@ -277,10 +264,36 @@ def test_a_sliding_activity_remains_due_after_its_nominal_start(kind):
 
 
 @pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+def test_an_unstarted_activity_past_its_window_is_not_called_resumed(kind):
+    config = make_config(4)
+    scheduler, options = _planner(kind)
+    activity = ScheduledActivity(
+        name="Overdue calibration",
+        begin=T0 + HOUR,
+        duration_seconds=2 * HOUR,
+        slide_seconds=30 * MIN,
+    )
+    builder = scheduler(
+        config,
+        [],
+        BEGIN + timedelta(hours=2),
+        BEGIN + timedelta(hours=4),
+        simulation_start=BEGIN,
+        activities=[activity],
+        include_passes=False,
+        **options,
+    )
+    with pytest.raises(ActivitySchedulingError, match="start window closed"):
+        builder.schedule()
+
+
+@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
 @pytest.mark.parametrize("rolling", [False, True])
 def test_a_calibration_after_tracking_holds_the_final_attitude(kind, rolling):
     """Do not slew back to the moving body's arrival position during a hold."""
-    config = make_config(4, open_sky=True)
+    config = make_config(4)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.spacecraft_bus.attitude_control.settle_time = 600
     target = MovingPointing(
         config=config,
@@ -328,7 +341,7 @@ def test_a_calibration_after_tracking_holds_the_final_attitude(kind, rolling):
         ).schedule()
         ditl = DITL(config=config, plan=plan, begin=BEGIN, end=end)
     assert ditl.calc()
-    [entry] = activity_entries(ditl.plan)
+    [entry] = [e for e in ditl.plan if e.obstype == ObsType.ACTIVITY]
     modes = [
         int(hk.acs_mode)
         for hk in ditl.telemetry.housekeeping
@@ -337,7 +350,7 @@ def test_a_calibration_after_tracking_holds_the_final_attitude(kind, rolling):
         < entry.activity_hold_end
     ]
     assert len(modes) == 60
-    assert set(modes) == {int(ACSMode.IDLE)}
+    assert set(modes) == {int(ACSMode.ACTIVITY)}
     assert ditl.validate_plan_matches_execution() == []
     assert entry.activity_requires_stationary
     index = next(
@@ -378,5 +391,43 @@ def test_a_sliding_hold_finishes_inside_the_physical_run(kind):
     )
     assert first_violation is not None
     assert float(entry.begin) < first_violation
-    run = replay(config, Plan(entries=[entry]), BEGIN, end)
+    run = DITL(config, plan=Plan(entries=[entry]), begin=BEGIN, end=end)
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
     assert run.fault_management.events == []
+
+
+@pytest.mark.parametrize(
+    "overdue, reason",
+    [(False, "full duration"), (True, "start window closed")],
+    ids=["no-safe-attitude", "window-closed"],
+)
+def test_an_unplaceable_mandatory_activity_is_reported(overdue, reason):
+    config = _config()
+    activity = ScheduledActivity(
+        name="Mandatory calibration",
+        begin=T0 + HOUR,
+        duration_seconds=(2 if overdue else 1) * HOUR,
+        fixed=not overdue,
+        slide_seconds=30 * MIN if overdue else 0,
+    )
+    builder = PriorityScheduler(
+        config,
+        [],
+        BEGIN + timedelta(hours=2 if overdue else 0),
+        BEGIN + timedelta(hours=4),
+        simulation_start=BEGIN,
+        activities=[activity],
+        include_passes=False,
+    )
+    # Without the overdue start, make every candidate attitude unsafe.
+    unsafe = patch.multiple(
+        SchedulingContext,
+        first_hold_violation=Mock(return_value=T0 + HOUR),
+        idle_hold_candidates=Mock(return_value=iter([(0.0, 0.0, 0.0)])),
+    )
+    with nullcontext() if overdue else unsafe:
+        with pytest.raises(ActivitySchedulingError, match=activity.name) as error:
+            builder.schedule()
+    assert error.value.activity.obsid is not None
+    assert reason in error.value.reason

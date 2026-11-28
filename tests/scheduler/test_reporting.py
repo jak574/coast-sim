@@ -66,11 +66,6 @@ def _cut_visit_run(hours: int = HOURS) -> tuple[QueueDITL, Pointing]:
     return ditl, target
 
 
-@pytest.fixture(scope="module")
-def cut_visit_run() -> QueueDITL:
-    return _cut_visit_run()[0]
-
-
 def _legend(fig_ax) -> list[str]:  # type: ignore[no-untyped-def]
     _, ax = fig_ax
     legend = ax.get_legend()
@@ -82,43 +77,37 @@ def _traces(fig) -> set[str]:  # type: ignore[no-untyped-def]
 
 
 class TestCategorySummary:
-    def test_science_by_category_with_shares(
-        self, cut_visit_run: QueueDITL, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_science_by_category_with_shares(self) -> None:
         """Categories split the run's science: targets, visits, science and
         slew hours per category, shares summing to one, and the allocated
         fraction where a category sets one. Every configured category has a
         row, in configured order, a category that collected nothing too."""
-        ditl = cut_visit_run
-        monkeypatch.setattr(
-            ditl.config,
-            "observation_categories",
-            ObservationCategories(
-                categories=[
-                    ObservationCategory(
-                        name="Monitoring",
-                        obsid_min=900,
-                        obsid_max=1000,
-                        color="tab:blue",
-                        program="monitoring",
-                        time_share=0.1,
-                    ),
-                    ObservationCategory(
-                        name="Survey",
-                        obsid_min=1,
-                        obsid_max=100,
-                        color="tab:green",
-                        program="survey",
-                    ),
-                    ObservationCategory(
-                        name="Idle",
-                        obsid_min=5000,
-                        obsid_max=6000,
-                        color="tab:grey",
-                        time_share=0.2,
-                    ),
-                ]
-            ),
+        ditl, _ = _cut_visit_run()
+        ditl.config.observation_categories = ObservationCategories(
+            categories=[
+                ObservationCategory(
+                    name="Monitoring",
+                    obsid_min=900,
+                    obsid_max=1000,
+                    color="tab:blue",
+                    program="monitoring",
+                    time_share=0.1,
+                ),
+                ObservationCategory(
+                    name="Survey",
+                    obsid_min=1,
+                    obsid_max=100,
+                    color="tab:green",
+                    program="survey",
+                ),
+                ObservationCategory(
+                    name="Idle",
+                    obsid_min=5000,
+                    obsid_max=6000,
+                    color="tab:grey",
+                    time_share=0.2,
+                ),
+            ]
         )
         rows = ditl.summary_by_category()
         assert [type(r) for r in rows] == [CategorySummary] * len(rows)
@@ -149,9 +138,10 @@ class TestCategorySummary:
         assert all(r.slew_hours > 0 and r.slew_degrees > 0 for r in rows if r.visits)
 
     def test_printed_statistics_carry_the_tables(
-        self, cut_visit_run: QueueDITL, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        cut_visit_run.print_statistics()
+        ditl, _ = _cut_visit_run()
+        ditl.print_statistics()
         out = capsys.readouterr().out
         assert "SCIENCE BY CATEGORY" in out
         assert "VISITS IN WINDOWS" in out

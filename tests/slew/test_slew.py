@@ -1450,21 +1450,51 @@ class TestConstraintAvoidingWaypoint:
             assert not offset_small_violation(waypoint_ra, waypoint_dec, 1700000000.0)
 
 
-def test_a_slew_sampled_together_matches_each_sample(example_ephem) -> None:
-    """Attitudes sampled together match each sampled alone, before, along and
-    after the slew."""
-    config = MissionConfig()
-    config.constraint.ephem = example_ephem
-    utime = datetime(2025, 11, 1, tzinfo=timezone.utc).timestamp()
-    slew = Slew(config=config)
-    slew.slewrequest = slew.slewstart = utime
-    slew.startra, slew.startdec, slew.startroll = 10.0, 20.0, 30.0
-    slew.endra, slew.enddec, slew.endroll = 80.0, -10.0, 120.0
-    slew.calc_slewtime()
-    times = [utime - 60.0, *np.arange(utime, utime + slew.slewtime + 120.0, 60.0)]
-    together = slew.attitudes(times)
-    assert len(together) == len(times)
-    for t, sampled in zip(times, together, strict=True):
-        assert sampled == pytest.approx(slew.attitude(float(t)), abs=1e-9)
-    assert together[0] == (10.0, 20.0, 30.0)
-    assert together[-1] == pytest.approx((80.0, -10.0, 120.0), abs=1e-9)
+class TestArcChecksTogether:
+    def test_waypoints_match_with_the_arc_checked_at_once(self) -> None:
+        """The waypoint search checks each arc's samples in one call where
+        it can; the result is the result of checking each sample on its
+        own, whether the direct arc is clear, routed, or cannot be routed."""
+        from conops.common.vector import constraint_avoiding_waypoint
+
+        rng = np.random.default_rng(21)
+        sun = np.array([1.0, 0.3, 0.2])
+        sun /= np.linalg.norm(sun)
+
+        def violated(ra: float, dec: float, time: float) -> bool:
+            vec = np.array(
+                [
+                    np.cos(np.radians(dec)) * np.cos(np.radians(ra)),
+                    np.cos(np.radians(dec)) * np.sin(np.radians(ra)),
+                    np.sin(np.radians(dec)),
+                ]
+            )
+            return bool(np.degrees(np.arccos(np.clip(np.dot(vec, sun), -1, 1))) < 30.0)
+
+        calls: list[int] = []
+
+        def violated_many(ras, decs, time):
+            calls.append(len(ras))
+            return [violated(ra, dec, time) for ra, dec in zip(ras, decs, strict=True)]
+
+        blocked = 0
+        for _ in range(120):
+            ra1, ra2 = rng.uniform(0, 360, 2)
+            dec1, dec2 = rng.uniform(-70, 70, 2)
+            single = constraint_avoiding_waypoint(
+                ra1, dec1, ra2, dec2, 0.0, violated, margin_deg=35.0
+            )
+            together = constraint_avoiding_waypoint(
+                ra1,
+                dec1,
+                ra2,
+                dec2,
+                0.0,
+                violated,
+                margin_deg=35.0,
+                constraint_check_many=violated_many,
+            )
+            assert together == single
+            blocked += violated((ra1 + ra2) / 2, (dec1 + dec2) / 2, 0.0)
+        assert blocked >= 1
+        assert calls and all(n > 1 for n in calls)

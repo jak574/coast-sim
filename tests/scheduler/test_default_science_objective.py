@@ -8,18 +8,13 @@ from conops import DITL, create_ditl
 from conops.schedulers import CpSatScheduler, LocalSearchScheduler
 from conops.targets import ScheduledActivity
 
-from .planning_scenario import (
-    BEGIN,
-    HOUR,
-    T0,
-    collected_seconds,
-    make_config,
-    make_target,
-)
+from .planning_scenario import BEGIN, HOUR, T0, make_config, make_target
 
 
 def _scenario():
-    config = make_config(4, open_sky=True)
+    config = make_config(4)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     end = BEGIN + timedelta(hours=3, minutes=30)
     targets = [
         make_target(
@@ -47,7 +42,14 @@ def _scenario():
 def _science(run):
     assert run.calc()
     assert run.validate_plan_matches_execution() == []
-    return {obsid: collected_seconds(run, obsid, science=True) for obsid in (1, 2)}
+    return {
+        obsid: sum(
+            h.collection_seconds or 0
+            for h in run.telemetry.housekeeping
+            if h.obsid == obsid and not h.calibration
+        )
+        for obsid in (1, 2)
+    }
 
 
 @pytest.mark.parametrize("kind", ["local_search", "cp_sat"])

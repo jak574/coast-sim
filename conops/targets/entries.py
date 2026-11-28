@@ -15,9 +15,16 @@ AnyEntry: TypeAlias = Annotated[
 ]
 """A plan entry of any class, validated by its ``kind``."""
 
+ENTRY_CLASSES: dict[str, type[PlanEntry]] = {
+    "entry": PlanEntry,
+    "pointing": Pointing,
+    "moving_pointing": MovingPointing,
+}
+
 
 def with_kind(data: object, default: str = "entry") -> object:
-    """Entry fields with ``kind`` set, ``default`` where missing."""
+    """A dictionary of entry fields with its ``kind`` set, ``default`` where a
+    file written before entries carried one has none."""
     if isinstance(data, dict) and "kind" not in data:
         return {**data, "kind": default}
     return data

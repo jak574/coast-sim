@@ -34,7 +34,18 @@ from .too import TOORequest
 
 
 class Program(BaseModel):
-    """What a run schedules: requests, ToOs, activities and groups for a window."""
+    """What a run schedules, as :class:`Plan` is what a run executed: the
+    request pool, the Targets of Opportunity, the scheduled activities and
+    the observation groups, written for a window. Every time in the file is
+    absolute, so a program is tied to its window.
+
+    :meth:`save` writes the requests without their execution fields (see
+    :attr:`PlanEntry.EXECUTION_FIELDS`), since a request written is the
+    request, not a run's state; :meth:`load` reads each request as its own
+    class by its ``kind``; :meth:`bind` gives every request the mission
+    configuration and the ephemeris, and the program's groups to the
+    configuration.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -101,25 +112,37 @@ class Program(BaseModel):
         *,
         refresh_tracks: bool = False,
     ) -> None:
-        """Bind every request to the configuration and ephemeris, optionally refreshing tracks."""
+        """Give every request the configuration and the ephemeris, as
+        :meth:`Plan.bind_runtime` does a plan's entries, and the program's
+        observation groups to the configuration, where a run reads them.
+        With ``refresh_tracks``, each moving request that names a body looks
+        its track up over the ephemeris, keeping the track it was given
+        where the lookup fails (see :meth:`MovingPointing.refresh_track`);
+        the tracks looked up are saved with the program."""
         runtime_ephem = ephem if ephem is not None else config.constraint.ephem
         if runtime_ephem is None:
             raise ValueError("an ephemeris is required to bind a program")
         config.constraint.ephem = runtime_ephem
         if self.observation_groups.groups:
             config.observation_groups = self.observation_groups
-        for request in [*self.requests, *(too.request for too in self.toos)]:
+        for request in self.requests:
             request.config = config
             request.constraint = config.constraint
             request.ephem = runtime_ephem
             request.acs_config = config.spacecraft_bus.attitude_control
+        for too in self.toos:
+            too.request.config = config
+            too.request.constraint = config.constraint
+            too.request.ephem = runtime_ephem
+            too.request.acs_config = config.spacecraft_bus.attitude_control
         if refresh_tracks:
             for request in self.requests:
                 if isinstance(request, MovingPointing) and request.body:
                     request.refresh_track()
 
     def save(self, path: str | Path) -> Path:
-        """Write the program as JSON without execution fields and return the path."""
+        """Write the program as JSON, the requests without their execution
+        fields, and return the path."""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = self.model_dump(
@@ -134,6 +157,7 @@ class Program(BaseModel):
 
     @classmethod
     def load(cls, path: str | Path) -> Program:
-        """Read a program written by :meth:`save`."""
+        """Read a program written by :meth:`save`, each request as its own
+        class."""
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls.model_validate(raw)

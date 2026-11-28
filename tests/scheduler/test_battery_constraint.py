@@ -135,6 +135,17 @@ def test_an_addition_sampled_along_its_slew_together_matches() -> None:
     assert together.amount == pytest.approx(one_by_one.amount, abs=1e-9)
 
 
+def test_static_panel_additions_compare_equal_without_drive_profiles() -> None:
+    ledger = _ledger(_battery_config())
+    entry = _science_entry(ledger.config, T0 + 600.0, 20)
+    first = ledger.addition(entry)
+    repeated = ledger.addition(entry.model_copy())
+    assert first is not None and repeated is not None
+    assert first == repeated
+    assert first.profile == -1
+    assert ledger._profiles == []
+
+
 def _empty(ledger: BatteryLedger) -> tuple[tuple[Addition, ...], ...]:
     return tuple(() for _ in range(ledger.segments))
 
@@ -610,6 +621,8 @@ class TestSolarArrayDrive:
             stretch.attitude, ACSMode.IDLE, stretch.begin, stretch.end
         )
         assert hold is not None
+        assert hold.profile >= 0
+        assert ledger._profiles[hold.profile]
         deltas, left = ledger.driven_deltas(hold, ledger.drive_start)
         assert deltas == pytest.approx(hold.deltas) and left == ledger.drive_start
         turned, left = ledger.driven_deltas(hold, (60.0,))
@@ -803,3 +816,34 @@ class TestValidator:
         mismatches = ditl.validate_plan_matches_execution()
         assert mismatches
         assert all("charge" in m.message for m in mismatches)
+
+
+def test_a_candidate_is_checked_with_the_generation_along_its_slew() -> None:
+    """The battery check prices a candidate snapshot as the plan stores it
+    once placed: with its slew, and so with what the panels generate along
+    the slew. Checked without the slew, the candidate was counted as
+    drawing slewing power with no generation."""
+    priced: list[tuple[float, float]] = []
+
+    class Capture(PriorityScheduler):
+        def _trial_timeline(self, timeline, index, block, succ, succ_slew):  # type: ignore[no-untyped-def]
+            # The energy the check counts for the candidate, and the energy
+            # the same block is stored with once its slew is recorded.
+            checked = sum(self._block_addition(block).deltas)
+            assert block.slew is not None
+            stored = self._copy_for_reconnection(block)
+            self._apply_slew(stored, block.slew)
+            priced.append((checked, sum(self._block_addition(stored).deltas)))
+            return super()._trial_timeline(timeline, index, block, succ, succ_slew)
+
+    config = _battery_config(SIDE, level=0.9)
+    Capture(
+        config,
+        _targets(config),
+        BEGIN,
+        BEGIN + timedelta(hours=HOURS),
+        step_size=STEP,
+    ).schedule()
+    assert len(priced) > 20
+    for checked, stored in priced:
+        assert checked == pytest.approx(stored)

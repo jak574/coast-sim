@@ -351,24 +351,41 @@ class Pointing(PlanEntry):
         if self._visit_parent is not None:
             self._visit_parent.record_calibration(utime, seconds)
 
-    def record_interruption(self, utime: float, *, visit: int | None = None) -> None:
+    def record_interruption(
+        self,
+        utime: float,
+        *,
+        began: float | None = None,
+        visit: int | None = None,
+    ) -> None:
         """A visit cut short is taken again, whole, while its window is
         open: the window counts as visited only once one attempt has
         collected a whole visit's science in it, uninterrupted. The science
         every attempt collected still counts. Follow the visit credited by
         collection, including when it runs past the next window's opening.
 
-        ``visit`` is the visit flown where the caller knows it (a visit
-        copy knows its own): an attempt cut before it collected anything
-        leaves every earlier visit as it was."""
-        super().record_interruption(utime)
-        flown = visit if visit is not None else self.visit
+        ``began`` is when the observation that was cut began. Where the
+        target has collected nothing since then, the cut observation
+        collected nothing, and the visit last credited belongs to an
+        earlier observation that was not cut: it stays as it is.
+
+        ``visit`` is the visit the cut observation flew, where the caller
+        knows it. Where the visit last credited is a different one, it
+        belongs to an earlier observation and stays as it is."""
+        collected_before = (
+            began is not None
+            and self._last_collection_time is not None
+            and self._last_collection_time <= began
+        )
+        super().record_interruption(utime, began=began, visit=visit)
         if self._visit_parent is not None:
-            self._visit_parent.record_interruption(utime, visit=flown)
+            self._visit_parent.record_interruption(utime, began=began, visit=visit)
         if self.visit_windows:
-            index = self._collecting_visit
-            self.end_visit_attempt()
-            if index is not None and (flown is None or flown == index):
+            index = None if collected_before else self._collecting_visit
+            if visit is not None and index != visit:
+                index = None
+            self._collecting_visit = None
+            if index is not None:
                 attempt = self._visit_attempt_seconds.pop(index, 0.0)
                 if attempt < self.per_visit_seconds - 1e-6:
                     self._visits_done.discard(index)
@@ -657,7 +674,7 @@ class Pointing(PlanEntry):
         self.collection_limit = None
         self._visits_done = set()
         self._visit_seconds = {}
-        self._visit_attempt_seconds = {}  # Retries must start with no prior progress.
+        self._visit_attempt_seconds = {}
         self._collecting_visit = None
         self.visit = None
         self.begin = 0
@@ -738,20 +755,25 @@ class MovingPointing(Pointing):
             return "given"
         return "looked up"
 
-    def visibility(self) -> int:
+    def visibility(
+        self,
+        *,
+        begin: float | int | str | datetime | None = None,
+        end: float | int | str | datetime | None = None,
+    ) -> int:
         """As :meth:`PlanEntry.visibility`, after the body's track is looked
         up when none was given."""
         if not self.track and self.body is not None:
             self.fetch_track()
-        return super().visibility()
+        return super().visibility(begin=begin, end=end)
 
     def visibility_in(
         self,
         begin: float | int | str | datetime,
         end: float | int | str | datetime,
     ) -> list[list[float]]:
-        """As :meth:`PlanEntry.visibility_in`, after the body's track is looked
-        up when none was given."""
+        """As :meth:`PlanEntry.visibility_in`, after the body's track is
+        looked up when none was given."""
         if not self.track and self.body is not None:
             self.fetch_track()
         return super().visibility_in(begin, end)

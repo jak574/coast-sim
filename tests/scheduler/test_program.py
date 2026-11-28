@@ -2,7 +2,8 @@
 the Targets of Opportunity with their triggers, the activities and the
 groups, saved, loaded, bound and run."""
 
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,11 @@ from .planning_scenario import make_config as _config
 HOURS = 8
 END = BEGIN + timedelta(hours=HOURS)
 STEP = 60
+DAY = 24 * HOUR
+
+
+def _iso(utime: float) -> str:
+    return datetime.fromtimestamp(utime, tz=timezone.utc).isoformat()
 
 
 def _requests(config: MissionConfig) -> list[Pointing]:
@@ -216,6 +222,40 @@ class TestRoundTrip:
         )
         assert config.observation_groups.groups[0].name == "pair"
 
+    def test_every_time_is_written_as_an_iso_string(self, tmp_path: Path) -> None:
+        config = _config(HOURS)
+        program = _program(config)
+        [group] = program.observation_groups.groups
+        group.window_start = T0 + HOUR
+        group.window_deadline = T0 + 8 * HOUR
+        raw = json.loads(program.save(tmp_path / "p.json").read_text())
+
+        def unix_times(node: object, path: str = "") -> list[str]:
+            if isinstance(node, dict):
+                return [
+                    p for k, v in node.items() for p in unix_times(v, f"{path}/{k}")
+                ]
+            if isinstance(node, list):
+                return [
+                    p for i, v in enumerate(node) for p in unix_times(v, f"{path}/{i}")
+                ]
+            numeric = isinstance(node, (int, float)) and not isinstance(node, bool)
+            return [path] if numeric and node >= T0 - DAY else []
+
+        assert unix_times(raw) == []
+        [too] = raw["toos"]
+        assert too["submit_time"] == _iso(T0 + 2 * HOUR)
+        assert too["deadline"] == _iso(T0 + 5 * HOUR)
+        assert raw["activities"][0]["begin"] == _iso(T0 + 3 * HOUR)
+        [saved_group] = raw["observation_groups"]["groups"]
+        assert saved_group["window_start"] == _iso(T0 + HOUR)
+        assert saved_group["window_deadline"] == _iso(T0 + 8 * HOUR)
+        loaded = Program.load(tmp_path / "p.json")
+        assert loaded.toos[0].submit_time == T0 + 2 * HOUR
+        assert loaded.toos[0].deadline == T0 + 5 * HOUR
+        assert loaded.activities == program.activities
+        assert loaded.observation_groups == program.observation_groups
+
     def test_execution_fields_are_not_written(self, tmp_path: Path) -> None:
         config = _config(HOURS)
         program = _program(config)
@@ -227,6 +267,8 @@ class TestRoundTrip:
         for field in (
             "slewtime",
             "slewdist",
+            "great_circle_deg",
+            "settle_seconds",
             "target_attitude",
             '"done"',
             "exporig",
@@ -497,7 +539,11 @@ class TestSequenceToOWhileObserving:
 
 
 class TestVisitUnderWayAndLowerRequests:
-    def test_a_visit_under_way_is_not_cut_for_a_lower_ranked_request(self) -> None:
+    @pytest.mark.parametrize("first_science", [False, True])
+    @pytest.mark.parametrize("repoint", [False, True])
+    def test_a_visit_under_way_is_not_cut_for_a_lower_ranked_request(
+        self, first_science: bool, repoint: bool
+    ) -> None:
         """A sequence visit that cannot wait for a lower-ranked request is
         admitted whole; its first step's pointing carries no deadline of its
         own, and the deadline dispatch computed for it then yielded to the
@@ -518,8 +564,15 @@ class TestVisitUnderWayAndLowerRequests:
             deadline=T0 + 10 * MIN,
             sequence=ObservationSequence(
                 steps=[
-                    SequenceStep(name="first", duration_seconds=2400),
-                    SequenceStep(name="second", duration_seconds=2400),
+                    SequenceStep(
+                        name="first", duration_seconds=2400, science=first_science
+                    ),
+                    SequenceStep(
+                        name="second",
+                        duration_seconds=2400,
+                        ra=PATCH[1][0] if repoint else None,
+                        dec=PATCH[1][1] if repoint else None,
+                    ),
                 ]
             ),
         )

@@ -305,6 +305,7 @@ class TestExecution:
             if entry is not None and int(mode) in (
                 int(ACSMode.SCIENCE),
                 int(ACSMode.IDLE),
+                int(ACSMode.ACTIVITY),
             ):
                 by_obsid.setdefault(int(entry.obsid), set()).add(round(float(watts), 6))
         assert 150.0 + 10.0 in by_obsid[30001]
@@ -322,7 +323,7 @@ class TestExecution:
         again.step_size = STEP
         assert again.calc()
         seen = _payload_power(again)
-        assert 150.0 + 10.0 in seen[int(ACSMode.IDLE)]
+        assert 150.0 + 10.0 in seen[int(ACSMode.ACTIVITY)]
         with pytest.raises(ValueError, match="no instrument"):
             ditl.submit_too(
                 obsid=30002,
@@ -470,6 +471,10 @@ class TestScienceData:
             views = ditl.config.recorder_views()
             assert views["camera"].recorder.current_volume_gb == pytest.approx(0.6)
             assert views["spectrograph"].recorder.current_volume_gb == 0.0
+            if dispatch:
+                assert (
+                    config.recorder_views()["camera"].recorder.current_volume_gb == 0.0
+                )
 
     def test_an_observation_generates_only_what_it_uses(self) -> None:
         """Both instruments generate 1 Mbps in SCIENCE; a camera-only

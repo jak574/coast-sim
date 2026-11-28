@@ -8,6 +8,7 @@ import pytest
 import rust_ephem
 
 from conops import QueueDITL
+from conops.benchmark.metrics import dynamic_science_value
 from conops.common import ACSCommandType
 from conops.config import (
     AttitudeControlSystem,
@@ -25,7 +26,7 @@ from conops.config import (
     TargetConfig,
 )
 from conops.simulation.acs_command import ACSCommand
-from conops.targets import Pointing
+from conops.targets import ObservationSequence, Pointing, SequenceStep
 from scripts.check_default_plan_output import (
     SCENARIO_BEGIN,
     DeterministicConstraint,
@@ -149,6 +150,53 @@ def test_too_waits_for_cleanup_without_losing_collected_science(
     assert target.exptime == pytest.approx(0)
     total_collection = sum(hk.collection_seconds for hk in ditl.telemetry.housekeeping)
     assert ditl.data_generated_gb[-1] == pytest.approx(total_collection * 0.001)
+
+
+@pytest.mark.parametrize("cleanup,handoff", [(0, 0), (20, 5), (85, 40)])
+def test_sequence_too_keeps_its_selected_value_through_teardown(
+    monkeypatch, cleanup, handoff
+):
+    run, too = _simulation(
+        monkeypatch,
+        cleanup=cleanup,
+        handoff=handoff,
+        urgency=50,
+        deadline=SCENARIO_BEGIN.timestamp() + 1800,
+    )
+    too.request.sequence = ObservationSequence(
+        steps=[
+            SequenceStep(name="first", duration_seconds=300),
+            SequenceStep(name="second", duration_seconds=300),
+        ]
+    )
+    assert run.calc()
+    assert too.executed
+    assert run.validate_plan_matches_execution() == []
+    entries = [entry for entry in run.plan if int(entry.obsid) == 30001]
+    assert [entry.step for entry in entries] == ["first", "second"]
+    assert [entry.merit for entry in entries] == [250, 250]
+    assert run._too_targets[id(too)].merit == 200
+    assert (
+        sum(
+            sample.collection_seconds
+            for sample in run.telemetry.housekeeping
+            if sample.obsid == 30001 and not sample.calibration
+        )
+        == 600
+    )
+    assert (
+        dynamic_science_value(
+            (sample for sample in run.telemetry.housekeeping if sample.obsid == 30001),
+            entries,
+            run.step_size,
+        )
+        == 150000
+    )
+    if cleanup or handoff:
+        assert any(
+            "dispatching after reserved cleanup/handoff" in event.description
+            for event in run.log.events
+        )
 
 
 def test_alignment_does_not_extend_an_observation_that_will_finish(monkeypatch):

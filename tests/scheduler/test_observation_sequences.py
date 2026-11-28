@@ -224,7 +224,7 @@ class TestModel:
 
 
 class TestDispatch:
-    def test_a_visit_with_an_inadmissible_later_roll_is_not_started(
+    def test_a_later_step_cannot_substitute_for_an_inadmissible_absolute_roll(
         self,
     ) -> None:
         config = _config(1)
@@ -250,7 +250,9 @@ class TestDispatch:
         ditl = create_ditl(config, [target], BEGIN, end)
         ditl.step_size = STEP
         assert ditl.calc()
-        assert not any(e.step in ("first", "offset") for e in ditl.plan)
+        # Whole-visit admission rejects the sequence before its first step
+        # when a later step's absolute roll cannot be observed.
+        assert not any(e.obsid == target.obsid for e in ditl.plan)
         assert any("Protected visit rejected" in e.description for e in ditl.log.events)
 
     def _run(self, visits: int = 1, **kwargs) -> QueueDITL:
@@ -352,6 +354,71 @@ class TestDispatch:
         ]
         burst = [e for e in ditl.plan if e.obsid == 9000]
         assert burst and float(burst[0].begin) >= float(steps[-1].end)
+        assert not any("cut short" in e.description for e in ditl.log.events)
+
+    def test_a_visit_with_an_inadmissible_later_roll_is_not_started(
+        self,
+    ) -> None:
+        config = _config(1)
+        config.spacecraft_bus.attitude_control.max_roll_from_optimum_deg = 15.0
+        target = Pointing(
+            config=config,
+            obsid=500,
+            name="Roll sequence",
+            ra=TARGET[0],
+            dec=TARGET[1],
+            sequence=ObservationSequence(
+                steps=[
+                    SequenceStep(name="first", duration_seconds=300),
+                    SequenceStep(
+                        name="offset", duration_seconds=300, roll_offset_deg=120
+                    ),
+                ]
+            ),
+        )
+        end = BEGIN + timedelta(hours=1)
+        ctx = SchedulingContext(config, BEGIN, end, step_size=STEP)
+        target.roll_deg = ctx.optimum_roll(target, T0)
+        ditl = create_ditl(config, [target], BEGIN, end)
+        ditl.step_size = STEP
+        assert ditl.calc()
+        assert not any(e.step in ("first", "offset") for e in ditl.plan)
+        assert any("Protected visit rejected" in e.description for e in ditl.log.events)
+
+    def test_a_visit_with_a_later_step_out_of_view_is_not_started(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The planners place a visit only where every step is visible.
+        Dispatch once started a visit whose last step had set by the time
+        the visit reached it, dropped the step and kept the science of the
+        steps before it, which no plan could hold."""
+        config = _config(1)
+        target = Pointing(
+            config=config,
+            obsid=500,
+            name="Setting sequence",
+            ra=TARGET[0],
+            dec=TARGET[1],
+            sequence=ObservationSequence(
+                steps=[
+                    SequenceStep(name="first", duration_seconds=300),
+                    SequenceStep(name="second", duration_seconds=300),
+                ]
+            ),
+        )
+        visible = Pointing.visible
+        monkeypatch.setattr(
+            Pointing,
+            "visible",
+            lambda self, begin, end: (
+                False if self.step == "second" else visible(self, begin, end)
+            ),
+        )
+        end = BEGIN + timedelta(hours=1)
+        ditl = create_ditl(config, [target], BEGIN, end)
+        ditl.step_size = STEP
+        assert ditl.calc()
+        assert not any(e.step in ("first", "second") for e in ditl.plan)
         assert not any("cut short" in e.description for e in ditl.log.events)
 
 

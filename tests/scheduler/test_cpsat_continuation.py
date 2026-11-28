@@ -34,7 +34,7 @@ from .planning_scenario import (  # noqa: E402
     make_config,
     make_target,
 )
-from .recorder_scenario import storage  # noqa: E402
+from .test_independent_recorders import storage  # noqa: E402
 
 
 def _scenario(independent=False, timed=False):
@@ -129,30 +129,14 @@ def _blocks(decoded):
     ]
 
 
-@pytest.mark.parametrize(
-    "independent,shortened,timed,changed",
-    [
-        (False, False, False, False),
-        (True, True, False, False),
-        (True, False, True, False),
-        (False, False, False, True),
-    ],
-)
+@pytest.mark.parametrize("timed", [False, True])
+@pytest.mark.parametrize("independent", [False, True])
+@pytest.mark.parametrize("shortened", [False, True])
 def test_recorder_counts_actual_suffix_steps_without_the_old_chunk(
-    independent, shortened, timed, changed
+    independent, shortened, timed
 ):
     scheduler, state, old_chunk = _scenario(independent, timed)
     tail = _tail(scheduler, old_chunk, shortened=shortened)
-    if changed:
-        # A changed prefix redecodes the continuation from its shifted interval.
-        prefix = scheduler._step(
-            old_chunk, _Snapshot(obsid=100, seconds=1200, release=T0 + 65 * MIN)
-        )
-        assert prefix is not old_chunk
-        original, tail = tail, _tail(scheduler, prefix)
-        assert float(_blocks(tail)[0].entry.collection_begin) > float(
-            _blocks(original)[0].entry.collection_begin
-        )
     blocks = _blocks(tail)
     assert blocks
     # The snapshot release may be rounded forward on decoding; no entry
@@ -216,3 +200,28 @@ def test_battery_reserves_the_actual_suffix_and_ignores_dropped_snapshots():
                     forecast.idle[run] * scheduler.ctx.step_size
                 )
     assert forecast.fixed == expected
+
+
+def test_a_changed_prefix_redecodes_the_reserved_continuation():
+    scheduler, state, old_chunk = _scenario()
+    original = _tail(scheduler, old_chunk)
+    changed = scheduler._step(
+        old_chunk, _Snapshot(obsid=100, seconds=1200, release=T0 + 65 * MIN)
+    )
+    assert changed is not old_chunk
+    updated = _tail(scheduler, changed)
+    before, after = _blocks(original)[0], _blocks(updated)[0]
+    assert float(after.entry.collection_begin) > float(before.entry.collection_begin)
+    origin, _ = scheduler._chunk_origin(state)
+    for _, ledger, offset in scheduler._ledger.members:
+        forecast = scheduler._chunk_recorder(state, updated, origin, ledger, offset, [])
+        # Recorder production uses the shifted, rounded interval, not the
+        # snapshot's old release or the unmodified incumbent's arrival.
+        actual = [
+            e
+            for b in [*state.timeline, *_blocks(updated)]
+            for e in (b.steps or [b.entry])
+        ]
+        expected = ledger.initial_volumes(actual)
+        _, fixed, _ = ledger.model_vectors(expected, origin)
+        assert forecast.fixed == [_kb_up(value) for value in fixed]

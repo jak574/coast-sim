@@ -4,26 +4,20 @@ from datetime import timedelta
 
 import pytest
 
+from conops import DITL
+from conops.common import ObsType
 from conops.schedulers import PriorityScheduler
 from conops.targets import ScheduledActivity
 
-from .planning_scenario import (
-    BEGIN,
-    HOUR,
-    MIN,
-    T0,
-    activity_entries,
-    collected_seconds,
-    make_config,
-    make_target,
-    replay,
-)
-from .planning_scenario import planner as _planner
+from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config, make_target
+from .test_activity_safety import _planner
 
 
 @pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
 def test_retained_slew_at_settled_activity_start_precedes_the_whole_hold(kind):
-    c = make_config(4, open_sky=True)
+    c = make_config(4)
+    c.constraint.sun_constraint = None
+    c.constraint.earth_constraint = None
     targets = [
         make_target(c, 100, 105, 10, merit=100, minutes=20, snapshot=20, ss_min=20),
         make_target(c, 101, 110, 10, merit=50, minutes=20, snapshot=20, ss_min=20),
@@ -56,15 +50,21 @@ def test_retained_slew_at_settled_activity_start_precedes_the_whole_hold(kind):
     assert s.timeline.index(retained) < s.timeline.index(hold)
     assert retained.end <= hold.ready
     plan = s._finish(s.timeline)
-    run = replay(c, plan, BEGIN, BEGIN + timedelta(hours=4))
-    flown = activity_entries(run.plan)
+    run = DITL(c, plan=plan, begin=BEGIN, end=BEGIN + timedelta(hours=4))
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
+    flown = [e for e in run.plan if e.obstype == ObsType.ACTIVITY]
     assert len(flown) == 1 and flown[0].activity_finishes
     assert float(flown[0].end) - float(flown[0].begin) == 20 * MIN
-    assert collected_seconds(run) == 40 * MIN
+    assert (
+        sum(h.collection_seconds or 0 for h in run.telemetry.housekeeping) == 40 * MIN
+    )
 
 
 def test_rejected_retained_science_reopens_its_time_for_replacement():
-    c = make_config(4, open_sky=True)
+    c = make_config(4)
+    c.constraint.sun_constraint = None
+    c.constraint.earth_constraint = None
     t = make_target(c, 100, 105, 10, merit=100, minutes=20, snapshot=20, ss_min=20)
     s = PriorityScheduler(
         c, [t], BEGIN, BEGIN + timedelta(hours=4), include_passes=False
@@ -86,4 +86,5 @@ def test_rejected_retained_science_reopens_its_time_for_replacement():
     assert len(science) == 1
     assert float(science[0].begin) >= T0 + HOUR
     assert float(science[0].end) < T0 + 3 * HOUR
-    replay(c, plan, BEGIN, BEGIN + timedelta(hours=4))
+    run = DITL(c, plan=plan, begin=BEGIN, end=BEGIN + timedelta(hours=4))
+    assert run.calc() and run.validate_plan_matches_execution() == []

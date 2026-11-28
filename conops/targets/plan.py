@@ -495,7 +495,8 @@ class Plan(BaseModel):
         for saved, entry in zip(raw.get("entries", []), plan.entries, strict=True):
             done = saved.get("done")
             if isinstance(entry, Pointing) and isinstance(done, bool):
-                # A completed visit may retain its parent's remaining exposure.
+                # Completion may come from a finished visit or snapshot,
+                # rather than an exhausted exposure. Keep the flown state.
                 entry.done = done
         if load_timeseries:
             for field, schema in (

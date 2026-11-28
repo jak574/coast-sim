@@ -19,6 +19,11 @@ from ..config.acs import scheduled_slew_time
 from ..config.config import housekeeping_while_waiting
 from ..config.data_storage import RecorderView
 from ..config.observation_categories import ObservationCategories
+from ..config.observation_groups import (
+    ObservationGroup,
+    ObservationGroups,
+    group_start_wait,
+)
 from ..ditl.ditl_log import DITLLog
 from ..simulation.slew import Slew
 from . import Pointing
@@ -29,6 +34,10 @@ from .visits import VisitWindow
 
 if TYPE_CHECKING:
     from ..simulation.coverage import StationCoverage
+
+
+_BOUNDS_PAIR = 2
+"""A group window is a start and a deadline."""
 
 
 class TargetSlewEstimate(BaseModel):
@@ -91,8 +100,11 @@ class TargetQueue:
         self._requests_by_obsid: dict[int, Pointing] = {}
         """The requests behind those openings."""
         self._due_requests: list[Pointing] = []
+        self._held_outside_group: frozenset[int] = frozenset()
         """The requests whose protected start had come when the openings
         were computed."""
+        self._openings: list[tuple[float, float, int]] | None = None
+        """The openings last computed, until :meth:`forget_openings`."""
         self.log = log
         # Optional weight to penalize long slews when selecting next target
         self.slew_distance_weight = config.targets.slew_distance_weight
@@ -105,8 +117,6 @@ class TargetQueue:
         )
         self.random_seed = config.random_seed if config.random_seed is not None else 0
         self.merit_model = MeritModel(config)
-        self._previous_obsid: int | None = None
-        self._collected_at: float | None = None
         self.prefer = None
         self.allocation_bonus = 0.5
 
@@ -173,7 +183,10 @@ class TargetQueue:
         self.targets.append(target)
 
     def add_request(self, request: Pointing) -> Pointing:
-        """Add a request built elsewhere, prepared as :meth:`add` prepares its pointing."""
+        """Add a request built elsewhere, a :class:`Pointing` or a
+        :class:`MovingPointing`, prepared as :meth:`add` prepares the
+        pointing it builds: bound to the queue's configuration, its
+        instrument resolved, its visibility computed."""
         assert self.config is not None
         telescope = self.config.payload.telescope_for_target(request.instrument_name)
         request.instrument_name = telescope.name if telescope is not None else None
@@ -482,7 +495,7 @@ class TargetQueue:
 
         upper_bound = (float(target.merit) + self.merit_model.max_dynamic_value) * (
             1.0 + self._bonus(target)
-        ) + self.merit_model.group_contiguity_weight
+        ) + self._contiguity_weight()
         if self.collection_time_weight > 0.0:
             collection_seconds = self._candidate_collection_seconds(
                 target=target,
@@ -500,11 +513,23 @@ class TargetQueue:
         dec: float,
         roll: float | None,
         slew_estimator: Callable[[Pointing], TargetSlewEstimate] | None,
+        utime: float | None = None,
     ) -> None:
         if slew_estimator is None:
             assert self.acs_config is not None
+            table = getattr(self.acs_config, "thermal_settling", None)
+            thermal = isinstance(table, list) and bool(table)
             if self.acs_config.direction_dependent_slew:
-                target.slewtime = target.calc_slewtime(ra, dec, roll)
+                target.slewtime = (
+                    target.calc_slewtime(ra, dec, roll, utime=utime)
+                    if thermal
+                    else target.calc_slewtime(ra, dec, roll)
+                )
+            elif thermal:
+                # The roll and time serve the thermal settle only.
+                target.slewtime = target.calc_slewtime(
+                    ra, dec, lastroll=roll, utime=utime
+                )
             else:
                 target.slewtime = target.calc_slewtime(ra, dec)
             if issubclass(type(target), Pointing) and target.uses_mounted_attitude():
@@ -523,12 +548,13 @@ class TargetQueue:
     def _bounds(
         self, target: Pointing, utime: float
     ) -> tuple[float | None, float | None]:
-        """When ``target`` may begin collecting if selected at ``utime``: its
-        next visit window's bounds, or its own earliest start and deadline,
-        narrowed by its group's window."""
+        """When ``target`` may begin collecting if selected at ``utime``:
+        its own bounds (see :meth:`_own_bounds`), narrowed by its group's
+        window. Every check of a start or a deadline reads these, so a
+        group's deadline is a deadline for collection to begin, as the
+        target's own is."""
         start, deadline = self._own_bounds(target, utime)
-        group = self.merit_model.group(target)
-        group_start, group_deadline = group.bounds if group else (None, None)
+        group_start, group_deadline = self._group_bounds(target)
         if group_start is not None:
             start = group_start if start is None else max(start, group_start)
         if group_deadline is not None:
@@ -541,7 +567,8 @@ class TargetQueue:
     def _own_bounds(
         target: Pointing, utime: float
     ) -> tuple[float | None, float | None]:
-        """:meth:`_bounds` without the target's group."""
+        """The target's next visit window's bounds, or its own earliest
+        start and deadline."""
         windows = getattr(target, "visit_windows", None)
         # A test double's target has no windows.
         if isinstance(windows, list) and windows:
@@ -576,16 +603,216 @@ class TargetQueue:
         # Selected now, it collects after now.
         return start is None or utime >= start
 
+    def _contiguity_weight(self) -> float:
+        weight = getattr(self.merit_model, "group_contiguity_weight", 0.0)
+        return float(weight) if isinstance(weight, (int, float)) else 0.0
+
+    def _group_bounds(self, target: Pointing) -> tuple[float | None, float | None]:
+        """The target's group window; none for a test double's merit model."""
+        groups = getattr(self.merit_model, "groups", None)
+        if isinstance(groups, ObservationGroups) and not groups.groups:
+            return None, None
+        bounds = getattr(self.merit_model, "group_bounds", None)
+        result = bounds(target) if callable(bounds) else None
+        if isinstance(result, tuple) and len(result) == _BOUNDS_PAIR:
+            start, deadline = result
+            return (
+                start if isinstance(start, (int, float)) else None,
+                deadline if isinstance(deadline, (int, float)) else None,
+            )
+        return None, None
+
+    def _contiguity_bonus(self, target: Pointing) -> float:
+        """Merit for following a target of the same group; 0 for a test
+        double's merit model."""
+        bonus = getattr(self.merit_model, "contiguity_bonus", None)
+        result = (
+            bonus(target, getattr(self, "_previous_obsid", None))
+            if callable(bonus)
+            else 0.0
+        )
+        return float(result) if isinstance(result, (int, float)) else 0.0
+
+    def _finished(self, target: Pointing) -> bool:
+        """Whether ``target`` takes no more science: done, or with less
+        exposure left than its minimum snapshot."""
+        if target.done:
+            return True
+        left = getattr(target, "exptime", None)
+        return isinstance(left, (int, float)) and left < snapshot_min_seconds(target)
+
+    def _observable_later(self, target: Pointing, utime: float) -> bool:
+        """Whether ``target`` can still be selected at or after ``utime``:
+        its deadline has not passed, its budget has room for it and it is
+        visible again before the ephemeris ends."""
+        if not target.merit > 0:
+            return False
+        windows = getattr(target, "visit_windows", None)
+        if (
+            isinstance(windows, list)
+            and windows
+            and self._own_bounds(target, utime)[1] is None
+        ):
+            return False
+        _, deadline = self._bounds(target, utime)
+        if deadline is not None and utime > deadline:
+            return False
+        if not self._within_budget(target):
+            return False
+        visibility = getattr(target, "windows", None)
+        if not isinstance(visibility, list):
+            return True
+        return any(float(window[1]) > utime for window in visibility)
+
+    def _windows_to_take(self, target: Pointing, utime: float) -> list[float]:
+        """When each chance ``target`` still has to be observed closes, at
+        ``utime``: the deadline of each visit window not yet visited and
+        not yet closed, or the target's own deadline where it has no visit
+        windows. Empty for a target with no deadline of either kind, for one
+        that is finished and for one its budget has no room for."""
+        if self._finished(target):
+            return []
+        if not self._within_budget(target):
+            return []
+        windows = getattr(target, "visit_windows", None)
+        if isinstance(windows, list) and windows:
+            return [
+                float(window.deadline)
+                for index, window in enumerate(windows)
+                if window.deadline >= utime and not target.visit_complete(index)
+            ]
+        deadline = getattr(target, "deadline", None)
+        if isinstance(deadline, (int, float)) and deadline >= utime:
+            return [float(deadline)]
+        return []
+
+    def consecutive_holds(self, utime: float) -> dict[int, str]:
+        """The targets that a consecutive observation group keeps from being
+        selected at ``utime``, each with the reason.
+
+        A consecutive group's targets are observed in the order of its
+        members. A member waits for the members before it to finish, and
+        once one of the group has collected science, every target outside
+        the group waits until the group has finished. The group ends early
+        at a member that can no longer be observed, and the members after
+        it are then not observed at all.
+        """
+        groups = getattr(self.merit_model, "groups", None)
+        consecutive = (
+            groups.consecutive if isinstance(groups, ObservationGroups) else []
+        )
+        if not consecutive:
+            return {}
+        queued = {
+            int(target.obsid): target
+            for target in self.targets
+            if isinstance(getattr(target, "obsid", None), (int, float))
+        }
+        held: dict[int, str] = {}
+        open_to: dict[int, str] = {}
+        """The member each group under way is waiting for, with the group."""
+        for group in consecutive:
+            present = [queued[obsid] for obsid in group.members if obsid in queued]
+            unfinished = [t for t in present if not self._finished(t)]
+            if not unfinished:
+                continue
+            current = unfinished[0]
+            if not self._observable_later(current, utime):
+                for target in unfinished:
+                    held[int(target.obsid)] = (
+                        f"group {group.name!r} ended at member {current.obsid}, "
+                        "which can no longer be observed"
+                    )
+                continue
+            for target in unfinished[1:]:
+                held[int(target.obsid)] = (
+                    f"group {group.name!r} observes {current.obsid} first"
+                )
+            if len(unfinished) < len(present) or any(
+                t.collected_seconds > 0 for t in present
+            ):
+                open_to[int(current.obsid)] = group.name
+            elif not group.has_window:
+                # A group with no window of its own can begin later; a
+                # request whose window would close while the group runs
+                # cannot. The group waits for it (see group_start_wait).
+                members = set(group.members)
+                needed = sum(float(t.exptime or 0.0) for t in unfinished)
+                closing = [
+                    (obsid, closes)
+                    for obsid, target in queued.items()
+                    if obsid not in members
+                    for closes in self._windows_to_take(target, utime)
+                ]
+                wait = group_start_wait(
+                    utime, needed, [(float("inf"), closes) for _, closes in closing]
+                )
+                if wait is not None:
+                    first = min(
+                        (pair for pair in closing if utime <= pair[1] < utime + needed),
+                        key=lambda pair: pair[1],
+                    )
+                    held[int(current.obsid)] = (
+                        f"group {group.name!r} has no window and waits for "
+                        f"{first[0]}, whose window closes before the group would end"
+                    )
+        outside: set[int] = set()
+        if open_to:
+            names = ", ".join(repr(name) for name in sorted(set(open_to.values())))
+            for obsid in queued:
+                if obsid not in open_to and obsid not in held:
+                    held[obsid] = f"group {names} is under way"
+                    outside.add(obsid)
+        self._held_outside_group = frozenset(outside)
+        return held
+
+    def groups_under_way(self) -> list[tuple[ObservationGroup, list[Pointing]]]:
+        """Each consecutive group that has begun and has members still to
+        observe, with those members in order. No science of a target outside
+        the group is observed until they have finished."""
+        groups = getattr(self.merit_model, "groups", None)
+        consecutive = (
+            groups.consecutive if isinstance(groups, ObservationGroups) else []
+        )
+        queued = {
+            int(target.obsid): target
+            for target in self.targets
+            if isinstance(getattr(target, "obsid", None), (int, float))
+        }
+        under_way = []
+        for group in consecutive:
+            present = [queued[obsid] for obsid in group.members if obsid in queued]
+            unfinished = [t for t in present if not self._finished(t)]
+            if unfinished and (
+                len(unfinished) < len(present)
+                or any(t.collected_seconds > 0 for t in present)
+            ):
+                under_way.append((group, unfinished))
+        return under_way
+
     def science_budget_left(self, target: Pointing) -> float | None:
-        """Science the target may still collect within its time budgets; None without one."""
-        # Cached for the selection under way: every candidate checks one time.
-        if self._collected_at != self.utime:
-            self._collected_at = self.utime
-            self._collected = self.merit_model.collected(self.targets)
-        return self.merit_model.budget_left(target, *self._collected)
+        """Science the target's category may still collect within its time
+        budget, from what the queue's targets have collected; None without
+        a budget."""
+        # Cached for the selection under way: the same time is checked for
+        # every candidate.
+        utime = self.utime
+        if getattr(self, "_collected_at", None) != utime:
+            self._collected_at = utime
+            self._collected = self.merit_model.collected_by_category(self.targets)
+            by_group = getattr(self.merit_model, "collected_by_group", None)
+            groups = by_group(self.targets) if callable(by_group) else {}
+            self._collected_groups = groups if isinstance(groups, dict) else {}
+        lefts = [self.merit_model.budget_left(target, self._collected)]
+        group_left = getattr(self.merit_model, "group_budget_left", None)
+        if callable(group_left):
+            lefts.append(group_left(target, self._collected_groups))
+        numbers = [left for left in lefts if isinstance(left, (int, float))]
+        return min(numbers) if numbers else None
 
     def _within_budget(self, target: Pointing) -> bool:
-        """Whether the target's budgets leave room for a visit of it."""
+        """Whether the target's category has budget left for a visit of it:
+        a visit of a sequence whole, else the target's minimum snapshot."""
         left = self.science_budget_left(target)
         if left is None:
             return True
@@ -599,8 +826,15 @@ class TargetQueue:
 
     def _cadence_due(self, target: Pointing, utime: float) -> bool:
         """Whether a cadence target's next visit is due: a cadence after its
-        last visit, or at once while a visit cut short is still owed, as
-        the planners take it again."""
+        last visit, as the planners space visits, so a target is not
+        revisited as soon as nothing outranks it. A target without a cadence,
+        or never visited, is due; so is any target where cadence does not
+        count (``cadence_weight`` of 0).
+
+        An observation cut short is not a visit to wait a cadence after, as
+        in the planners: a target whose last observation was cut is due, and
+        so is one whose last collection was in a visit window that is not
+        yet visited, so the visit is taken again while its window is open."""
         merit_model = self.merit_model
         if merit_model.cadence_weight <= 0.0:
             return True
@@ -608,25 +842,14 @@ class TargetQueue:
         last = getattr(target, "last_collection_time", None)
         if interval is None or not isinstance(last, (int, float)):
             return True
-        if self._cut_visit_owed(target, float(last)):
+        if getattr(target, "last_observation_cut", False) is True:
             return True
-        return utime >= float(last) + float(interval)
-
-    @staticmethod
-    def _cut_visit_owed(target: Pointing, last: float) -> bool:
-        """Whether the visit ``target`` last collected in, at ``last``, was
-        cut short and is still to be taken again: its window not yet
-        visited whole, or, without windows, an interruption since."""
         windows = getattr(target, "visit_windows", None)
         if isinstance(windows, list) and windows:
-            index = target.visit_index_at(last)
-            return index is not None and not target.visit_complete(index)
-        interruptions = getattr(target, "interruptions", None)
-        return (
-            isinstance(interruptions, tuple)
-            and bool(interruptions)
-            and interruptions[-1] >= last
-        )
+            index = target.visit_index_at(float(last))
+            if index is not None and not target.visit_complete(index):
+                return True
+        return utime >= float(last) + float(interval)
 
     def _slew_allowance(self) -> float | None:
         """The time to allow for reaching any request once its protected
@@ -750,8 +973,20 @@ class TargetQueue:
         self._opening_utime = utime
         self._requests_by_obsid = {}
         self._due_requests = []
+        # A consecutive group under way takes no other science until it has
+        # finished, so no time is kept for a request it holds back: the
+        # group's own members would otherwise give way to a request that
+        # cannot be observed, and the group would stand idle.
+        self.consecutive_holds(utime)
+        held_outside = self._held_outside_group
         for other in self.targets:
             if other.done or other.merit <= 0:
+                continue
+            if int(other.obsid) in held_outside:
+                continue
+            # A request its budget has no room for is never selected, so no
+            # time is kept for it either.
+            if not self._within_budget(other):
                 continue
             # A windowed request is kept for the visit it would be selected
             # for now, which its window may point elsewhere.
@@ -772,7 +1007,22 @@ class TargetQueue:
             openings.append((protected, value, int(other.obsid)))
             self._requests_by_obsid[int(other.obsid)] = other
         openings.sort()
-        return openings
+        self._openings = openings
+        return list(openings)
+
+    def openings_at(self, utime: float) -> list[tuple[float, float, int]]:
+        """The request openings after ``utime`` (see
+        :meth:`request_openings`): those last computed, where they were
+        computed at ``utime`` and not forgotten since, else computed now.
+        The caller forgets them (:meth:`forget_openings`) when it changes a
+        target, so that one fetch does not compute the same openings twice."""
+        if self._openings is not None and self._opening_utime == utime:
+            return list(self._openings)
+        return self.request_openings(utime)
+
+    def forget_openings(self) -> None:
+        """Compute the request openings afresh the next time they are asked for."""
+        self._openings = None
 
     def _due_request_to_wait_for(
         self,
@@ -911,6 +1161,29 @@ class TargetQueue:
             and not t.done
             and self._open_at(t, utime)
         ]
+        held = self.consecutive_holds(utime)
+        if held:
+            kept = [t for t in targets if int(t.obsid) not in held]
+            if len(kept) < len(targets) and self.log is not None:
+                self.log.log_event(
+                    utime=utime,
+                    event_type="QUEUE",
+                    description=(
+                        f"{len(targets) - len(kept)} targets held back: "
+                        + "; ".join(
+                            sorted(
+                                {
+                                    held[int(t.obsid)]
+                                    for t in targets
+                                    if int(t.obsid) in held
+                                }
+                            )
+                        )
+                    ),
+                    obsid=None,
+                    acs_mode=None,
+                )
+            targets = kept
         # Candidates are scored, rather than the first in merit order taken,
         # when anything beyond base merit tells them apart. An allocation
         # does: its bonus is for the collection a candidate would make now,
@@ -923,7 +1196,7 @@ class TargetQueue:
             or self.radiator_sun_exposure_weight != 0.0
             or self.radiator_earth_exposure_weight != 0.0
             or merit_model.is_dynamic
-            or self.merit_model.group_contiguity_weight > 0.0
+            or self._contiguity_weight() > 0.0
             or (self.prefer is not None and self.allocation_bonus > 0.0)
         )
         overfill = 0
@@ -1007,6 +1280,7 @@ class TargetQueue:
                 or target.uses_mounted_attitude() is True
                 or recorder_room_gb is not None
                 else None,
+                utime=utime,
             )
 
             # A target must start collecting by its deadline.
@@ -1034,6 +1308,10 @@ class TargetQueue:
 
             # Check if target is visible for full observation
             visibility_window = target.visible(utime, endtime)
+            # Reservation and repoint cuts limit this snapshot, not the
+            # target's last chance to observe. Score its physical visibility
+            # window so identical dispatch and planned visits have one value.
+            merit_window = visibility_window if visibility_window else None
             if visibility_window and self._repoints_forbidden(target):
                 # Not during a repoint, and the minimum snapshot before the
                 # next one; the window then ends where the repoint begins.
@@ -1113,7 +1391,7 @@ class TargetQueue:
                 terms = merit_model.value_terms(
                     target,
                     utime,
-                    visibility_window=visibility_window,
+                    visibility_window=merit_window,
                     delivered_shares=delivered_shares,
                 )
                 value = self._with_allocation(terms, target, collection)
@@ -1190,9 +1468,7 @@ class TargetQueue:
                         "collection": self.collection_time_weight * collection_minutes,
                         "radiator": radiator,
                         "data": -(self.data_volume_weight * data_gb),
-                        "group": self.merit_model.contiguity_bonus(
-                            target, self._previous_obsid
-                        ),
+                        "group": self._contiguity_bonus(target),
                     }
                 )
                 if breakdown.score > best_score:

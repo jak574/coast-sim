@@ -728,7 +728,6 @@ class TestManagePPTLifecycle:
         self, queue_ditl: QueueDITL
     ) -> None:
         mock_ppt = Mock()
-        mock_ppt.obsid = 1
         mock_ppt.exptime = 300.0
         mock_ppt.ra = 10.0
         mock_ppt.dec = 20.0

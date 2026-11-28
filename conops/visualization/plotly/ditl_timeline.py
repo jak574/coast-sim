@@ -26,11 +26,6 @@ from ..contacts import (
     run_window,
     station_colors,
 )
-from ..mpl.ditl_timeline import (
-    _extract_activities,
-    _extract_repoints,
-    _extract_sequence_steps,
-)
 
 # Mapping of matplotlib color names to CSS color names that Plotly accepts
 MATPLOTLIB_TO_PLOTLY_COLORS = {
@@ -145,6 +140,49 @@ def _extract_observations(
         observations[category.name].append((obs_start, obs_duration))
 
     return observations
+
+
+def _extract_sequence_steps(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[tuple[float, float]]:
+    """The steps of sequence visits, as (start, duration) in hours."""
+    segments = []
+    for ppt in ditl.plan:
+        if ppt.step is None or ppt.obstype in (ObsType.GSP, ObsType.ACTIVITY):
+            continue
+        start = (ppt.begin + ppt.slewtime - t_start) / 3600 - offset_hours
+        duration = (ppt.end - (ppt.begin + ppt.slewtime)) / 3600
+        if duration > 0:
+            segments.append((start, duration))
+    return segments
+
+
+def _extract_activities(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Scheduled activities as (start, duration) in hours: thruster
+    momentum dumps, and the rest."""
+    dumps: list[tuple[float, float]] = []
+    others: list[tuple[float, float]] = []
+    for ppt in ditl.plan:
+        if ppt.obstype != ObsType.ACTIVITY:
+            continue
+        start = (ppt.begin - t_start) / 3600 - offset_hours
+        duration = (ppt.end - ppt.begin) / 3600
+        if duration <= 0:
+            continue
+        (dumps if ppt.desaturation else others).append((start, duration))
+    return dumps, others
+
+
+def _extract_repoints(
+    ditl: QueueDITL | DITL, t_start: float, offset_hours: float
+) -> list[float]:
+    """When the antenna repointed during an observation, in hours."""
+    repoints = getattr(ditl, "repoints_in_observations", None)
+    if not isinstance(repoints, list):
+        return []
+    return [(float(at) - t_start) / 3600 - offset_hours for at, _, _ in repoints]
 
 
 def _extract_slews(

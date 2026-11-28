@@ -11,16 +11,17 @@ from conops.config import (
     ObservationGroups,
     ObservationTiming,
 )
-from conops.schedulers import LocalSearchScheduler, PriorityScheduler
+from conops.schedulers import CpSatScheduler, LocalSearchScheduler, PriorityScheduler
 from conops.targets import ObservationSequence, Pointing, SequenceStep
 
 from .planning_scenario import BEGIN, make_config
 
 
-@pytest.mark.parametrize("planner", ["priority", "decode"])
+@pytest.mark.parametrize("planner", ["priority", "local_seed", "cp_seed"])
 @pytest.mark.parametrize(
     "budget_source,budget,visits",
     [
+        ("none", None, 2),
         ("category", 1200, 2),
         ("group", 1200, 2),
         ("both", 1200, 2),
@@ -30,7 +31,11 @@ from .planning_scenario import BEGIN, make_config
 def test_sequence_planning_counts_only_the_science_steps(
     planner, budget_source, budget, visits
 ):
-    config = make_config(3, open_sky=True)
+    if planner == "cp_seed":
+        pytest.importorskip("ortools")
+    config = make_config(3)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.payload.observation_timing = ObservationTiming()
     config.observation_categories = ObservationCategories(
         categories=[
@@ -81,9 +86,8 @@ def test_sequence_planning_counts_only_the_science_steps(
         scheduler = PriorityScheduler(*args, include_passes=False)
         entries = list(scheduler.schedule())
     else:
-        scheduler = LocalSearchScheduler(
-            *args, include_passes=False, time_limit=0, max_iterations=0
-        )
+        cls = LocalSearchScheduler if planner == "local_seed" else CpSatScheduler
+        scheduler = cls(*args, include_passes=False, time_limit=0, max_iterations=0)
         decoded = scheduler._start_from_priority_plan()
         entries = [e for b in decoded.final.timeline for e in b.steps or [b.entry]]
     assert [e.step for e in entries] == [

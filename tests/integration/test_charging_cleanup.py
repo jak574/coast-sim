@@ -79,6 +79,25 @@ def _simulation(
     return ditl, ditl.queue.targets[0]
 
 
+def _charge_commanded(ditl: QueueDITL) -> float:
+    """When the first emergency charge was commanded, from the run's start."""
+    return next(
+        float(event.time) - BEGIN
+        for event in ditl.log.events
+        if event.description.startswith("Starting battery charge")
+    )
+
+
+def _slew_end_after(ditl: QueueDITL, offset: float) -> float:
+    """The first step at or after the end of the slew under way at ``offset``."""
+    begin, end = next(
+        (float(e.begin), float(e.begin) + float(e.slewtime))
+        for e in _entries(ditl, ObsType.AT)
+        if float(e.begin) - BEGIN <= offset < float(e.begin) + float(e.slewtime) - BEGIN
+    )
+    return float(-(-(end - BEGIN) // STEP) * STEP)
+
+
 def _entries(ditl: QueueDITL, obstype: ObsType) -> list[PlanEntry]:
     return [entry for entry in ditl.plan if entry.obstype == obstype]
 
@@ -117,7 +136,11 @@ def test_charging_cuts_an_observation_still_slewing_at_once(monkeypatch) -> None
 
     assert ditl.calc()
 
-    assert _entries(ditl, ObsType.CHARGE)[0].begin - BEGIN == 60
+    # The alert comes while a slew is under way. The charge is commanded at
+    # once, and its plan entry begins where its own slew does: at the first
+    # step after the slew under way ends.
+    assert _entries(ditl, ObsType.CHARGE)[0].begin - BEGIN == 120
+    assert _charge_commanded(ditl) == 60
     assert _collected(ditl) == pytest.approx(target.collected_seconds)
     assert ditl.validate_plan_matches_execution() == []
 
@@ -500,7 +523,7 @@ def _check_distant_cut(
 ) -> None:
     charge = _entries(ditl, ObsType.CHARGE)[0]
     entries = _entries(ditl, ObsType.AT)
-    first, abandoned = [e for e in entries if e.begin < charge.begin]
+    first, abandoned = (e for e in entries if e.begin < charge.begin)
     assert first.collection_end - first.collection_begin == 300
     assert abandoned.collection_end == abandoned.collection_begin
     assert abandoned.end - abandoned.collection_end == 125
@@ -561,7 +584,13 @@ def test_charging_between_steps_that_owe_no_teardown_is_at_once(monkeypatch) -> 
 
     assert ditl.calc()
 
-    assert _entries(ditl, ObsType.CHARGE)[0].begin - BEGIN == alert
+    # The alert comes while a slew is under way. The charge is commanded at
+    # once, and its plan entry begins where its own slew does: at the first
+    # step after the slew under way ends.
+    assert _entries(ditl, ObsType.CHARGE)[0].begin - BEGIN == _slew_end_after(
+        ditl, alert
+    )
+    assert _charge_commanded(ditl) == alert
     assert target.done
     assert ditl.validate_plan_matches_execution() == []
 
@@ -585,7 +614,13 @@ def test_below_the_floor_charging_between_steps_cuts_at_once(monkeypatch) -> Non
 
     assert ditl.calc()
 
-    assert _entries(ditl, ObsType.CHARGE)[0].begin - BEGIN == alert
+    # The alert comes while a slew is under way. The charge is commanded at
+    # once, and its plan entry begins where its own slew does: at the first
+    # step after the slew under way ends.
+    assert _entries(ditl, ObsType.CHARGE)[0].begin - BEGIN == _slew_end_after(
+        ditl, alert
+    )
+    assert _charge_commanded(ditl) == alert
     assert ditl.validate_plan_matches_execution() == []
 
 

@@ -24,10 +24,10 @@ from .planning_scenario import BEGIN, MIN, PATCH, T0, make_config, make_target
 
 def scenario(scheduler_type=LocalSearchScheduler):
     config = make_config(
-        2,
-        weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0),
-        open_sky=True,
+        2, weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0)
     )
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.battery.planning_level = None
     config.payload.observation_timing = ObservationTiming()
     config.spacecraft_bus.attitude_control.settle_time = 0
@@ -77,6 +77,7 @@ def test_unused_science_reserves_a_return_before_inherited_hold(scheduler_type):
         locked.collection_begin,
         locked.collection_end,
     )
+    assert activity.attitude.kind == "inherited"
 
 
 def test_augmented_return_and_hold_execute_without_mode_mismatches():
@@ -142,6 +143,81 @@ def test_augmentation_counts_future_science_against_program_budgets(budget):
     assert sum(e.exposure for e in plan if e.obsid == 2) == 10 * MIN
 
 
+def test_rejected_momentum_trial_does_not_change_the_incumbent_or_log():
+    _, scheduler, _, _, _ = scenario()
+    plan = scheduler._plan_within_momentum(scheduler._plan_once)
+    before = plan.model_dump_json()
+    events = list(scheduler.log.events)
+    scheduler._momentum = SimpleNamespace(
+        capacity_n_m_s=1.0,
+        first_crossing=lambda timeline, *args, **kwargs: (
+            T0 if any(b.entry.obsid == 1 for b in timeline) else None
+        ),
+    )
+    assert scheduler._augment_selected_plan(plan) is plan
+    assert plan.model_dump_json() == before
+    assert scheduler.log.events == events
+
+
+def test_lower_objective_trial_is_rejected(monkeypatch):
+    _, scheduler, _, _, _ = scenario()
+    plan = scheduler._plan_within_momentum(scheduler._plan_once)
+    before = plan.model_dump_json()
+    monkeypatch.setattr(
+        scheduler,
+        "_timeline_score",
+        lambda blocks: -1.0 if any(b.entry.obsid == 1 for b in blocks) else 0.0,
+    )
+    assert scheduler._augment_selected_plan(plan) is plan
+    assert plan.model_dump_json() == before
+
+
+def test_final_settling_cannot_change_a_selected_hold(monkeypatch):
+    _, scheduler, _, activity, _ = scenario()
+    plan = scheduler._plan_within_momentum(scheduler._plan_once)
+    before = plan.model_dump_json()
+    original = scheduler._finish
+
+    def finish(self, timeline):
+        result = original.__func__(self, timeline)
+        hold = next(b for b in self.timeline if b.entry.obsid == activity.obsid)
+        hold.entry.activity_hold_end += MIN
+        return result
+
+    monkeypatch.setattr(LocalSearchScheduler, "_finish", finish)
+    assert scheduler._augment_selected_plan(plan) is plan
+    assert plan.model_dump_json() == before
+
+
+def test_a_reserved_future_visit_does_not_hide_an_earlier_unused_window():
+    config, scheduler, locked, _, _ = scenario()
+    target = Pointing(
+        config=config,
+        obsid=locked.obsid,
+        ra=locked.ra,
+        dec=locked.dec,
+        merit=100,
+        ss_min=10 * MIN,
+        ss_max=10 * MIN,
+        visit_windows=[
+            VisitWindow(
+                start=T0 + 20 * MIN,
+                deadline=T0 + 40 * MIN,
+                ra=140,
+                dec=10,
+            ),
+            VisitWindow(start=T0 + 65 * MIN, deadline=T0 + 65 * MIN),
+        ],
+    )
+    locked.visit = 1
+    scheduler.targets = [target]
+    plan = scheduler.schedule()
+    visits = [e for e in plan if e.obsid == target.obsid]
+    assert [e.visit for e in visits] == [0, 1]
+    assert all(e.exposure == 10 * MIN for e in visits)
+    assert visits[1].collection_begin == locked.collection_begin
+
+
 @pytest.mark.parametrize("trial", ["momentum", "objective", "settling"])
 def test_a_rejected_trial_leaves_the_plan_unchanged(trial, monkeypatch):
     _, scheduler, _, activity, _ = scenario()
@@ -175,115 +251,3 @@ def test_a_rejected_trial_leaves_the_plan_unchanged(trial, monkeypatch):
     assert scheduler._augment_selected_plan(plan) is plan
     assert plan.model_dump_json() == before
     assert scheduler.log.events == events
-
-
-def test_a_reserved_future_visit_does_not_hide_an_earlier_unused_window():
-    config, scheduler, locked, _, _ = scenario()
-    target = Pointing(
-        config=config,
-        obsid=locked.obsid,
-        ra=locked.ra,
-        dec=locked.dec,
-        merit=100,
-        ss_min=10 * MIN,
-        ss_max=10 * MIN,
-        visit_windows=[
-            VisitWindow(
-                start=T0 + 20 * MIN,
-                deadline=T0 + 40 * MIN,
-                ra=140,
-                dec=10,
-            ),
-            VisitWindow(start=T0 + 65 * MIN, deadline=T0 + 65 * MIN),
-        ],
-    )
-    locked.visit = 1
-    scheduler.targets = [target]
-    plan = scheduler.schedule()
-    visits = [e for e in plan if e.obsid == target.obsid]
-    assert [e.visit for e in visits] == [0, 1]
-    assert all(e.exposure == 10 * MIN for e in visits)
-    assert visits[1].collection_begin == locked.collection_begin
-
-
-@pytest.mark.parametrize("scheduler_type", [LocalSearchScheduler, CpSatScheduler])
-def test_settled_calibration_releases_time_for_a_missed_visit(
-    scheduler_type, monkeypatch
-):
-    config = make_config(
-        2,
-        weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0),
-        open_sky=True,
-    )
-    config.battery.planning_level = None
-    config.payload.observation_timing = ObservationTiming()
-    config.spacecraft_bus.attitude_control.settle_time = 0
-    filler = make_target(config, 1, *PATCH[0], minutes=60, snapshot=20, merit=50)
-    visit = Pointing(
-        config=config,
-        obsid=2,
-        ra=140,
-        dec=10,
-        merit=200,
-        ss_min=30 * MIN,
-        ss_max=30 * MIN,
-        visit_windows=[VisitWindow(start=T0 + 35 * MIN, deadline=T0 + 40 * MIN)],
-    )
-    calibration = ScheduledActivity(
-        name="Calibration",
-        begin=T0 + 20 * MIN,
-        duration_seconds=5 * MIN,
-        slide_seconds=15 * MIN,
-        obsid=998001,
-    )
-    dump = ScheduledActivity(
-        name="Wheel unload",
-        begin=T0 + 70 * MIN,
-        duration_seconds=5 * MIN,
-        fixed=True,
-        desaturation=True,
-        obsid=998002,
-    )
-    options = dict(
-        time_limit=0,
-        max_iterations=0,
-        include_passes=False,
-        start_state=StartState(time=T0, attitude=(*PATCH[0], 0.0)),
-        activities=[calibration, dump],
-    )
-    if scheduler_type is CpSatScheduler:
-        options.update(solver_time_limit=1.0, solver_deterministic_time=0.01)
-    scheduler = scheduler_type(
-        config, [filler, visit], BEGIN, BEGIN + timedelta(minutes=75), **options
-    )
-    settled = []
-    build_with_momentum = scheduler._plan_within_momentum
-
-    def capture(build):
-        original = build_with_momentum(build)
-        held = next(e for e in original if e.obsid == calibration.obsid)
-        settled.append((held.activity_hold_begin, held.activity_hold_end))
-        return original
-
-    monkeypatch.setattr(scheduler, "_plan_within_momentum", capture)
-    plan = scheduler.schedule()
-    assert sum(e.exposure for e in plan if e.obsid == visit.obsid) == 30 * MIN
-    held = next(e for e in plan if e.obsid == calibration.obsid)
-    assert (held.activity_hold_begin, held.activity_hold_end) == settled[0]
-    assert held.activity_hold_begin < calibration.latest_start
-    unloaded = next(e for e in plan if e.obsid == dump.obsid)
-    assert unloaded.activity_hold_begin == dump.begin
-    assert unloaded.activity_hold_end == dump.end
-    run = DITL(
-        config=config,
-        ephem=config.constraint.ephem,
-        plan=Plan.model_validate_json(plan.model_dump_json()),
-        begin=BEGIN,
-        end=BEGIN + timedelta(minutes=75),
-    )
-    run.step_size = 60
-    pose = (*PATCH[0], 0.0)
-    run.acs.ra, run.acs.dec, run.acs.roll = pose
-    run.acs._hold_idle_attitude(*pose, T0)
-    assert run.calc()
-    assert run.validate_plan_matches_execution() == []

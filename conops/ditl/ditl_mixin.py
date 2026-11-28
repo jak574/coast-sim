@@ -1,5 +1,5 @@
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any, NamedTuple, cast
 
@@ -18,12 +18,17 @@ from ..config import (
     FaultManagementRun,
     MissionConfig,
     OnboardRecorder,
-    ScienceData,
     SolarArrayDriveState,
     SpacecraftFrame,
 )
 from ..config.data_storage import DataStorage, RecorderSummary, RecorderView
 from ..config.observation_timing import ObservationTiming, timing_for
+from ..config.radiator import (
+    BUS_SUBSYSTEM,
+    PAYLOAD_SUBSYSTEM,
+    RadiatorConfiguration,
+)
+from ..config.thermal import ThermalNetwork
 from ..schedulers.recorder import contact_downlink_gb
 from ..simulation.acs import ACS
 from ..simulation.attitude import slew_angular_velocity
@@ -38,11 +43,10 @@ from ..simulation.momentum import (
 from ..simulation.momentum_budget import MomentumBudget, MomentumLimitError
 from ..simulation.passes import Pass, PassTimes
 from ..simulation.slew import Slew
+from ..simulation.thermal_network import ThermalNetworkModel
 from ..targets import AttitudeTimeseriesSchema, Plan, PlanEntry
 from ..targets.plan_entry import extra_data_gb, instrument_modes_of
-from ..targets.too import TOORequest
 from .ditl_log import DITLLog
-from .plan_validator import PlanExecutionValidator
 from .telemetry import SolarArrayDriveAngle, Telemetry
 
 ATTITUDE_RATE_NUMERICAL_TOLERANCE_DEG = 1e-9
@@ -140,14 +144,16 @@ class DITLMixin:
         """The mode each instrument is in at this step: the observation's
         while ACS is in SCIENCE mode, a calibration step's own during a
         setup or cleanup step at ``utime``, a scheduled activity's while ACS
-        holds for it in IDLE mode, or in DESAT for a thruster dump, else
+        holds for it in ACTIVITY mode, or in DESAT for a thruster dump, else
         None, when every instrument idles or holds a mode named like the
         ACS mode."""
         try:
             acs_mode = ACSMode(int(mode))
         except (TypeError, ValueError):
             return None
-        if acs_mode in (ACSMode.IDLE, ACSMode.DESAT):
+        if acs_mode == ACSMode.SAFE and getattr(self.acs, "in_safe_mode", False):
+            return None
+        if acs_mode in (ACSMode.IDLE, ACSMode.ACTIVITY, ACSMode.DESAT, ACSMode.SAFE):
             # Dispatch holds the activity itself; a plan holds its entry.
             active = getattr(self, "_active_activity", None)
             modes = getattr(active, "instrument_modes", None)
@@ -211,8 +217,7 @@ class DITLMixin:
     telemetry: Telemetry
     calculate_field_of_regard: bool
     _stored_momentum_tracker: StoredMomentumTracker | None
-    too_register: list[TOORequest]
-    _plan_validator: Callable[[], PlanExecutionValidator]
+    _thermal_network: ThermalNetworkModel | None
 
     def __init__(
         self,
@@ -310,85 +315,7 @@ class DITLMixin:
         # Initialize common subsystems (can be overridden by subclasses)
         self._init_subsystems()
         self._stored_momentum_tracker = self._build_stored_momentum_tracker()
-
-    def submit_too(
-        self,
-        obsid: int | TOORequest,
-        ra: float = 0.0,
-        dec: float = 0.0,
-        merit: float = 0.0,
-        exptime: int = 0,
-        name: str = "",
-        submit_time: float | datetime | None = None,
-        deadline: float | datetime | None = None,
-        science_data: Mapping[str, ScienceData] | None = None,
-        interrupt: bool = True,
-        instrument_modes: Mapping[str, str] | None = None,
-    ) -> TOORequest:
-        """Submit a Target of Opportunity (TOO) request: a
-        :class:`~conops.targets.TOORequest` holding any request, or the
-        fields of a plain pointing. It joins the target pool once its
-        ``submit_time`` is reached.
-
-        Args:
-            obsid: Unique observation identifier, or a ready TOORequest
-            ra: Right ascension in degrees
-            dec: Declination in degrees
-            merit: Base merit. A TOO interrupts only if its value exceeds the
-                current observation's.
-            exptime: Requested exposure time in seconds
-            name: Human-readable name for the TOO target
-            submit_time: When the TOO becomes active, as a Unix timestamp or a
-                datetime. None means active from the start of the simulation.
-            deadline: Latest time science collection may begin, as a Unix
-                timestamp or a datetime. None means no deadline.
-            science_data: Science data observing the TOO generates, keyed by
-                instrument name; other instruments generate their own.
-            interrupt: Whether the TOO may interrupt the observation in
-                progress; if False it is chosen when that observation ends.
-            instrument_modes: The instruments observing the TOO uses and the
-                mode each is in, by name; None: every instrument with modes,
-                in SCIENCE.
-
-        Returns:
-            The submitted TOORequest
-
-        Example:
-            >>> # TOO active immediately, to be observed within 4 hours
-            >>> ditl.submit_too(
-            ...     obsid=1000001,
-            ...     ra=180.0,
-            ...     dec=45.0,
-            ...     merit=10000.0,
-            ...     exptime=3600,
-            ...     name="GRB 250101A",
-            ...     deadline=ditl.ustart + 4 * 3600,
-            ... )
-        """
-        if isinstance(obsid, TOORequest):
-            too = obsid
-            self.config.payload.check_request(dict(too.instrument_modes))
-            self.too_register.append(too)
-            return too
-        self.config.payload.check_request(dict(instrument_modes or {}))
-        too = TOORequest.model_validate(
-            {
-                "config": self.config,
-                "obsid": obsid,
-                "ra": ra,
-                "dec": dec,
-                "merit": merit,
-                "exptime": exptime,
-                "name": name,
-                "submit_time": submit_time,
-                "deadline": deadline,
-                "science_data": dict(science_data or {}),
-                "interrupt": interrupt,
-                "instrument_modes": dict(instrument_modes or {}),
-            }
-        )
-        self.too_register.append(too)
-        return too
+        self._reset_thermal_network()
 
     @property
     def fault_management(self) -> FaultManagementRun:
@@ -509,6 +436,61 @@ class DITLMixin:
     def _antenna_repoints(self, target: PlanEntry) -> str:
         """The category setting for antenna repoints during ``target``."""
         return self.config.observation_categories.antenna_repoints(int(target.obsid))
+
+    def _reset_thermal_network(self) -> None:
+        """Start the run's thermal node temperatures from the configured
+        values."""
+        bus = self.config.spacecraft_bus
+        radiators = getattr(bus, "radiators", None)
+        network = getattr(bus, "thermal", None)
+        if not isinstance(radiators, RadiatorConfiguration) or not isinstance(
+            network, ThermalNetwork
+        ):
+            self._thermal_network = None
+            return
+        self._thermal_network = ThermalNetworkModel.for_spacecraft(
+            radiators.radiators,
+            network,
+            power_sources=[
+                BUS_SUBSYSTEM,
+                PAYLOAD_SUBSYSTEM,
+                *(instrument.name for instrument in self.config.payload.instruments),
+            ],
+        )
+
+    def _thermal_telemetry(
+        self,
+        utime: float,
+        mode: ACSMode,
+        bus_power_w: float | None,
+        payload_power_w: float | None,
+    ) -> tuple[dict[str, float] | None, dict[str, float] | None, float]:
+        """Advance the thermal nodes to this step and return the radiator
+        temperatures, the interior node temperatures and the total radiator
+        heat flow to record.
+
+        Without a thermal node there are no temperatures, and the heat flow
+        is the one the ACS computed at the fixed radiator temperatures.
+        """
+        model = self._thermal_network
+        if model is None:
+            return None, None, self.acs.radiator_heat_dissipation_w
+        exposures = self.acs.radiator_exposures
+        power_w = self.config.payload.power_by_instrument(
+            mode,
+            in_eclipse=self.acs.in_eclipse,
+            instrument_modes=self._instrument_modes_now(mode, utime),
+        )
+        # The whole bus and the whole payload take these names, whatever an
+        # instrument is called.
+        power_w[BUS_SUBSYSTEM] = bus_power_w or 0.0
+        power_w[PAYLOAD_SUBSYSTEM] = payload_power_w or 0.0
+        model.advance(utime, exposures, power_w)
+        return (
+            model.radiator_temperatures_k or None,
+            model.node_temperatures_k or None,
+            model.heat_dissipation_w(exposures),
+        )
 
     def _build_stored_momentum_tracker(self) -> StoredMomentumTracker | None:
         attitude_control = self.config.spacecraft_bus.attitude_control
@@ -755,7 +737,7 @@ class DITLMixin:
             forecast.start_from_eci(start_eci_n_m_s)
         else:
             forecast.start_from_eci((0.0, 0.0, 0.0))
-        samples: npt.NDArray[np.floating] = np.arange(begin, end, self.step_size)
+        samples = np.arange(begin, end, self.step_size)
         if len(samples) == 0 or samples[-1] < end:
             samples = np.append(samples, end)
         slew_sample = getattr(self, "_momentum_slew_sample_s", 0.0)

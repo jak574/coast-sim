@@ -75,22 +75,6 @@ def make_config(
     return config
 
 
-def planner(kind: str) -> tuple[type, dict]:
-    """The planner class for ``kind`` and fast, deterministic search options."""
-    if kind == "priority":
-        return PriorityScheduler, {}
-    if kind == "local_search":
-        return LocalSearchScheduler, {"time_limit": 0.0}
-    pytest.importorskip("ortools")
-    return CpSatScheduler, {
-        "time_limit": 0.0,
-        "solver_time_limit": 2.0,
-        "solver_deterministic_time": 0.05,
-        "workers": 1,
-        "seed": 1,
-    }
-
-
 def make_target(
     config: MissionConfig,
     obsid: int,
@@ -128,6 +112,22 @@ PATCH = [(105.0, 10.0), (110.0, 10.0), (115.0, 10.0), (105.0, 0.0), (110.0, 20.0
 CONSTRAINED = [(30.0, 40.0), (300.0, -50.0), (170.0, 60.0), (250.0, 10.0)]
 
 
+def planner(kind: str) -> tuple[type, dict]:
+    """The planner class for ``kind`` and fast, deterministic search options."""
+    if kind == "priority":
+        return PriorityScheduler, {}
+    if kind == "local_search":
+        return LocalSearchScheduler, {"time_limit": 0.0}
+    pytest.importorskip("ortools")
+    return CpSatScheduler, {
+        "time_limit": 0.0,
+        "solver_time_limit": 2.0,
+        "solver_deterministic_time": 0.05,
+        "workers": 1,
+        "seed": 1,
+    }
+
+
 def patch_targets(
     config: MissionConfig,
     n: int = len(PATCH),
@@ -145,10 +145,6 @@ def patch_targets(
 
 def science_entries(plan: Plan | list) -> list:
     return [e for e in plan if e.obstype not in (ObsType.GSP, ObsType.ACTIVITY)]
-
-
-def activity_entries(plan: Plan | list) -> list:
-    return [e for e in plan if e.obstype == ObsType.ACTIVITY]
 
 
 def collected_seconds(run, obsid: int | None = None, *, science: bool = False) -> float:

@@ -5,20 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from conops.targets import MovingPointing, Plan, Pointing, track_from_table
+from conops.targets import MovingPointing, Plan, Pointing, Program, track_from_table
 from conops.targets.visits import VisitWindow
 
 
-# Every pair of kind, windowed and complete values is covered.
-@pytest.mark.parametrize(
-    ("kind", "windowed", "complete"),
-    [
-        (Pointing, False, True),
-        (Pointing, True, False),
-        (MovingPointing, True, True),
-        (MovingPointing, False, False),
-    ],
-)
+@pytest.mark.parametrize("kind", [Pointing, MovingPointing])
+@pytest.mark.parametrize("windowed", [False, True])
+@pytest.mark.parametrize("complete", [False, True])
 def test_executed_plan_preserves_completion_on_reexport(
     tmp_path: Path, kind: type[Pointing], windowed: bool, complete: bool
 ) -> None:
@@ -50,6 +43,24 @@ def test_executed_plan_preserves_completion_on_reexport(
     assert json.loads((tmp_path / "reexported.json").read_text()) == json.loads(
         (tmp_path / "original.json").read_text()
     )
+
+
+@pytest.mark.parametrize("kind", [Pointing, MovingPointing])
+def test_program_omits_a_request_completion_flag(tmp_path: Path, kind: type[Pointing]):
+    entry = kind(
+        obsid=701,
+        ra=10,
+        dec=20,
+        exptime=600,
+        track=track_from_table([1000, 2000], [10, 10.1], [20, 20])
+        if kind is MovingPointing
+        else [],
+    )
+    entry.done = True
+    program = Program(begin=1000, end=2000, requests=[entry])
+    path = program.save(tmp_path / "program.json")
+    assert "done" not in json.loads(path.read_text())["requests"][0]
+    assert not Program.load(path).requests[0].done
 
 
 def test_legacy_plan_without_done_derives_exhausted_exposure(tmp_path: Path) -> None:

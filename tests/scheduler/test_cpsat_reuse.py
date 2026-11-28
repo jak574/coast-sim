@@ -86,6 +86,16 @@ def test_equal_models_decode_response_with_current_target_and_origin(native_call
     assert len(native_calls) == 1
 
 
+def test_equal_recorder_totals_reuse_without_rebasing_physical_ledgers(native_calls):
+    cache = _ChunkSolveCache()
+    before, after = chunk(entering=30, fixed=10), chunk(entering=40)
+    assert str(before.model.proto) == str(after.model.proto)
+    first = solve(before, cache)
+    second = solve(after, cache)
+    assert second[1] == "reused" and second[2] == first[2]
+    assert len(native_calls) == 1
+
+
 @pytest.mark.parametrize("changed", ["recorder", "hint"])
 def test_statistics_collision_still_checks_complete_model(
     monkeypatch, native_calls, changed
@@ -130,6 +140,52 @@ def test_different_or_nondeterministic_settings_do_not_reuse(native_calls, optio
     solve(chunk(), cache)
     assert solve(chunk(), cache, **options)[1] != "reused"
     assert len(native_calls) == 2
+
+
+def test_wall_limited_result_is_never_cached(monkeypatch):
+    cache = _ChunkSolveCache()
+    calls = []
+    original = cp_model.CpSolver.solve
+
+    def feasible(self, *args, **kwargs):
+        if self.parameters.fix_variables_to_their_hinted_value:
+            # Completing the hint is not a search.
+            return original(self, *args, **kwargs)
+        calls.append(True)
+        original(self, *args, **kwargs)
+        return cp_model.FEASIBLE
+
+    monkeypatch.setattr(cp_model.CpSolver, "solve", feasible)
+    monkeypatch.setattr(cp_model.CpSolver, "wall_time", property(lambda self: 2.0))
+    monkeypatch.setattr(
+        cp_model.CpSolver, "deterministic_time", property(lambda self: 0.05)
+    )
+    assert solve(chunk(), cache)[1] == "wall clock"
+    assert solve(chunk(), cache)[1] == "wall clock"
+    assert len(calls) == 2
+
+
+def test_unknown_at_deterministic_budget_reuses_the_same_fallback(monkeypatch):
+    cache = _ChunkSolveCache()
+    calls = []
+    original = cp_model.CpSolver.solve
+
+    def unknown(self, *args, **kwargs):
+        if self.parameters.fix_variables_to_their_hinted_value:
+            # Completing the hint is not a search.
+            return original(self, *args, **kwargs)
+        calls.append(True)
+        original(self, *args, **kwargs)
+        return cp_model.UNKNOWN
+
+    monkeypatch.setattr(cp_model.CpSolver, "solve", unknown)
+    monkeypatch.setattr(cp_model.CpSolver, "wall_time", property(lambda self: 0.001))
+    monkeypatch.setattr(
+        cp_model.CpSolver, "deterministic_time", property(lambda self: 0.05)
+    )
+    assert solve(chunk(), cache) == ("UNKNOWN", "deterministic budget", None)
+    assert solve(chunk(), cache) == ("UNKNOWN", "reused", None)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

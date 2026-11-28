@@ -10,6 +10,7 @@ from rust_ephem import EarthLimbConstraint, SunConstraint, TLEEphemeris
 
 from conops import DITL, QueueDITL, create_ditl
 from conops.common import ACSMode, ObsType
+from conops.common.vector import attitude_to_quat, quaternion_to_rotation_matrix
 from conops.config import (
     ActivityAttitude,
     AttitudeConstraintScope,
@@ -25,12 +26,16 @@ from conops.config import (
     RadiatorConfiguration,
     SolarPanelSet,
     SpacecraftBus,
+    SpacecraftFrame,
     StarTrackerConfiguration,
     StoredMomentumConfig,
+    Telescope,
     ThrusterDumpConfig,
 )
 from conops.ditl.ditl_mixin import DITLMixin
+from conops.ditl.queue_ditl import _SequenceRun
 from conops.simulation.momentum import StoredMomentumTracker
+from conops.simulation.slew import Slew
 from conops.targets import DESATURATION_OBSID, Plan, Pointing, ScheduledActivity
 from conops.targets.sequence import ObservationSequence, SequenceStep
 
@@ -624,7 +629,63 @@ class TestWithEnforcement:
         assert sum(e.startswith("Thruster dump unloads") for e in events) == len(dumps)
 
 
+@pytest.mark.parametrize("pending_dump", [False, True])
+def test_capacity_fault_is_recorded_without_an_available_dump(
+    pending_dump: bool,
+) -> None:
+    config = _config(
+        capacity_n_m_s=CAPACITY, initial_momentum_body_n_m_s=(2.0, 0.0, 0.0)
+    )
+    activities = []
+    if pending_dump:
+        config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump = (
+            ThrusterDumpConfig()
+        )
+        activities = [
+            ScheduledActivity(
+                name="Pending dump",
+                begin=BEGIN.timestamp() + 500,
+                duration_seconds=120,
+                desaturation=True,
+            )
+        ]
+    ditl = create_ditl(
+        config,
+        [_held(config)],
+        BEGIN,
+        BEGIN + timedelta(minutes=10),
+        activities=activities,
+    )
+    assert ditl.calc()
+    faults = [
+        e
+        for e in _capacity_faults(ditl)
+        if e.name == "stored_momentum" and "unloaded" not in e.cause
+    ]
+    assert len(faults) == 1
+    assert faults[0].utime == BEGIN.timestamp()
+
+
 class TestOneDumpAnswersACall:
+    def test_a_dump_added_or_ended_clears_the_pending_call(self) -> None:
+        """A dump called for at the planning level while an observation ran
+        is answered by any dump that follows, whether the forecast asked for
+        it before the next visit or the call itself placed it: no second
+        dump follows the first to unload nothing."""
+        config = _config(
+            capacity_n_m_s=CAPACITY,
+            planning_level=0.6,
+            thruster_dump=ThrusterDumpConfig(duration_seconds=120.0),
+        )
+        ditl = create_ditl(config, [_held(config)], BEGIN, END)
+        assert isinstance(ditl, QueueDITL)
+        ditl.step_size = STEP
+        ditl._dump_pending = True
+        ditl._add_dump(BEGIN.timestamp() + 600.0)
+        assert not ditl._dump_pending
+        dumps = [a for a in ditl.activities if a.desaturation]
+        assert len(dumps) == 1
+
     def test_no_dump_follows_another_at_once(self) -> None:
         config = _config(
             capacity_n_m_s=CAPACITY,
@@ -641,37 +702,120 @@ class TestOneDumpAnswersACall:
             assert float(later.begin) > float(earlier.end) + STEP
 
 
-@pytest.mark.parametrize("pending_dump", [False, True])
-def test_capacity_fault_is_recorded_without_an_available_dump(
-    pending_dump: bool,
+@pytest.mark.parametrize("changed_frame", [False, True])
+@pytest.mark.parametrize("instrument", ["Camera", "Scope"])
+def test_sequence_momentum_forecast_uses_each_steps_physical_body_attitude(
+    monkeypatch: pytest.MonkeyPatch, changed_frame: bool, instrument: str
 ) -> None:
-    config = _config(
-        capacity_n_m_s=CAPACITY, initial_momentum_body_n_m_s=(2.0, 0.0, 0.0)
-    )
-    ditl = create_ditl(config, [_held(config)], BEGIN, BEGIN + timedelta(minutes=10))
-    if pending_dump:
-        config.spacecraft_bus.attitude_control.stored_momentum.thruster_dump = (
-            ThrusterDumpConfig()
+    config = _config()
+    if changed_frame:
+        config.spacecraft_bus.frame = SpacecraftFrame(
+            boresight=(0, 0, 1), sun_side=(1, 0, 0)
         )
-        ditl.activities = [
-            ScheduledActivity(
-                name="Pending dump",
-                begin=BEGIN.timestamp() + 500,
-                duration_seconds=120,
-                desaturation=True,
-            )
+    config.payload = Payload(
+        instruments=[
+            Instrument(name="Camera"),
+            Telescope(name="Scope", boresight=(0, 1, 0)),
         ]
+    )
+    parent = Pointing(
+        config=config,
+        ra=80,
+        dec=-20,
+        obsid=20,
+        instrument_name=instrument,
+        sequence=ObservationSequence(
+            steps=[
+                SequenceStep(name="a", duration_seconds=600, roll_offset_deg=5),
+                SequenceStep(
+                    name="b", duration_seconds=600, ra=85, dec=-22, roll_offset_deg=20
+                ),
+            ]
+        ),
+        visits=1,
+    )
+    sim = QueueDITL(config=config, begin=BEGIN, end=END)
+    sim._sequence = _SequenceRun(parent=parent, index=0, begun=BEGIN.timestamp())
+    first = parent.step_pointing(0)
+    first.collection_begin = BEGIN.timestamp() + 100
+    instrument_roll = 37.0
+    body = first.target_body_attitude(instrument_roll)
+    slew = Slew.model_construct(
+        config=config,
+        slewstart=BEGIN.timestamp(),
+        slewtime=100,
+        startra=body[0],
+        startdec=body[1],
+        startroll=body[2],
+        endra=body[0],
+        enddec=body[1],
+        endroll=body[2],
+        instrument_roll=instrument_roll,
+    )
+    monkeypatch.setattr(sim, "_power_optimal_roll", lambda target, at: 32.0)
+    end, forecast, motions = sim._visit_forecast(first, slew)
+    starts = parent.sequence.step_starts(
+        config.spacecraft_bus.attitude_control,
+        sim._timing_for(parent),
+        *parent.visit_base_pointing,
+    )
+    for index, motion in enumerate(motions):
+        roll = instrument_roll + (0 if index == 0 else 15)
+        expected = parent.step_pointing(index).target_body_attitude(roll)
+        observed = forecast(float(motion.slewend) + 1)
+        assert quaternion_to_rotation_matrix(
+            attitude_to_quat(*observed)
+        ) == pytest.approx(
+            quaternion_to_rotation_matrix(attitude_to_quat(*expected)), abs=1e-12
+        )
+    assert end >= first.collection_begin + starts[-1] + 600
+
+
+@pytest.mark.parametrize("minutes", [40, 50])
+def test_a_dump_moves_to_a_safe_attitude_where_its_own_cannot_be_held(
+    minutes: int,
+) -> None:
+    """A dump holds the attitude the spacecraft has when it is called for.
+    At these orbit phases the Earth's limb crosses that attitude during the
+    dump, which the safety constraint forbids. Dispatch slews to a safe
+    attitude for the dump, as the planners do for a block that follows what
+    precedes it; before, it held the attitude through the violation. The
+    starting momentum brings the dump on while the target is observed, at
+    any phase from 30 to 70 minutes."""
+    begin = BEGIN + timedelta(minutes=minutes)
+    end = begin + timedelta(hours=3)
+    config = _config(
+        capacity_n_m_s=10.0,
+        initial_momentum_body_n_m_s=(7.6, 0.0, 0.0),
+        thruster_dump=ThrusterDumpConfig(duration_seconds=600.0),
+    )
+    config.constraint.safety_constraint = EarthLimbConstraint(min_angle=10)
+    config.constraint.ephem = TLEEphemeris(
+        tle="examples/example.tle", begin=begin, end=end, step_size=STEP
+    )
+    target = Pointing(
+        config=config,
+        obsid=1,
+        name="Held",
+        ra=80.0,
+        dec=-20.0,
+        merit=100.0,
+        ss_min=600,
+        ss_max=3 * 3600,
+    )
+    target.exptime = 3 * 3600
+    ditl = create_ditl(config, [target], begin, end)
+    ditl.step_size = STEP
     assert ditl.calc()
-    faults = [
-        e
-        for e in _capacity_faults(ditl)
-        if e.name == "stored_momentum" and "unloaded" not in e.cause
-    ]
-    assert len(faults) == 1
-    assert faults[0].utime == BEGIN.timestamp()
+    assert ditl.validate_plan_matches_execution() == []
+    dumps = [e for e in ditl.plan if e.desaturation]
+    assert len(dumps) == 1
+    assert dumps[0].slewtime > 0
+    assert (float(dumps[0].ra), float(dumps[0].dec)) != (80.0, -20.0)
+    assert any("slewing to a safe attitude" in e.description for e in ditl.log.events)
 
 
-@pytest.mark.parametrize("minutes", [50, 60, 70])
+@pytest.mark.parametrize("minutes", [40, 50, 60])
 def test_a_dump_waits_for_a_fixed_firing_attitude_to_be_allowed(minutes: int) -> None:
     """A fixed firing attitude is blocked by the Earth's limb for part of
     every orbit. A dump called for then begins at the first time the slew
@@ -681,9 +825,7 @@ def test_a_dump_waits_for_a_fixed_firing_attitude_to_be_allowed(minutes: int) ->
     end = begin + timedelta(hours=3)
     config = _config(
         capacity_n_m_s=10.0,
-        # Request the dump immediately; this test exercises its blocked
-        # attitude, independently of when environmental torque builds up.
-        initial_momentum_body_n_m_s=(8.5, 0.0, 0.0),
+        initial_momentum_body_n_m_s=(7.0, 0.0, 0.0),
         thruster_dump=ThrusterDumpConfig(
             duration_seconds=600.0,
             attitude=ActivityAttitude(
@@ -717,7 +859,7 @@ def test_a_dump_waits_for_a_fixed_firing_attitude_to_be_allowed(minutes: int) ->
     assert any("firing attitude" in d for d in descriptions)
 
 
-@pytest.mark.parametrize("minutes", [40, 50, 60, 70])
+@pytest.mark.parametrize("minutes", [50, 60, 70])
 def test_the_planner_reserves_a_dump_that_waits_for_its_fixed_attitude(
     minutes: int,
 ) -> None:
@@ -767,7 +909,7 @@ def test_the_planner_reserves_a_dump_that_waits_for_its_fixed_attitude(
     assert (float(holds[0].ra), float(holds[0].dec)) != pytest.approx((80.0, -20.0))
 
 
-@pytest.mark.parametrize("minutes", [40, 70])
+@pytest.mark.parametrize("minutes", [50, 60, 70])
 def test_a_planned_dump_that_waits_executes_as_planned(minutes: int) -> None:
     from conops.schedulers import PriorityScheduler
 

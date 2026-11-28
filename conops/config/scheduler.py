@@ -48,6 +48,7 @@ _SOLVER_FIELDS = (
     "chunk_seconds",
     "workers",
     "max_candidates",
+    "local_search_first",
 )
 """Settings of the CP-SAT scheduler only."""
 
@@ -207,6 +208,13 @@ class SchedulerConfig(ConfigModel):
     workers: int | None = Field(default=None, ge=1, description="CP-SAT search workers")
     max_candidates: int | None = Field(
         default=None, ge=1, description="Candidate snapshots per CP-SAT chunk"
+    )
+    local_search_first: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the CP-SAT scheduler runs its local search before its "
+            "chunks, which then start from the searched plan, not after them"
+        ),
     )
     replanning: ReplanSettings = Field(
         default_factory=ReplanSettings,

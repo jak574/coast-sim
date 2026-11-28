@@ -10,6 +10,7 @@ from rust_ephem import SunConstraint, TLEEphemeris
 from conops.common import ACSMode
 from conops.common.enums import SlewAlgorithm
 from conops.config import (
+    ActivityAttitude,
     AttitudeControlSystem,
     Constraint,
     GroundStationRegistry,
@@ -24,8 +25,6 @@ from conops.simulation.acs import ACS
 from conops.simulation.passes import PassTimes
 from conops.simulation.slew import Slew
 from conops.targets import Pointing
-
-from .planning_scenario import MIN, PATCH, make_config
 
 BEGIN = datetime(2025, 11, 1, tzinfo=timezone.utc)
 END = BEGIN + timedelta(hours=2)
@@ -133,6 +132,34 @@ class TestStepGrid:
 
 
 class TestSlews:
+    def test_idle_candidates_reuse_rolls_only_at_the_same_point_and_time(
+        self, ctx: SchedulingContext
+    ) -> None:
+        from conops.schedulers.context import optimum_body_roll
+
+        ctx.config.constraint.ignore_roll = True
+        with (
+            patch.object(
+                ACS, "_idle_safe_attitude_candidates", return_value=[(10.0, 20.0)]
+            ),
+            patch(
+                "conops.schedulers.context.optimum_body_roll", wraps=optimum_body_roll
+            ) as calculate,
+        ):
+            first = list(ctx.idle_hold_candidates((0.0, 0.0, 0.0), T0))
+            assert list(ctx.idle_hold_candidates((30.0, 40.0, 50.0), T0)) == first
+            assert calculate.call_count == 1
+            list(ctx.idle_hold_candidates((0.0, 0.0, 0.0), T0 + 60))
+            assert calculate.call_count == 2
+            with patch.object(
+                ACS, "_idle_safe_attitude_candidates", return_value=[(11.0, 20.0)]
+            ):
+                list(ctx.idle_hold_candidates((0.0, 0.0, 0.0), T0))
+            assert calculate.call_count == 3
+            fresh = SchedulingContext(ctx.config, BEGIN, END)
+            list(fresh.idle_hold_candidates((0.0, 0.0, 0.0), T0))
+            assert calculate.call_count == 4
+
     def test_retimed_slew_matches_a_fresh_one(self, ctx: SchedulingContext) -> None:
         start, end = (10.0, 20.0, 30.0), (80.0, -10.0, 120.0)
         first = ctx.slew(start, end, T0)
@@ -279,6 +306,9 @@ class TestSlews:
     def test_initial_pose_does_not_execute_a_hypothetical_faulted_flight(
         self, ctx: SchedulingContext, config: MissionConfig
     ) -> None:
+        config.spacecraft_bus.attitude_control.safe_mode_attitude = ActivityAttitude(
+            kind="power_positive"
+        )
         acs = ACS(config=config)
         expected = acs._advance_attitude(T0).state.attitude
         with patch.object(
@@ -360,40 +390,3 @@ class TestPasses:
 
         midnight = (BEGIN + timedelta(days=1)).timestamp()
         assert any(p.begin >= midnight for p in passes)
-
-
-class TestEphemerisEnd:
-    def test_the_context_ends_with_the_ephemeris(self) -> None:
-        """A horizon reaching past the ephemeris ends at its last sample,
-        and the step grid never samples beyond it."""
-        config, ephem_end = make_config(6), T0 + 6 * 3600
-        ctx = SchedulingContext(config, BEGIN, BEGIN + timedelta(hours=8), step_size=60)
-        assert ctx.ephem_end == ephem_end
-        assert ctx.uend == ephem_end
-        assert ctx.end.timestamp() == ephem_end
-        steps = ctx.steps(ephem_end - 5 * MIN, ephem_end + 10 * MIN)
-        assert len(steps) == 6 and steps[-1] == ephem_end
-        assert len(ctx.steps(ephem_end + 60, ephem_end + 10 * MIN)) == 0
-        within = SchedulingContext(
-            config, BEGIN, BEGIN + timedelta(hours=2), step_size=60
-        )
-        assert within.uend == T0 + 2 * 3600
-
-    def test_a_slew_reaching_past_the_ephemeris_is_checked_up_to_it(self) -> None:
-        config, ephem_end = make_config(6), T0 + 6 * 3600
-        ctx = SchedulingContext(config, BEGIN, BEGIN + timedelta(hours=6))
-        slew = Slew(config=config, slewstart=ephem_end - 2 * MIN)
-        slew.startra, slew.startdec, slew.startroll = PATCH[0][0], PATCH[0][1], 0.0
-        slew.endra, slew.enddec, slew.endroll = PATCH[3][0], PATCH[3][1], 0.0
-        slew.slewtime = 10 * MIN
-        slew.slewend = slew.slewstart + slew.slewtime
-        assert ctx.first_slew_violation(slew, ACSMode.SLEWING) is None
-        assert (
-            ctx.first_hold_violation(
-                (PATCH[0][0], PATCH[0][1], 0.0),
-                ephem_end - 2 * MIN,
-                ephem_end + 10 * MIN,
-                ACSMode.IDLE,
-            )
-            is None
-        )

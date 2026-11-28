@@ -1,6 +1,6 @@
 """Panel power at many samples together equals the power sample by sample."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -11,6 +11,16 @@ from conops.config.solar_panel import SolarPanel, SolarPanelSet
 
 BEGIN = datetime(2025, 11, 1, tzinfo=timezone.utc)
 T0 = BEGIN.timestamp()
+
+
+@pytest.fixture(scope="module")
+def ephem() -> TLEEphemeris:
+    return TLEEphemeris(
+        tle="examples/example.tle",
+        begin=BEGIN,
+        end=BEGIN + timedelta(hours=3),
+        step_size=60,
+    )
 
 
 def _panels() -> SolarPanelSet:
@@ -33,7 +43,7 @@ def test_body_vectors_match_the_single_rotation() -> None:
         assert together[k] == pytest.approx(one, abs=1e-12)
 
 
-def test_power_held_at_matches_each_sample(example_ephem: TLEEphemeris) -> None:
+def test_power_held_at_matches_each_sample(ephem: TLEEphemeris) -> None:
     """Over three hours of samples at several attitudes, eclipse included,
     the batch power is the per-sample power."""
     panels = _panels()
@@ -50,7 +60,7 @@ def test_power_held_at_matches_each_sample(example_ephem: TLEEphemeris) -> None:
     eclipse = [
         bool(
             panels.panels[0]._eclipse_constraint.in_constraint(
-                ephemeris=example_ephem,
+                ephemeris=ephem,
                 target_ra=0.0,
                 target_dec=0.0,
                 time=datetime.fromtimestamp(t, timezone.utc),
@@ -59,18 +69,18 @@ def test_power_held_at_matches_each_sample(example_ephem: TLEEphemeris) -> None:
         for t in times
     ]
     assert any(eclipse) and not all(eclipse)
-    together = panels.power_held_at(times, attitudes, example_ephem, eclipse)
+    together = panels.power_held_at(times, attitudes, ephem, eclipse)
     for k, (utime, (ra, dec, roll)) in enumerate(zip(times, attitudes, strict=True)):
         assert together[k] == pytest.approx(
-            float(panels.power(utime, ra, dec, example_ephem, roll=roll)), abs=1e-9
+            float(panels.power(utime, ra, dec, ephem, roll=roll)), abs=1e-9
         )
     assert together.max() > 0.0
 
 
-def test_power_held_at_without_panels_is_zero(example_ephem: TLEEphemeris) -> None:
+def test_power_held_at_without_panels_is_zero(ephem: TLEEphemeris) -> None:
     empty = SolarPanelSet(panels=[])
     assert list(
         empty.power_held_at(
-            [T0, T0 + 60.0], [(0.0, 0.0, 0.0)] * 2, example_ephem, [False, False]
+            [T0, T0 + 60.0], [(0.0, 0.0, 0.0)] * 2, ephem, [False, False]
         )
     ) == [0.0, 0.0]

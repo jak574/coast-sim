@@ -148,8 +148,10 @@ def test_safe_mode_during_a_fixed_attitude_activity(
 
     def with_fault(utime: float, ra: float, dec: float, roll: float) -> bool:
         if utime >= start + fault_minute * MIN:
-            # Below the battery's red limit from here on.
-            run.battery.charge_level = 0.3 * run.battery.watthour
+            # Fault management asks for safe mode from here on. A battery
+            # below its red limit would not do here: emergency charging then
+            # pauses the activity before safe mode is reached.
+            run.fault_management.safe_mode_requested = True
         return manage(utime, ra, dec, roll)
 
     run._manage_activities = with_fault  # type: ignore[method-assign]
@@ -397,7 +399,7 @@ def _faulted_firing(
 
     def with_fault(utime: float, ra: float, dec: float, roll: float) -> bool:
         if utime >= start + fault_minute * MIN:
-            run.battery.charge_level = 0.3 * run.battery.watthour
+            run.fault_management.safe_mode_requested = True
         return manage(utime, ra, dec, roll)
 
     run._manage_activities = with_fault  # type: ignore[method-assign]

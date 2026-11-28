@@ -84,8 +84,8 @@ Quick start
    fig = plot_spacecraft_3d(config)
    fig.show()
 
-No simulation run is needed — the visualizer reads geometry directly from
-the configuration.
+No simulation run is needed, because the visualizer reads geometry directly
+from the configuration.
 
 Usage examples
 --------------
@@ -252,17 +252,22 @@ When a :class:`~conops.config.geometry.PanelGeometry` is attached to a solar
 panel or radiator, its ``center_m``, ``u``, ``v``, ``width_m``, and
 ``height_m`` fields are used directly.
 
-When no ``PanelGeometry`` is set the visualizer falls back to automatic face
+When no ``PanelGeometry`` is set, the visualizer falls back to automatic face
 placement:
 
-1. Dot-product the component normal against the six bus face normals.
-2. Select the face with the largest dot product.
-3. Place the component centre just outside that face (gap is component-specific; e.g. 20 mm for solar panels and 5 mm for radiators) and orient the
-   panel spanning directions perpendicular to the face normal.
+1. It takes the dot product of the component normal with each of the six bus
+   face normals.
+2. It selects the face with the largest dot product.
+3. It places the component centre just outside that face and orients the
+   panel spanning directions perpendicular to the face normal.  The gap
+   between the face and the component is component-specific; for example, it
+   is 20 mm for solar panels and 5 mm for radiators.
 
-Solar panel size is estimated from ``max_power`` assuming 150 W/m² (solar
-constant × typical conversion efficiency).  Radiator size comes directly from
-``width_m`` and ``height_m``.
+Solar panel area is estimated as ``max_power / (150 × conversion_efficiency)``
+in square metres, where ``conversion_efficiency`` is the value set on the
+``solar_panel`` set (0.95 by default).  The panel is drawn with a
+width-to-height ratio of 1.6 and is at least 0.8 m wide and 0.5 m high.
+Radiator size comes directly from ``width_m`` and ``height_m``.
 
 API reference
 -------------
@@ -272,8 +277,9 @@ API reference
 See also
 --------
 
-* :doc:`configuration` — all geometric configuration fields in detail.
-* :doc:`visualization` — overview of all COASTSim visualization utilities.
-* :doc:`sky_pointing_visualization` — interactive sky-pointing globe.
-* :py:func:`conops.visualization.plot_sky_pointing_globe` — celestial-sphere
-  globe driven by a completed DITL simulation.
+* :doc:`configuration` describes all geometric configuration fields in detail.
+* :doc:`visualization` gives an overview of all COASTSim visualization
+  utilities.
+* :doc:`sky_pointing_visualization` covers the interactive sky-pointing globe.
+* :py:func:`conops.visualization.plot_sky_pointing_globe` draws a
+  celestial-sphere globe driven by a completed DITL simulation.

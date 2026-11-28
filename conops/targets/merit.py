@@ -55,13 +55,29 @@ class MeritBreakdown(BaseModel):
     @property
     def value(self) -> float:
         """Science value: base merit plus the dynamic value terms."""
-        return (
-            self.base
-            + self.urgency
-            + self.cadence
-            + self.completion_deficit
-            + self.allocation
+        return self.sum_value_terms(
+            self.base,
+            self.urgency,
+            self.cadence,
+            self.completion_deficit,
+            self.allocation,
         )
+
+    @staticmethod
+    def sum_value_terms(
+        base: float,
+        urgency: float,
+        cadence: float,
+        completion_deficit: float,
+        allocation: float = 0.0,
+    ) -> float:
+        """Use the same floating-point summation order for every scheduler."""
+        return base + urgency + cadence + completion_deficit + allocation
+
+    @staticmethod
+    def allocated_value(value: float, factor: float) -> float:
+        """Apply an allocation bonus in the same order as the recorded terms."""
+        return value + (factor - 1.0) * value
 
     @property
     def score(self) -> float:
@@ -148,42 +164,37 @@ class MeritModel:
         """The observation group a target belongs to, if any."""
         return self.groups.group_of(int(target.obsid))
 
-    def collected(
-        self, targets: Iterable["Pointing"]
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        """Science collected so far, by category name and by group name."""
-        by_category: dict[str, float] = defaultdict(float)
-        by_group: dict[str, float] = defaultdict(float)
+    def group_bounds(self, target: "Pointing") -> tuple[float | None, float | None]:
+        """The start and deadline of the target's group window, each None
+        where the target has no group or the group no bound."""
+        group = self.group(target)
+        return group.bounds if group is not None else (None, None)
+
+    def collected_by_group(self, targets: Iterable["Pointing"]) -> dict[str, float]:
+        """Science collected so far by each group's targets, by group name."""
+        collected: dict[str, float] = defaultdict(float)
         for target in targets:
             seconds = getattr(target, "collected_seconds", 0.0)
             if not isinstance(seconds, (int, float)) or seconds <= 0.0:
                 continue
-            by_category[self.category(target).name] += float(seconds)
             group = self.group(target)
             if group is not None:
-                by_group[group.name] += float(seconds)
-        return dict(by_category), dict(by_group)
+                collected[group.name] += float(seconds)
+        return dict(collected)
 
-    def budget_left(
-        self,
-        target: "Pointing",
-        by_category: Mapping[str, float],
-        by_group: Mapping[str, float],
+    def group_budget_left(
+        self, target: "Pointing", collected: Mapping[str, float]
     ) -> float | None:
-        """Science the target may still collect within its category's and
-        group's time budgets, given what each has collected; None without one."""
-        category, group = self.category(target), self.group(target)
-        lefts = []
-        if category.time_budget_seconds is not None:
-            lefts.append(
-                category.time_budget_seconds - by_category.get(category.name, 0.0)
-            )
-        if group is not None and group.time_budget_seconds is not None:
-            lefts.append(group.time_budget_seconds - by_group.get(group.name, 0.0))
-        return max(0.0, min(lefts)) if lefts else None
+        """Science the target's group may still collect within its time
+        budget, given ``collected`` by group; None without a budget."""
+        group = self.group(target)
+        if group is None or group.time_budget_seconds is None:
+            return None
+        return max(0.0, group.time_budget_seconds - collected.get(group.name, 0.0))
 
     def contiguity_bonus(self, target: "Pointing", previous_obsid: int | None) -> float:
-        """Merit for following ``previous_obsid`` in a group that prefers contiguity."""
+        """Merit added to ``target`` for following the target ``previous_obsid``
+        where both are in one group that prefers contiguity."""
         if self.group_contiguity_weight <= 0.0 or previous_obsid is None:
             return 0.0
         if int(target.obsid) == previous_obsid:
@@ -192,6 +203,28 @@ class MeritModel:
         if group is None or not group.prefer_contiguous:
             return 0.0
         return self.group_contiguity_weight if previous_obsid in group.members else 0.0
+
+    def collected_by_category(self, targets: Iterable["Pointing"]) -> dict[str, float]:
+        """Science collected so far by each category's targets, by category
+        name, for the categories' time budgets."""
+        collected: dict[str, float] = defaultdict(float)
+        for target in targets:
+            seconds = getattr(target, "collected_seconds", 0.0)
+            if isinstance(seconds, (int, float)) and seconds > 0.0:
+                collected[self.category(target).name] += float(seconds)
+        return dict(collected)
+
+    def budget_left(
+        self, target: "Pointing", collected: Mapping[str, float]
+    ) -> float | None:
+        """Science the target's category may still collect within its time
+        budget, given ``collected`` by category; None without a budget."""
+        category = self.category(target)
+        if category.time_budget_seconds is None:
+            return None
+        return max(
+            0.0, category.time_budget_seconds - collected.get(category.name, 0.0)
+        )
 
     def delivered_shares(self, targets: Iterable["Pointing"]) -> dict[str, float]:
         """Return each program's fraction of the science collected so far."""
@@ -264,20 +297,36 @@ class MeritModel:
         without a deadline have no urgency.
         """
         deadline = target.deadline
-        windows = getattr(target, "visit_windows", None)
-        # A test double's target has no windows.
-        if isinstance(windows, list) and windows:
+        if target.visit_windows:
             deadline = target.window_bounds(utime)[1]
         if deadline is None:
             return 0.0
+        close = self.urgency_close(deadline, target.windows, visibility_window)
+        return self.urgency_factor(utime, close)
+
+    @staticmethod
+    def urgency_close(
+        deadline: float | None,
+        windows: Sequence[Sequence[float]],
+        visibility_window: Sequence[float] | None = None,
+    ) -> float | None:
+        """The deadline or last usable visibility closing, shared by planners."""
+        if deadline is None:
+            return None
         close = deadline
         if visibility_window is not None:
             window_end = float(visibility_window[1])
             later_window = any(
-                window_end < float(window[0]) < deadline for window in target.windows
+                window_end < float(window[0]) < deadline for window in windows
             )
             if window_end < deadline and not later_window:
                 close = window_end
+        return close
+
+    def urgency_factor(self, utime: float, close: float | None) -> float:
+        """Urgency in [0, 1] at one decision, without changing target history."""
+        if close is None:
+            return 0.0
         remaining = close - utime
         if remaining <= self.urgency_timescale_seconds:
             return 1.0

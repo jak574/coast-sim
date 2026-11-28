@@ -50,6 +50,9 @@ from .config import (
     StoredMomentumConfig,
     Surface,
     SurfaceModel,
+    ThermalCoupling,
+    ThermalNetwork,
+    ThermalNode,
     ThrusterDumpConfig,
 )
 from .ditl import (
@@ -70,6 +73,17 @@ from .ditl import (
     RollingHorizonDITL,
     TOORequest,
     create_ditl,
+)
+from .requirements import (
+    Requirement,
+    RequirementEvidence,
+    RequirementReport,
+    RequirementResult,
+    RequirementViolation,
+    SlewClass,
+    SlewTimeRequirement,
+    TelemetryLimitRequirement,
+    check_requirements,
 )
 from .schedulers import (
     CpSatScheduler,
@@ -120,6 +134,15 @@ from .visualization import (
 )
 
 __all__ = [
+    "Requirement",
+    "RequirementEvidence",
+    "RequirementReport",
+    "RequirementResult",
+    "RequirementViolation",
+    "SlewClass",
+    "SlewTimeRequirement",
+    "TelemetryLimitRequirement",
+    "check_requirements",
     "ACS",
     "DAY_SECONDS",
     "DITL",
@@ -155,6 +178,9 @@ __all__ = [
     "GroundStation",
     "GroundStationRegistry",
     "Heater",
+    "ThermalCoupling",
+    "ThermalNetwork",
+    "ThermalNode",
     "Instrument",
     "LocalSearchScheduler",
     "LongRangeAllocator",

@@ -11,12 +11,13 @@ from conops.schedulers import LocalSearchScheduler, PriorityScheduler
 from conops.targets import ObservationSequence, Pointing, SequenceStep, VisitWindow
 from conops.targets.activity import periodic_activities
 
-from .planning_scenario import HOUR, PATCH, T0, activity_entries, replay
+from .planning_scenario import HOUR, PATCH, T0
 from .test_battery_constraint import (
     BEGIN,
     BORESIGHT,
     HOURS,
     _battery_config,
+    _execute,
     _targets,
 )
 
@@ -58,21 +59,12 @@ def _scenario(block_hour: float, slide_hours: float):  # type: ignore[no-untyped
     return config, targets, activities
 
 
-@pytest.mark.parametrize(
-    "scheduler, block_hour, slide_hours",
-    [
-        (PriorityScheduler, 1.0, 1.0),
-        (PriorityScheduler, 4.0, 1.0),
-        (LocalSearchScheduler, 1.0, 1.0),
-        (LocalSearchScheduler, 4.0, 1.0),
-        # A slide that would carry the block past the horizon is held within it.
-        (PriorityScheduler, 4.0, 2.0),
-    ],
-)
+@pytest.mark.parametrize("scheduler", [PriorityScheduler, LocalSearchScheduler])
+@pytest.mark.parametrize("block_hour", [1.0, 2.0, 3.0, 4.0])
 def test_a_late_block_before_a_visit_plans_and_executes(  # type: ignore[no-untyped-def]
-    scheduler, block_hour: float, slide_hours: float
+    scheduler, block_hour: float
 ) -> None:
-    config, targets, activities = _scenario(block_hour, slide_hours)
+    config, targets, activities = _scenario(block_hour, slide_hours=1.0)
     options = {"time_limit": 0.5} if scheduler is LocalSearchScheduler else {}
     planner = scheduler(
         config,
@@ -83,10 +75,28 @@ def test_a_late_block_before_a_visit_plans_and_executes(  # type: ignore[no-unty
         **options,
     )
     plan = planner.schedule()
-    blocks = activity_entries(plan)
+    blocks = [e for e in plan if e.obstype.name == "ACTIVITY"]
     assert {e.obsid for e in blocks} == {
         a.obsid for a in planner.activities if a.begin < T0 + HOURS * HOUR
     }
     assert all(float(e.end) == e.activity_hold_end for e in blocks)
     assert all(float(e.end) <= T0 + HOURS * HOUR for e in blocks)
-    replay(config, plan, BEGIN, BEGIN + timedelta(hours=HOURS))
+    ditl = _execute(config, plan)
+    assert ditl.validate_plan_matches_execution() == []
+
+
+def test_a_late_block_near_the_horizon_end_is_reserved_within_it() -> None:
+    """A block whose slide would carry its end past the horizon is held as
+    far as the horizon goes; the plan builds and nothing is sampled past
+    the ephemeris."""
+    config, targets, activities = _scenario(4.0, slide_hours=2.0)
+    planner = PriorityScheduler(
+        config, targets, BEGIN, BEGIN + timedelta(hours=HOURS), activities=activities
+    )
+    plan = planner.schedule()
+    late = [e for e in plan if e.obstype.name == "ACTIVITY"]
+    assert {e.obsid for e in late} == {
+        a.obsid for a in planner.activities if a.begin < T0 + HOURS * HOUR
+    }
+    assert all(float(e.end) == e.activity_hold_end for e in late)
+    assert all(float(e.end) <= T0 + HOURS * HOUR for e in late)

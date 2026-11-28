@@ -1,33 +1,36 @@
 """Fault Management System for Spacecraft Operations.
 
 This module provides an extensible fault monitoring and response system that:
+
 - Monitors multiple parameters against configurable yellow/red thresholds
 - Tracks time spent in each fault state (nominal, yellow, red)
 - Automatically triggers safe mode on RED conditions
 - Supports both "below" and "above" threshold directions
 
-Configuration Example (JSON):
+Configuration example (JSON)::
+
     {
         "fault_management": {
-            "thresholds": {
-                "battery_level": {
+            "thresholds": [
+                {
                     "name": "battery_level",
                     "yellow": 0.5,
                     "red": 0.4,
                     "direction": "below"
                 },
-                "temperature": {
-                    "name": "temperature",
-                    "yellow": 50.0,
-                    "red": 60.0,
+                {
+                    "name": "recorder_fill_fraction",
+                    "yellow": 0.7,
+                    "red": 0.9,
                     "direction": "above"
                 }
-            },
+            ],
             "safe_mode_on_red": true
         }
     }
 
-Usage Example (Python):
+Usage example (Python)::
+
     from datetime import datetime, timezone
 
     from conops.common import ACSMode
@@ -40,9 +43,9 @@ Usage Example (Python):
     # Add thresholds programmatically
     fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
     fm.add_threshold(
-        "temperature",
-        yellow=50.0,
-        red=60.0,
+        "recorder_fill_fraction",
+        yellow=0.7,
+        red=0.9,
         direction="above",
         acs_modes=[ACSMode.SCIENCE],
     )
@@ -51,7 +54,7 @@ Usage Example (Python):
     hk = Housekeeping(
         timestamp=datetime.now(tz=timezone.utc),
         battery_level=0.45,
-        temperature=55.0,
+        recorder_fill_fraction=0.75,
         acs_mode=ACSMode.SCIENCE,
     )
     run = fm.new_run()
@@ -61,23 +64,28 @@ Usage Example (Python):
     stats = run.statistics()
     # Returns: {"battery_level": {"yellow_seconds": 120.0, "red_seconds": 0.0, "current": "yellow"}, ...}
 
-Threshold Directions:
-    - "below": Fault triggered when value <= threshold (e.g., battery_level)
-    - "above": Fault triggered when value >= threshold (e.g., temperature, power_draw)
+Threshold directions:
 
-Safe Mode Behavior:
-    When safe_mode_on_red=True (default), any parameter reaching RED state will:
-    1. Set the safe_mode_requested flag to True
-    2. The DITL loop checks this flag and enqueues the ENTER_SAFE_MODE command
-    3. Safe mode is irreversible once entered
-    4. Spacecraft points solar panels at Sun for maximum power generation
-    5. All queued commands are cleared
+- "below": Fault triggered when value <= threshold (e.g., battery_level)
+- "above": Fault triggered when value >= threshold (e.g., recorder_fill_fraction,
+  power_usage)
 
-ACS Mode Filtering:
-    Thresholds can be restricted to specific ACS modes using the acs_modes parameter.
-    This allows different fault policies for different operational modes.
+Safe mode behavior:
 
-    Examples:
+When safe_mode_on_red=True (default), any parameter reaching RED state will:
+
+1. Set the safe_mode_requested flag to True
+2. The DITL loop checks this flag and enqueues the ENTER_SAFE_MODE command
+3. Safe mode is irreversible once entered
+4. Spacecraft points solar panels at Sun for maximum power generation
+5. All queued commands are cleared
+
+ACS mode filtering:
+
+Thresholds can be restricted to specific ACS modes using the acs_modes parameter.
+This allows different fault policies for different operational modes.
+
+Examples::
 
     # Only check soft-constraint degradation during SCIENCE mode (precision pointing matters)
     # star_tracker_functional_count = num_trackers - soft_violation_count (soft only)
@@ -99,22 +107,24 @@ ACS Mode Filtering:
         triggers_safe_mode=False,
     )
 
-    # Check thermal limits in all modes except SAFE mode (thermal control always matters)
+    # Check the recorder in science, slewing and ground-pass modes only
     fm.add_threshold(
-        "temperature",
-        yellow=50.0,
-        red=60.0,
+        "recorder_fill_fraction",
+        yellow=0.7,
+        red=0.9,
         direction="above",
-        acs_modes=[ACSMode.SCIENCE, ACSMode.SLEW, ACSMode.SETTLE],
+        acs_modes=[ACSMode.SCIENCE, ACSMode.SLEWING, ACSMode.PASS],
     )
 
     # Check battery level in all modes (None = no filtering)
     fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
 
-    # During fault checking, the current ACS mode is determined from:
-    # 1. housekeeping.acs_mode (preferred)
-    # 2. acs.acsmode (fallback)
-    # Thresholds are only evaluated when the current mode is in acs_modes list.
+During fault checking, the current ACS mode is determined from:
+
+1. housekeeping.acs_mode (preferred)
+2. acs.acsmode (fallback)
+
+Thresholds are only evaluated when the current mode is in the acs_modes list.
 """
 
 from __future__ import annotations
@@ -279,13 +289,13 @@ class FaultThreshold(ConfigModel):
         ...     acs_modes=[ACSMode.SCIENCE]
         ... )
 
-        >>> # Check thermal limits in multiple modes
-        >>> thermal_threshold = FaultThreshold(
-        ...     name="temperature",
-        ...     yellow=50.0,
-        ...     red=60.0,
+        >>> # Check the recorder in multiple modes
+        >>> recorder_threshold = FaultThreshold(
+        ...     name="recorder_fill_fraction",
+        ...     yellow=0.7,
+        ...     red=0.9,
         ...     direction="above",
-        ...     acs_modes=[ACSMode.SCIENCE, ACSMode.SLEW, ACSMode.SETTLE]
+        ...     acs_modes=[ACSMode.SCIENCE, ACSMode.SLEWING, ACSMode.PASS]
         ... )
     """
 
@@ -409,7 +419,7 @@ class FaultManagement(ConfigModel):
             >>> # Check battery in all modes
             >>> fm.add_threshold("battery_level", yellow=0.5, red=0.4, direction="below")
             >>> # Only check star trackers during science operations
-            >>> fm.add_threshold("star_tracker_count", yellow=2.0, red=1.0,
+            >>> fm.add_threshold("star_tracker_functional_count", yellow=2.0, red=1.0,
             ...                  direction="below", acs_modes=[ACSMode.SCIENCE])
         """
         # Import here to avoid circular imports

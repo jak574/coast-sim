@@ -66,8 +66,6 @@ def create_ditl(
     submitted to the dispatch and rolling simulations before running them.
     Each simulation owns copies of the configured battery and recorder state,
     so reusing a configuration preserves its initial charge and stored volumes.
-    Dispatch also owns its request histories and program-supplied ToO wrappers,
-    so executing it does not change those states in the caller's program.
 
     Args:
         config: Mission configuration, including its ``scheduler`` section.
@@ -94,7 +92,8 @@ def create_ditl(
         raise ValueError("an ephemeris is required: pass ephem or set it on the config")
     toos: Sequence[TOORequest] = ()
     if program is not None:
-        # Schedule the program's contents, bound to this configuration.
+        # The program is what the run schedules: its requests, activities,
+        # groups and Targets of Opportunity, bound to this configuration.
         if targets or activities:
             raise ValueError("give a program or targets and activities, not both")
         program.bind(config, ephemeris)

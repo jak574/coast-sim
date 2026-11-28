@@ -98,7 +98,7 @@ def plot_acs_mode_distribution(
     )
     # Matplotlib returns a tuple in 3.10 and a PieContainer in 3.11+.
     autotexts = (
-        pie_res[-1]
+        pie_res[2]
         if isinstance(pie_res, tuple) and len(pie_res) >= _PIE_PARTS_WITH_AUTOTEXTS
         else []
     )

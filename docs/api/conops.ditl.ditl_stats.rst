@@ -1,8 +1,7 @@
-conops.ditl.ditl\_stats
-=======================
+conops.ditl.ditl_stats
+======================
 
 .. automodule:: conops.ditl.ditl_stats
-   :members: DITLStats
+   :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:

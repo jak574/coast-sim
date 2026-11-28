@@ -3,7 +3,7 @@
 A maintenance window, a calibration that needs the spacecraft still, or a
 block set aside for an engineering test is a :class:`ScheduledActivity`: it
 has a start and a duration, the spacecraft holds the attitude it has in
-``IDLE`` mode for its length, and no science is observed meanwhile. The
+``ACTIVITY`` mode for its length, and no science is observed meanwhile. The
 schedulers reserve activities as fixed blocks, as they reserve ground passes,
 and both simulations execute them: dispatch ends the observation under way at
 the activity's start, starts none whose slew or collection would run into it,
@@ -14,11 +14,18 @@ activity entries.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
-from ..common import ObsType
+from ..common import ACSMode, ObsType, unixtime_from
 from ..config import ActivityAttitude, MissionConfig
 from .plan_entry import PlanEntry
 
@@ -29,7 +36,10 @@ CHARGE_OBSID = 999000
 lie below the synthetic ones."""
 DESATURATION_OBSID = 997000
 """Obsids given to the thruster dumps dispatch calls for, in order."""
-DUMP_WAIT_OBSID = 996000
+SAFE_HOLD_OBSID = 996000
+"""Obsids given to the holds a planner reserves at a safe attitude after an
+entry whose own attitude cannot be held until the next one, in order."""
+DUMP_WAIT_OBSID = 995000
 """Obsids given to the holds a planner reserves before a thruster dump that
 has to wait for its firing attitude, in the order of the dumps. They lie
 below the dumps' own, so the two never meet however many dumps there are."""
@@ -45,7 +55,7 @@ class ScheduledActivity(BaseModel):
     duration_seconds: float = Field(gt=0.0)
     attitude: ActivityAttitude = Field(
         default_factory=ActivityAttitude,
-        description="Inherited or fixed body attitude for the full hold, after ingress",
+        description="Inherited, fixed or power-positive body attitude for the full hold",
     )
     instrument_modes: dict[str, str] = Field(
         default_factory=dict,
@@ -70,6 +80,10 @@ class ScheduledActivity(BaseModel):
             "unloaded when it ends"
         ),
     )
+    safe_hold: bool = Field(
+        default=False,
+        description="Recoverable SAFE-mode hold, without latching fault safe mode",
+    )
     fixed: bool = Field(
         default=False,
         description=(
@@ -92,18 +106,82 @@ class ScheduledActivity(BaseModel):
         ),
     )
 
+    for_instrument: str | None = Field(
+        default=None,
+        description=(
+            "The instrument the activity serves, such as the one a "
+            "calibration is for. With skip_if_unused_seconds, the activity is "
+            "skipped where that instrument is not observing around it"
+        ),
+    )
+    skip_if_unused_seconds: float | None = Field(
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Skip the activity where its start falls in a stretch of at least "
+            "this many seconds in which for_instrument observes nothing. The "
+            "stretch counted is the one known when the activity is decided: "
+            "from the instrument's last observation to the end of a "
+            "consecutive group under way that does not use it. None: the "
+            "activity is always held"
+        ),
+    )
+
     @field_validator("begin", mode="before")
     @classmethod
-    def _begin_as_unix(cls, value: float | datetime) -> float:
+    def _begin_as_unix(cls, value: float | int | str | datetime) -> float:
         if isinstance(value, datetime):
             return value.timestamp()
-        return float(value)
+        return unixtime_from(value)
+
+    @field_serializer("begin", when_used="json")
+    def _serialize_begin(self, v: float) -> str:
+        return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
 
     @model_validator(mode="after")
     def _fixed_does_not_slide(self) -> ScheduledActivity:
+        if self.desaturation and self.attitude.kind == "power_positive":
+            raise ValueError("a firing attitude must be inherited or fixed")
+        if self.safe_hold and self.desaturation:
+            raise ValueError("a safe hold cannot also be a desaturation")
         if self.fixed and self.slide_seconds > 0.0:
             raise ValueError("a fixed activity begins at its start and cannot slide")
+        if (self.for_instrument is None) != (self.skip_if_unused_seconds is None):
+            raise ValueError(
+                "for_instrument and skip_if_unused_seconds are given together"
+            )
+        if self.skip_if_unused_seconds is not None and (
+            self.desaturation or self.safe_hold
+        ):
+            raise ValueError("a thruster dump or a safe hold cannot be skipped")
         return self
+
+    @property
+    def skippable(self) -> bool:
+        """Whether the activity may be skipped while its instrument is unused."""
+        return self.skip_if_unused_seconds is not None
+
+    def skipped_in(self, unused_from: float, unused_to: float) -> bool:
+        """Whether the activity is skipped, its instrument being known to
+        observe nothing from ``unused_from`` to ``unused_to``: its start is
+        inside that stretch and the stretch is long enough."""
+        if self.skip_if_unused_seconds is None:
+            return False
+        return (
+            unused_from <= self.begin <= unused_to
+            and unused_to - unused_from >= self.skip_if_unused_seconds
+        )
+
+    @property
+    def hold_mode(self) -> ACSMode:
+        return (
+            ACSMode.SAFE
+            if self.safe_hold
+            else ACSMode.DESAT
+            if self.desaturation
+            else ACSMode.ACTIVITY
+        )
 
     @property
     def end(self) -> float:
@@ -119,7 +197,12 @@ class ScheduledActivity(BaseModel):
         return self.slide_seconds > 0.0
 
     def hold_start_for_run(self, run_begin: float) -> float:
-        """Start assumed by an independent run without prior execution state."""
+        """Start assumed by an independent run without prior execution state.
+
+        A still-open slide window can start a whole hold within this run.
+        After the window closes, resume from the latest permitted start;
+        a fixed activity has only its nominal start.
+        """
         return max(self.begin, min(run_begin, self.latest_start))
 
     def plan_entry(
@@ -145,6 +228,7 @@ class ScheduledActivity(BaseModel):
         entry.instrument_modes = dict(self.instrument_modes)
         entry.fixed_data_gb = float(self.data_gb)
         entry.desaturation = self.desaturation
+        entry.safe_hold = self.safe_hold
         entry.activity_hold_begin = self.begin
         entry.activity_hold_end = self.end
         entry.obsid = self.obsid
@@ -156,6 +240,29 @@ class ScheduledActivity(BaseModel):
         entry.ss_max = self.duration_seconds
         entry.exptime = self.duration_seconds
         return entry
+
+
+def uses_instrument(item: object, instrument: str) -> bool:
+    """Whether a request or a plan entry observes with ``instrument``: it
+    names the instrument, or a step of its observation sequence does."""
+    if getattr(item, "instrument_name", None) == instrument:
+        return True
+    sequence = getattr(item, "sequence", None)
+    steps = getattr(sequence, "steps", None)
+    return isinstance(steps, list) and any(
+        getattr(step, "instrument_name", None) == instrument for step in steps
+    )
+
+
+def visit_seconds(target: object) -> float:
+    """How long the science a request still has to collect takes, at the
+    least: the science and calibration of a sequence visit, else the
+    exposure it has left."""
+    sequence = getattr(target, "sequence", None)
+    if sequence is not None:
+        return float(sequence.science_seconds) + float(sequence.calibration_seconds)
+    left = getattr(target, "exptime", None)
+    return float(left) if isinstance(left, (int, float)) else 0.0
 
 
 def assign_obsids(
@@ -184,11 +291,15 @@ def periodic_activities(
     fixed: bool = False,
     slide_seconds: float = 0.0,
     attitude: ActivityAttitude | None = None,
+    safe_hold: bool = False,
+    for_instrument: str | None = None,
+    skip_if_unused_seconds: float | None = None,
 ) -> list[ScheduledActivity]:
     """Activities named ``name`` every ``interval_seconds`` from ``first``,
     each ``duration_seconds`` long, ``count`` of them or as many as begin by
-    ``until``; the instrument modes, data, ``fixed`` and ``slide_seconds``
-    apply to each. A campaign's twice-daily calibration is one call."""
+    ``until``; the instrument modes, data, ``fixed``, ``slide_seconds`` and
+    the skip rule (``for_instrument``, ``skip_if_unused_seconds``) apply to
+    each. A campaign's twice-daily calibration is one call."""
     if interval_seconds <= 0.0:
         raise ValueError("interval_seconds must be positive")
     if (count is None) == (until is None):
@@ -210,6 +321,9 @@ def periodic_activities(
                 fixed=fixed,
                 slide_seconds=slide_seconds,
                 attitude=attitude or ActivityAttitude(),
+                safe_hold=safe_hold,
+                for_instrument=for_instrument,
+                skip_if_unused_seconds=skip_if_unused_seconds,
             )
         )
         k += 1

@@ -232,6 +232,7 @@ class DITL(DITLMixin, DITLStats):
                 self.passes = self.coverage.pass_times
 
         self._reset_stored_momentum_tracker()
+        self._reset_thermal_network()
 
         # Set up ACS ephemeris if not already set
         if self.acs.ephem is None:
@@ -513,6 +514,9 @@ class DITL(DITLMixin, DITLStats):
                 ),
             )
             drive_angles = self._solar_array_drive_telemetry()
+            radiator_temperatures, node_temperatures, radiator_heat_w = (
+                self._thermal_telemetry(self.utime[i], mode, bus_power, payload_power)
+            )
             hk = Housekeeping(
                 timestamp=datetime.fromtimestamp(self.utime[i], tz=timezone.utc),
                 ra=ra,
@@ -552,7 +556,9 @@ class DITL(DITLMixin, DITLStats):
                 else None,
                 radiator_sun_exposure=self.acs.radiator_sun_exposure,
                 radiator_earth_exposure=self.acs.radiator_earth_exposure,
-                radiator_heat_dissipation_w=self.acs.radiator_heat_dissipation_w,
+                radiator_heat_dissipation_w=radiator_heat_w,
+                radiator_temperatures_k=radiator_temperatures,
+                thermal_node_temperatures_k=node_temperatures,
                 sun_body_vector=sun_body_vector,
                 earth_body_vector=earth_body_vector,
                 quat_w=float(_q[0]),
@@ -829,6 +835,22 @@ class DITL(DITLMixin, DITLStats):
             return False
         changed = False
         if (
+            self._active_entry is not None
+            and self._active_entry.safe_hold
+            and self._active_entry.activity_hold_begin is not None
+            and utime >= self._active_entry.activity_hold_begin
+        ):
+            self.acs.begin_safe_hold()
+        if (
+            self._active_entry is not None
+            and entry_obstype(self._active_entry) == ObsType.ACTIVITY
+            and not self._active_entry.safe_hold
+            and not self._active_entry.desaturation
+            and self._active_entry.activity_hold_begin is not None
+            and utime >= self._active_entry.activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
+        if (
             self._active_pass is not None
             and self.acs.current_pass is None
             and self._active_pass.in_pass(utime)
@@ -883,6 +905,7 @@ class DITL(DITLMixin, DITLStats):
             self.acs.cancel_pending_slews(entry.obsid)
             self.acs.request_end_battery_charge(utime)
         elif obstype == ObsType.ACTIVITY:
+            self.acs.end_activity_hold()
             self.acs.cancel_pending_slews(entry.obsid)
             entry.end = min(float(entry.end), utime)
             self.log.log_event(
@@ -895,12 +918,17 @@ class DITL(DITLMixin, DITLStats):
                 obsid=entry.obsid,
                 acs_mode=self.acs.acsmode,
             )
+            if entry.safe_hold:
+                self.acs.end_safe_hold()
             if entry.desaturation:
                 self.acs.end_desaturation()
                 if entry.activity_finishes:
                     self._unload_stored_momentum(utime, entry.obsid)
         else:
             self.acs.cancel_pending_slews(entry.obsid)
+            # The entry may end between ticks. Stop its installed tracking
+            # there, before advancing this tick, so the forecast brake and
+            # the next command use the same physical handoff.
             self.acs.end_science_observation(min(float(entry.end), utime))
         self._active_entry = None
 
@@ -937,7 +965,7 @@ class DITL(DITLMixin, DITLStats):
         return True
 
     def _command_activity_entry(self, entry: PlanEntry, utime: float) -> None:
-        """Hold the entry's attitude in IDLE for the activity, slewing to it
+        """Hold the entry's activity mode, slewing to its attitude
         first where the spacecraft is elsewhere."""
         self.acs.end_science_observation(utime)
         if entry.desaturation:
@@ -946,7 +974,15 @@ class DITL(DITLMixin, DITLStats):
             entry.activity_hold_begin = float(entry.begin) + entry.slewtime
         if entry.activity_hold_end is None:
             entry.activity_hold_end = float(entry.end)
-        resumed = entry.activity_hold_begin < max(float(entry.begin), self.ustart)
+        if entry.safe_hold and utime >= entry.activity_hold_begin:
+            self.acs.begin_safe_hold()
+        if (
+            not entry.safe_hold
+            and not entry.desaturation
+            and utime >= entry.activity_hold_begin
+        ):
+            self.acs.begin_activity_hold()
+        resumed = entry.activity_resumed or entry.activity_hold_begin < self.ustart
         entry.begin = max(float(entry.begin), self.ustart)
         entry.end = min(float(entry.end), self.uend)
         if resumed:

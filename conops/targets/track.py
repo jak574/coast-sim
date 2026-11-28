@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import numpy as np
-import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from ..common import unixtime_from
@@ -69,20 +68,13 @@ def validate_track(track: Sequence[TrackPoint]) -> list[TrackPoint]:
     return list(ordered)
 
 
-def _unwrapped_ra(track: Sequence[TrackPoint]) -> npt.NDArray[np.float64]:
+def _unwrapped_ra(track: Sequence[TrackPoint]) -> np.ndarray:
     """Right ascensions continuous across the 0/360 degree seam."""
     return np.degrees(np.unwrap(np.radians([p.ra for p in track])))
 
 
 _ARRAYS: dict[
-    int,
-    tuple[
-        Sequence[TrackPoint],
-        int,
-        npt.NDArray[np.float64],
-        npt.NDArray[np.float64],
-        npt.NDArray[np.float64],
-    ],
+    int, tuple[Sequence[TrackPoint], int, np.ndarray, np.ndarray, np.ndarray]
 ] = {}
 """Each track's times, unwrapped right ascensions and declinations as arrays,
 by the track's identity: a position along a track is asked for at every
@@ -95,7 +87,7 @@ _ARRAYS_KEPT = 64
 
 def _track_arrays(
     track: Sequence[TrackPoint],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The track's sample times, unwrapped right ascensions and declinations."""
     cached = _ARRAYS.get(id(track))
     if cached is not None and cached[0] is track and cached[1] == len(track):
@@ -126,7 +118,7 @@ def position_along(track: Sequence[TrackPoint], utime: float) -> tuple[float, fl
 
 def positions_along(
     track: Sequence[TrackPoint], utimes: Sequence[float]
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+) -> tuple[np.ndarray, np.ndarray]:
     """:func:`position_along` at each of ``utimes`` together: the right
     ascensions and declinations, in degrees."""
     if not track:

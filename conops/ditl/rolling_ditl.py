@@ -9,10 +9,10 @@ from functools import partial
 
 import numpy as np
 import rust_ephem
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from ..common import ACSMode, ObsType
-from ..config import MissionConfig, ObservationTiming
+from ..common import ACSMode, ObsType, unixtime_from
+from ..config import MissionConfig, ObservationTiming, ScienceData
 from ..config.data_storage import DataStorage, RecorderView
 from ..config.solar_panel import SolarArrayDriveState
 from ..schedulers.allocator import Allocation, LongRangeAllocator
@@ -69,6 +69,21 @@ class ReplanRecord(BaseModel):
         interrupted_obsid: The observation cut short for it, if any.
         seed_entries: How many entries of the run's start plan seeded the
             replan's scheduler.
+        solver_statuses: For a CP-SAT plan, the solver's status for each
+            chunk; empty for another scheduler.
+        solver_chunks_used: For each chunk, whether the solver's snapshots
+            were kept over the priority-first plan's.
+        solver_limits: What ended each chunk's search: optimal, the
+            deterministic budget, the wall clock, the solver itself, or reused.
+        search_iterations: Changes tried in each local-search pass across
+            all candidate plans built for this replan, including rejected ones.
+        search_limits: What ended each corresponding local-search pass:
+            iteration budget, wall clock, or disabled.
+        solver_search_statuses: Every actual CP-SAT chunk search's status
+            across all passes and candidate plans, including rejected ones.
+        solver_search_limits: What ended each corresponding CP-SAT search.
+        solver_reused_chunks: Cached responses read across all candidate plans;
+            these are not counted as actual solver searches.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -85,6 +100,62 @@ class ReplanRecord(BaseModel):
     interrupted_obsid: int | None = None
     seed_entries: int = 0
     """How many entries of the run's start plan seeded this replan's scheduler."""
+    solver_statuses: list[str] = Field(default_factory=list)
+    """CP-SAT's status for each chunk of the plan; empty for another scheduler."""
+    solver_chunks_used: list[bool] = Field(default_factory=list)
+    """For each chunk, whether the solver's snapshots were kept."""
+    solver_limits: list[str] = Field(default_factory=list)
+    """What ended each chunk's search (see
+    :func:`~conops.schedulers.cpsat_scheduler.search_ending`)."""
+    search_iterations: list[int] = Field(default_factory=list)
+    search_limits: list[str] = Field(default_factory=list)
+    solver_search_statuses: list[str] = Field(default_factory=list)
+    solver_search_limits: list[str] = Field(default_factory=list)
+    solver_reused_chunks: int = Field(default=0, ge=0)
+
+
+class _PlanSummary(BaseModel):
+    """What one call of the planner reported: the seed it was given and,
+    for CP-SAT, what the solver did; kept with the plan it belongs to, since
+    a replan may build more than one plan and keep an earlier one."""
+
+    seed_entries: int = 0
+    solver_statuses: list[str] = Field(default_factory=list)
+    solver_chunks_used: list[bool] = Field(default_factory=list)
+    solver_limits: list[str] = Field(default_factory=list)
+    search_iterations: list[int] = Field(default_factory=list)
+    search_limits: list[str] = Field(default_factory=list)
+    solver_search_statuses: list[str] = Field(default_factory=list)
+    solver_search_limits: list[str] = Field(default_factory=list)
+    solver_reused_chunks: int = 0
+
+    @classmethod
+    def of(cls, scheduler: object, seed_entries: int) -> "_PlanSummary":
+        """The summary of a scheduler that has built its plan; a scheduler
+        without CP-SAT reports nothing of the solver."""
+
+        def strings(name: str) -> list[str]:
+            value = getattr(scheduler, name, None)
+            return [str(v) for v in value] if isinstance(value, list) else []
+
+        used = getattr(scheduler, "solver_chunks_used", None)
+        iterations = getattr(scheduler, "search_iterations", None)
+        reused = getattr(scheduler, "solver_reused_chunks", 0)
+        return cls(
+            seed_entries=seed_entries,
+            solver_statuses=strings("solver_statuses"),
+            solver_chunks_used=(
+                [bool(v) for v in used] if isinstance(used, list) else []
+            ),
+            solver_limits=strings("solver_limits"),
+            search_iterations=(
+                [int(v) for v in iterations] if isinstance(iterations, list) else []
+            ),
+            search_limits=strings("search_limits"),
+            solver_search_statuses=strings("solver_search_statuses"),
+            solver_search_limits=strings("solver_search_limits"),
+            solver_reused_chunks=reused if isinstance(reused, int) else 0,
+        )
 
 
 class RollingHorizonDITL(DITL):
@@ -197,9 +268,9 @@ class RollingHorizonDITL(DITL):
             raise ValueError("give allocator or allocation, not both")
         if commit_lead_time < timedelta(0):
             raise ValueError("commit_lead_time must not be negative")
-        if start_plan is not None and not issubclass(scheduler, LocalSearchScheduler):
-            # As a planned run refuses it: a seed silently dropped looks
-            # like a seeded run.
+        if start_plan is not None and not (
+            isinstance(scheduler, type) and issubclass(scheduler, LocalSearchScheduler)
+        ):
             raise ValueError("only the local-search schedulers take a start plan")
         super().__init__(
             config=config,
@@ -224,8 +295,16 @@ class RollingHorizonDITL(DITL):
         """The interval's ground passes, predicted once for every plan in it."""
         self.start_plan = start_plan
         """A plan each replan starts from, such as a dispatch run's: the
-        entries of it inside the replan's horizon seed the scheduler."""
+        entries of it inside the replan's horizon seed the scheduler, for a
+        scheduler that takes a start plan."""
         self._last_seed_entries = 0
+        self._last_plan = _PlanSummary()
+        """What the last plan built reported (see :class:`_PlanSummary`)."""
+        self._replan_search_iterations: list[int] = []
+        self._replan_search_limits: list[str] = []
+        self._replan_solver_search_statuses: list[str] = []
+        self._replan_solver_search_limits: list[str] = []
+        self._replan_solver_reused_chunks = 0
         self.allocator = allocator
         self.allocation_bonus = allocation_bonus
         self.allocation: Allocation | None = allocation
@@ -243,6 +322,69 @@ class RollingHorizonDITL(DITL):
         self._next_replan: float | None = None
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    def submit_too(
+        self,
+        obsid: int | TOORequest,
+        ra: float = 0.0,
+        dec: float = 0.0,
+        merit: float = 0.0,
+        exptime: int = 0,
+        name: str = "",
+        submit_time: float | datetime | None = None,
+        deadline: float | datetime | None = None,
+        science_data: Mapping[str, ScienceData] | None = None,
+        interrupt: bool = True,
+        instrument_modes: Mapping[str, str] | None = None,
+    ) -> TOORequest:
+        """Submit a Target of Opportunity that joins the target pool when active.
+
+        Args:
+            obsid: Unique observation identifier
+            ra: Right ascension in degrees
+            dec: Declination in degrees
+            merit: Base merit
+            exptime: Requested exposure time in seconds, observed in one snapshot
+            name: Human-readable name
+            submit_time: When the ToO becomes active (Unix time or datetime);
+                None means from the start of the simulation.
+            deadline: Latest time science collection may begin (Unix time or
+                datetime), or None for no deadline.
+            science_data: Science data observing the ToO generates, keyed by
+                instrument name; other instruments generate their own.
+            interrupt: Whether it may cut short the observation in progress.
+                If False, a rapid replan for it starts it once that
+                observation ends.
+            instrument_modes: The instruments observing the ToO uses and the
+                mode each is in, by name; None: every instrument with modes,
+                in SCIENCE.
+        """
+        if isinstance(obsid, TOORequest):
+            too = obsid
+            self.config.payload.check_request(dict(too.instrument_modes))
+            self.too_register.append(too)
+            return too
+        self.config.payload.check_request(dict(instrument_modes or {}))
+        too = TOORequest.model_validate(
+            {
+                "config": self.config,
+                "obsid": obsid,
+                "ra": ra,
+                "dec": dec,
+                "merit": merit,
+                "exptime": exptime,
+                "name": name,
+                "submit_time": unixtime_from(submit_time)
+                if submit_time is not None
+                else 0.0,
+                "deadline": unixtime_from(deadline) if deadline is not None else None,
+                "science_data": dict(science_data or {}),
+                "interrupt": interrupt,
+                "instrument_modes": dict(instrument_modes or {}),
+            }
+        )
+        self.too_register.append(too)
+        return too
 
     def too_response_times(self) -> dict[int, float | None]:
         """Seconds from each ToO's submission to its first science, by obsid.
@@ -310,20 +452,14 @@ class RollingHorizonDITL(DITL):
         assert entry is not None
         interrupted = self._pending_interruptions.pop(id(entry), None)
         super()._finish_active_entry(utime)
-        target = self._target_for(int(entry.obsid))
         if interrupted is not None:
             at = min(interrupted, utime)
+            target = self._target_for(int(entry.obsid))
             if target is not None:
-                # The visit this entry flew: a cut before it collected
-                # anything leaves the target's earlier visits as they were.
-                target.record_interruption(at, visit=entry.visit)
+                target.record_interruption(at, began=float(entry.begin))
             if entry is not target:
                 # Record this entry without a Pointing's parent delegation.
                 PlanEntry.record_interruption(entry, at)
-        elif target is not None:
-            # Ended without an interruption: a later one is not of the visit
-            # this entry collected.
-            target.end_visit_attempt()
 
     # ── Replanning ───────────────────────────────────────────────────────
 
@@ -499,6 +635,11 @@ class RollingHorizonDITL(DITL):
         self, utime: float, reason: ReplanReason, triggers: Sequence[TOORequest]
     ) -> None:
         """Keep committed activities and plan the rest of the horizon again."""
+        self._replan_search_iterations = []
+        self._replan_search_limits = []
+        self._replan_solver_search_statuses = []
+        self._replan_solver_search_limits = []
+        self._replan_solver_reused_chunks = 0
         # The first plan is built before the run, so nothing waits for it.
         cutoff = (
             self._ceil_step(utime)
@@ -510,14 +651,17 @@ class RollingHorizonDITL(DITL):
         planned = None
 
         began = time.perf_counter()
-        # The plan with the observation under way left whole, built before any cut.
+        # The plan with the observation under way left whole, built once
+        # and before any cut: a ToO it collects by its deadline waits for
+        # the observation, as it does in dispatch, and only a ToO it does
+        # not interrupts.
         whole_log = DITLLog()
         whole = (
             self._plan_after(utime, cutoff, whole_log)
             if triggers and self.allow_interrupts
             else None
         )
-        whole_seed_entries = self._last_seed_entries
+        whole_summary = self._last_plan
         for too in triggers:
             # Each attempt logs privately, so a rejected one leaves no trace
             # in the live log or its store.
@@ -564,7 +708,7 @@ class RollingHorizonDITL(DITL):
         if planned is None:
             if whole is not None:
                 planned = whole
-                self._last_seed_entries = whole_seed_entries
+                self._last_plan = whole_summary
                 self.log.add_events(whole_log.events)
             else:
                 planned = self._plan_after(utime, cutoff, self.log)
@@ -583,7 +727,15 @@ class RollingHorizonDITL(DITL):
             planning_seconds=planning_seconds,
             trigger_obsid=trigger.obsid if trigger is not None else None,
             interrupted_obsid=interrupted,
-            seed_entries=self._last_seed_entries,
+            seed_entries=self._last_plan.seed_entries,
+            solver_statuses=self._last_plan.solver_statuses,
+            solver_chunks_used=self._last_plan.solver_chunks_used,
+            solver_limits=self._last_plan.solver_limits,
+            search_iterations=self._replan_search_iterations,
+            search_limits=self._replan_search_limits,
+            solver_search_statuses=self._replan_solver_search_statuses,
+            solver_search_limits=self._replan_solver_search_limits,
+            solver_reused_chunks=self._replan_solver_reused_chunks,
         )
         self.replans.append(record)
         self.log.log_event(
@@ -615,9 +767,9 @@ class RollingHorizonDITL(DITL):
         progress, so they may not take its place either: a higher-ranked one
         would push the interrupting ToO past its deadline and undo the cut.
         They are held back while the interrupting ToO is placed, then the
-        plan up to and including its entry is pinned and the rest of the
-        horizon planned again with them; one whose deadline falls before the
-        entry ends waits for the next plan.
+        plan up to and including its whole visit is pinned and the rest of
+        the horizon planned again with them; one whose deadline falls before
+        that visit ends waits for the next plan.
         """
         waiting = [
             self._too_targets[id(request)]
@@ -636,9 +788,21 @@ class RollingHorizonDITL(DITL):
         if not waiting:
             log.add_events(first.events)
             return planned
-        follow = float(placed.end)
+        stop = planned[2].index(placed) + 1
+        pinned = planned[2][:stop]
+        visit = self._visit_step(placed, None) if placed.step is not None else None
+        for following in planned[2][stop:]:
+            if visit is None or following.step is None:
+                break
+            continued = self._visit_step(following, visit, continuing=True)
+            if continued is None:
+                break
+            pinned.append(following)
+            visit = continued
+        # A waiting request follows the whole interrupting visit, including
+        # calibration and its final cleanup, rather than only its first step.
+        follow = float(pinned[-1].end)
         held = [t for t in waiting if t.deadline is not None and t.deadline < follow]
-        pinned = planned[2][: planned[2].index(placed) + 1]
         again = DITLLog()
         replanned = self._plan_after(
             utime, cutoff, again, held=held, pinned=pinned, cut_entry=cut_entry
@@ -648,7 +812,8 @@ class RollingHorizonDITL(DITL):
 
     @staticmethod
     def _collects_by_deadline(entry: PlanEntry, too: TOORequest) -> bool:
-        """Whether a ToO's planned entry begins collecting by its deadline."""
+        """Whether a ToO's planned entry begins collecting by the ToO's
+        deadline, the latest its science may begin."""
         if too.deadline is None:
             return True
         begins = (
@@ -668,6 +833,18 @@ class RollingHorizonDITL(DITL):
                 if int(e.obsid) == obsid and entry_obstype(e) in PLAN_SCIENCE_OBSTYPES
             ),
             None,
+        )
+
+    def _seed_plan(self, start: float, end: float, source: Plan | None = None) -> Plan:
+        """Clip a source plan to the new horizon; default to the external seed."""
+        source = self.start_plan if source is None else source
+        assert source is not None
+        return Plan(
+            entries=[
+                entry
+                for entry in source
+                if float(entry.end) > start and float(entry.begin) < end
+            ]
         )
 
     def _plan_after(
@@ -743,68 +920,59 @@ class RollingHorizonDITL(DITL):
                 used,
             )
             options["allocation_bonus"] = self.allocation_bonus
-        # The first committed fragment fixes when an activity actually started.
-        activity_starts: dict[int, float] = {}
-        for entry in leading:
-            if entry_obstype(entry) == ObsType.ACTIVITY:
-                obsid = int(entry.obsid)
-                began = float(
-                    entry.activity_hold_begin
-                    if entry.activity_hold_begin is not None
-                    else entry.begin
-                )
-                activity_starts[obsid] = min(activity_starts.get(obsid, began), began)
-        activity_holds: dict[int, tuple[float, float]] = {}
-        activities = []
-        for activity in self.activities:
-            assert activity.obsid is not None
-            actual_start = activity_starts.get(activity.obsid)
-            if activity.begin < self.ustart:
-                assumed = activity.hold_start_for_run(self.ustart)
-                if assumed < self.ustart and actual_start is None:
-                    actual_start = assumed
-            begin = max(start, activity.begin)
-            # A queued request still needs its full duration, even if overdue.
-            duration = activity.duration_seconds
-            if actual_start is not None:
-                duration -= begin - actual_start
-            if duration <= 0:
-                continue  # Already completed by the committed entries.
-            if actual_start is not None:
-                activity_holds[activity.obsid] = (
-                    actual_start,
-                    actual_start + activity.duration_seconds,
-                )
-            partial_open = (
-                activity.begin < self.ustart <= activity.latest_start
-                and actual_start is None
-            )
-            activities.append(
-                activity.model_copy(
-                    update={
-                        "begin": begin,
-                        "duration_seconds": duration,
-                        # Data is added once, when the activity first starts.
-                        "data_gb": activity.data_gb if actual_start is None else 0.0,
-                        "slide_seconds": 0.0
-                        if partial_open
-                        else max(0.0, activity.latest_start - begin),
-                    }
-                )
-            )
         self._last_seed_entries = 0
-        if self.start_plan is not None and "start_plan" not in options:
-            # The start plan's entries overlapping this horizon.
-            seed = Plan(
-                entries=[
-                    entry
-                    for entry in self.start_plan
-                    if float(entry.end) > start and float(entry.begin) < horizon_end
-                ]
-            )
+        if (
+            self.start_plan is not None
+            and "start_plan" not in options
+            and isinstance(self.scheduler, type)
+            and issubclass(self.scheduler, LocalSearchScheduler)
+        ):
+            seed = self._seed_plan(start, horizon_end)
             self._last_seed_entries = len(seed)
             if seed.entries:
                 options["start_plan"] = seed
+        if (
+            isinstance(self.scheduler, type)
+            and issubclass(self.scheduler, LocalSearchScheduler)
+            and "additional_start_plans" not in options
+        ):
+            incumbent = self._seed_plan(start, horizon_end, self.plan)
+            if incumbent.entries:
+                options["additional_start_plans"] = (incumbent,)
+        reserved_activities = {
+            e.obsid for e in leading if e.obstype == ObsType.ACTIVITY
+        }
+        activities = []
+        holds = sorted(
+            (
+                e.activity_hold_begin
+                if e.activity_hold_begin is not None
+                else float(e.begin),
+                float(e.end),
+            )
+            for e in leading
+            if e.obstype == ObsType.ACTIVITY
+        )
+        for activity in self.activities:
+            if activity.obsid in reserved_activities:
+                continue
+            if activity.skippable and activity.latest_start < start:
+                # Its start window closed without the activity being
+                # committed: an earlier plan skipped it, its instrument not
+                # being in use. It is not offered again, since it could no
+                # longer be reserved.
+                continue
+            begin = activity.begin
+            # A hold due during another activity follows that activity, even
+            # when its predecessor was committed by an earlier horizon.
+            # Keep its full duration and add its data only when it starts.
+            for hold_begin, hold_end in holds:
+                if hold_begin <= begin < hold_end:
+                    begin = hold_end
+            if begin != activity.begin:
+                activity = activity.model_copy(update={"begin": begin})
+            if activity.latest_start + activity.duration_seconds > start:
+                activities.append(activity)
         scheduler = self.scheduler(
             self.config,
             # Finished and held targets too: the scheduler does not place
@@ -832,16 +1000,27 @@ class RollingHorizonDITL(DITL):
             **options,  # type: ignore[arg-type]
         )
         entries = scheduler.schedule().entries
-        for entry in entries:
-            hold = activity_holds.get(int(entry.obsid))
-            if entry_obstype(entry) == ObsType.ACTIVITY and hold is not None:
-                entry.activity_hold_begin, entry.activity_hold_end = hold
+        self._last_plan = _PlanSummary.of(scheduler, self._last_seed_entries)
+        # Rejected candidate plans can also have a load-dependent search.
+        # Keep every attempt's endings even if an earlier plan is selected.
+        self._replan_search_iterations.extend(self._last_plan.search_iterations)
+        self._replan_search_limits.extend(self._last_plan.search_limits)
+        self._replan_solver_search_statuses.extend(
+            self._last_plan.solver_search_statuses
+        )
+        self._replan_solver_search_limits.extend(self._last_plan.solver_search_limits)
+        self._replan_solver_reused_chunks += self._last_plan.solver_reused_chunks
         return (committed, dropped, [*pinned, *entries], len(scheduler.unplaced))
 
     def _planning_targets(
         self, committed: Sequence[PlanEntry], *, cut_entry: PlanEntry | None = None
     ) -> list[Pointing]:
-        """Project accepted or proposed cuts without changing flown history."""
+        """Project accepted or proposed cuts without changing flown history.
+
+        A window marked visited while collecting must reopen if this plan
+        stops its attempt short. The real request records that interruption
+        when its command finishes, after all science before the cut is credited.
+        """
         cuts = {
             int(entry.obsid): self._pending_interruptions[id(entry)]
             for entry in committed
@@ -859,7 +1038,8 @@ class RollingHorizonDITL(DITL):
             if at is None:
                 targets.append(target)
                 continue
-            # Share runtime bindings that cannot be copied.
+            # These read-only runtime inputs can contain native objects that
+            # cannot be copied. Every mutable part of request history is copied.
             memo: dict[int, object] = {}
             for runtime in (
                 target.config,
@@ -916,6 +1096,10 @@ class RollingHorizonDITL(DITL):
             return None
         category = self.merit_model.categories.get_category(int(entry.obsid))
         if not category.interruptible:
+            return None
+        if self.merit_model.groups.position(int(entry.obsid)) is not None:
+            # No other science goes between the observations of a
+            # consecutive group: the ToO waits for the group.
             return None
         target = self._too_targets[id(too)]
         too_value = self.merit_model.value_terms(
@@ -1208,7 +1392,8 @@ class RollingHorizonDITL(DITL):
             return None
         state = predict(end)
         if state is not None:
-            # Brake from the installed motion's actual terminal state.
+            # Retained entries can cut the originally installed motion. Brake
+            # from its actual terminal state rather than a rebuilt short track.
             brake = AttitudeTrajectory.braking(state, limits)
             rest = float(brake.end) if brake is not None else end
 
@@ -1280,12 +1465,53 @@ class RollingHorizonDITL(DITL):
             rest_time, attitude = max(
                 (self._rest_after(e) for e in pending), key=lambda rest: rest[0]
             )
-            return StartState(time=max(cutoff, rest_time), attitude=attitude)
-        # Before the first command, keep the pose the ACS actually holds.
+            return StartState(
+                time=max(cutoff, rest_time),
+                attitude=attitude,
+                instrument_last_used=self._instrument_last_used(committed, cutoff),
+            )
+        # Before the first command, the real ACS may already have an explicit
+        # initial pose. With no pending entry, keep the pose it actually holds;
+        # constructing a fresh ACS would silently replace that boundary state.
         return StartState(
             time=cutoff,
             attitude=(float(self.acs.ra), float(self.acs.dec), float(self.acs.roll)),
+            instrument_last_used=self._instrument_last_used(committed, cutoff),
         )
+
+    def _instrument_last_used(
+        self, committed: Sequence[PlanEntry], cutoff: float
+    ) -> dict[str, float]:
+        """When each instrument last observes before ``cutoff``, among the
+        science flown and the science committed, by instrument name."""
+        last: dict[str, float] = {}
+        for entry in [*self.plan.entries, *committed]:
+            name = entry.instrument_name
+            if name is None or entry_obstype(entry) not in PLAN_SCIENCE_OBSTYPES:
+                continue
+            if float(entry.begin) >= cutoff:
+                continue
+            ended = min(float(entry.end), cutoff)
+            last[name] = max(last.get(name, ended), ended)
+        return last
+
+    @property
+    def skipped_activities(self) -> list[ScheduledActivity]:
+        """The activities that may be skipped while their instrument is
+        unused (``ScheduledActivity.skip_if_unused_seconds``), are past
+        their latest end and were not held."""
+        held = {
+            entry.obsid
+            for entry in self.plan.entries
+            if entry_obstype(entry) == ObsType.ACTIVITY
+        }
+        return [
+            activity
+            for activity in self.activities
+            if activity.skippable
+            and activity.obsid not in held
+            and activity.latest_start + activity.duration_seconds <= self.uend
+        ]
 
     def _rest_after(self, entry: PlanEntry) -> tuple[float, Attitude]:
         """Return when an entry leaves the spacecraft at rest, and where.
@@ -1370,7 +1596,12 @@ class RollingHorizonDITL(DITL):
     def _reserved_visit_windows(
         self, committed: Sequence[PlanEntry], utime: float
     ) -> dict[int, int]:
-        """Recorded windows of whole visits still committed to collect after now."""
+        """Recorded windows of whole visits still committed to collect after now.
+
+        Preserve the window even when sequence overhead extends its science
+        into the next window's opening; elapsed time cannot identify it. A
+        pending cut attempt does not reserve its window against a whole retry.
+        """
         targets = {int(t.obsid): t for t in self.targets if t.visit_windows}
         windows: dict[int, int] = {}
         sequence_seconds: dict[tuple[int, int], float] = {}

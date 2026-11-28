@@ -295,20 +295,20 @@ class MomentumForecast:
         )
 
     def profile(
-        self, timeline: Sequence[_Block]
+        self, timeline: Sequence[_Block], reset_at: Sequence[float] = ()
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """The sample times and the stored momentum's norm at each, along
         ``timeline``, with each thruster dump unloading the wheels as it ends."""
-        times, norms, _ = self._profile(timeline)
+        times, norms, _ = self._profile(timeline, reset_at)
         return times, norms
 
     def demand(
-        self, timeline: Sequence[_Block]
+        self, timeline: Sequence[_Block], reset_at: Sequence[float] = ()
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """The sample times and what the wheels hold at each along
         ``timeline``: the stored momentum less the body's own along each
         slew where slew momentum counts, the stored momentum otherwise."""
-        times, _, demands = self._profile(timeline)
+        times, _, demands = self._profile(timeline, reset_at)
         return times, demands
 
     def _profile(
@@ -372,7 +372,11 @@ class MomentumForecast:
             # each; a span integrated with them is cached apart.
             inside = tuple(reset for reset in pending if reset < span.end)
             pending = pending[len(inside) :]
-            key = (span.key, tracker.state, inside)
+            key: tuple[object, ...] = (
+                (span.key, tracker.state, inside)
+                if inside
+                else (span.key, tracker.state)
+            )
             cached = self.cache.get(key)
             if cached is not None:
                 times.extend(cached[0])
@@ -387,9 +391,7 @@ class MomentumForecast:
                 or (span.motion is not None and self.slew_momentum)
                 else self.hold_sample_s
             )
-            samples: npt.NDArray[np.floating] = np.arange(
-                span.begin, span.end, interval
-            )
+            samples = np.arange(span.begin, span.end, interval)
             if len(samples) == 0 or samples[-1] < span.end:
                 samples = np.append(samples, span.end)
             rate_at = (

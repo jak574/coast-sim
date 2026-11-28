@@ -10,6 +10,12 @@ from ..config.config import MissionConfig
 from ..config.data_storage import DataStorage
 from ..config.observation_categories import ObservationCategories
 from ..config.observation_groups import ObservationGroups
+from ..requirements import (
+    RequirementReport,
+    SlewClassSummary,
+    SlewTimeRequirement,
+    check_requirements,
+)
 from ..simulation.acs import ACS
 from ..simulation.coverage import StationCoverage
 from ..simulation.passes import PassTimes
@@ -269,6 +275,42 @@ class DITLStats:
             )
         return rows
 
+    def _plan_entries(self) -> list[PlanEntry]:
+        plan = getattr(self, "plan", None)
+        return list(plan) if isinstance(plan, (Plan, list, tuple)) else []
+
+    def check_requirements(self) -> RequirementReport:
+        """Check the mission's requirements (``config.requirements``) against
+        the plan and the telemetry of this run.
+
+        Before the run has produced telemetry, the requirements that need it
+        are reported as not evaluated.
+        """
+        config = self.config
+        if not isinstance(getattr(config, "requirements", None), list):
+            # A test double's configuration.
+            return RequirementReport()
+        telemetry = getattr(self, "telemetry", None)
+        samples = list(telemetry.housekeeping) if telemetry is not None else []
+        return check_requirements(config, self._plan_entries(), samples or None)
+
+    def slew_class_summary(self) -> list[SlewClassSummary]:
+        """The run's slews against the classes of each slew time requirement:
+        one row per class with its slews, the longest and how many broke the
+        allowance, and a row for slews wider than the widest class. Empty
+        without such a requirement."""
+        requirements = getattr(self.config, "requirements", None)
+        if not isinstance(requirements, list):
+            # A test double's configuration.
+            return []
+        entries = self._plan_entries()
+        return [
+            row
+            for requirement in requirements
+            if isinstance(requirement, SlewTimeRequirement)
+            for row in requirement.summarise(entries)
+        ]
+
     def visit_table(
         self, targets: Sequence[Pointing] | None = None, *, per_window: bool = False
     ) -> list[VisitRecord]:
@@ -434,6 +476,35 @@ class DITLStats:
                 print(
                     f"{summary.group:<18} {summary.members:>7} {summary.observed:>8} "
                     f"{summary.visits:>6} {summary.science_hours:>9.2f} {budget}"
+                )
+        report = self.check_requirements()
+        if report.results:
+            print("\n" + "-" * 70)
+            print("REQUIREMENTS")
+            print("-" * 70)
+            print(report)
+            for violation in report.violations:
+                print(f"  {violation.requirement}: {violation}")
+        classes = self.slew_class_summary()
+        if classes:
+            print("\n" + "-" * 70)
+            print("SLEWS BY REQUIREMENT CLASS")
+            print("-" * 70)
+            print(
+                f"{'Class':<18} {'Up to deg':>9} {'Allowed s':>9} {'Slews':>6} "
+                f"{'Longest s':>9} {'Over':>5}"
+            )
+            print("-" * 70)
+            for slew_class in classes:
+                limits = (
+                    f"{slew_class.max_great_circle_deg:>9.1f} {slew_class.max_seconds:>9.0f}"
+                    if slew_class.max_great_circle_deg is not None
+                    and slew_class.max_seconds is not None
+                    else "        -         -"
+                )
+                print(
+                    f"{slew_class.name:<18} {limits} {slew_class.slews:>6} "
+                    f"{slew_class.longest_seconds:>9.0f} {slew_class.violations:>5}"
                 )
         visits = [
             r for r in self.visit_table(per_window=True) if r.window_start is not None

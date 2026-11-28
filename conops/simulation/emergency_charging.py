@@ -46,6 +46,7 @@ class EmergencyCharging:
     pointings when battery state of charge falls below acceptable levels.
 
     The class provides two methods for finding valid charging pointings:
+
     1. _find_valid_pointing(): General method that evaluates actual solar panel
        illumination for multiple candidate pointings and selects the best one.
        Works for any panel configuration (side-mounted or body-mounted).
@@ -54,12 +55,13 @@ class EmergencyCharging:
        that exploits the geometric fact that all pointings 90° from the Sun are
        equally power-positive.
 
-    Optional slew limiting:
-        Set max_slew_deg during initialization to constrain charging pointings
-        to be within a specified angular distance from the current pointing.
-        This minimizes slew time and energy expenditure during emergency charging.
+    Optional slew limiting: set max_slew_deg during initialization to constrain
+    charging pointings to be within a specified angular distance from the current
+    pointing. This minimizes slew time and energy expenditure during emergency
+    charging.
 
-    Example:
+    Example::
+
         # Without slew limit
         ec = EmergencyCharging(config=config, starting_obsid=999000)
 
@@ -162,8 +164,8 @@ class EmergencyCharging:
             ephem,
             self.solar_panel,
             self.constraint,
-            drive_state=drive_state,
             science_attitude=False,
+            drive_state=drive_state,
         )
 
     def _charging_attitude_violates_scopes(

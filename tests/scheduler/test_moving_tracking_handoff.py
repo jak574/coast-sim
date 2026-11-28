@@ -22,11 +22,13 @@ from conops.targets import (
     track_from_table,
 )
 
-from .planning_scenario import BEGIN, MIN, T0, collected_seconds, make_config
+from .planning_scenario import BEGIN, MIN, T0, make_config
 
 
 def tracked_entry(initial_pose=(105.0, 10.0, 0.0)):
-    config = make_config(2, open_sky=True)
+    config = make_config(2)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.payload.observation_timing = ObservationTiming()
     config.spacecraft_bus.attitude_control.settle_time = 0
     entry = PlanEntry(
@@ -125,12 +127,40 @@ def test_dispatch_predicts_the_brake_it_commands_during_moving_ingress():
     assert run.acs._executor.state.attitude == pytest.approx(pose)
 
 
+def test_dispatch_checks_the_hold_after_its_predicted_ingress_brake(monkeypatch):
+    run, _ = tracked_entry((0.0, 0.0, 0.0))
+    now = T0 + 20
+    queue = object.__new__(QueueDITL)
+    queue.acs, queue.config = run.acs, run.config
+    queue._idle_safety, queue.step_size = None, 60
+    before = run.acs._executor.state
+    brake = AttitudeTrajectory.braking(
+        run.acs._executor.predict(now), run.config.spacecraft_bus.attitude_control
+    )
+    assert brake is not None
+    checked = []
+
+    def unsafe_hold(begin, end, attitude, mode):
+        checked.append((begin, end, attitude, mode))
+        return (begin, "unsafe", "hardware")
+
+    monkeypatch.setattr(
+        queue, "_attitude_constraint_name_for_attitude", lambda *a: None
+    )
+    monkeypatch.setattr(queue, "_check_attitude_hold_window", unsafe_hold)
+    assert queue._pending_attitude_violation(now, brake.end + 60) == brake.end
+    assert checked == [
+        (brake.end, brake.end + 60, brake.state(brake.end).attitude, ACSMode.IDLE)
+    ]
+    assert run.acs._executor.state == before
+
+
 def test_dispatch_too_during_moving_ingress_collects_both_sequence_steps():
     config = make_config(
-        2,
-        weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0),
-        open_sky=True,
+        2, weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0)
     )
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.payload.observation_timing = ObservationTiming()
     config.battery.planning_level = None
     limits = config.spacecraft_bus.attitude_control
@@ -171,16 +201,23 @@ def test_dispatch_too_during_moving_ingress_collects_both_sequence_steps():
     entries = [e for e in run.plan if e.obsid == 900]
     assert [e.step for e in entries] == ["first", "second"]
     assert [e.exposure for e in entries] == [9 * MIN, MIN]
-    assert collected_seconds(run, 900) == 10 * MIN
+    assert (
+        sum(
+            h.collection_seconds or 0
+            for h in run.telemetry.housekeeping
+            if h.obsid == 900
+        )
+        == 10 * MIN
+    )
     assert run.validate_plan_matches_execution() == []
 
 
 def test_rapid_replan_does_not_lose_a_step_after_a_short_tracking_cut():
     config = make_config(
-        2,
-        weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0),
-        open_sky=True,
+        2, weights=TargetConfig(urgency_weight=0, completion_deficit_weight=0)
     )
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.payload.observation_timing = ObservationTiming()
     config.battery.planning_level = None
     limits = config.spacecraft_bus.attitude_control
@@ -216,7 +253,11 @@ def test_rapid_replan_does_not_lose_a_step_after_a_short_tracking_cut():
     )
     assert run.calc()
     assert any(r.interrupted_obsid == mover.obsid for r in run.replans)
-    collected = collected_seconds(run, 900, science=True)
+    collected = sum(
+        h.collection_seconds or 0
+        for h in run.telemetry.housekeeping
+        if h.obsid == 900 and not h.calibration
+    )
     assert collected == 10 * MIN, f"collected {collected} of {10 * MIN} seconds"
     assert run.validate_plan_matches_execution() == []
 

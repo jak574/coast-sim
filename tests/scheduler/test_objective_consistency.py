@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 
+from conops import DITL
 from conops.config import ObservationGroup, ObservationGroups
 from conops.schedulers.local_search_scheduler import _Snapshot
 from conops.targets import (
@@ -14,20 +15,11 @@ from conops.targets import (
     VisitWindow,
 )
 
-from .planning_scenario import (
-    BEGIN,
-    HOUR,
-    MIN,
-    T0,
-    collected_seconds,
-    make_config,
-    make_target,
-    planner,
-    replay,
-)
+from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config, make_target
+from .test_activity_safety import _planner
 
 
-def scheduler(*, group=False, sequence=False):
+def scheduler(kind="local_search", *, group=False, sequence=False):
     c = make_config(3)
     c.constraint.sun_constraint = None
     c.constraint.earth_constraint = None
@@ -67,7 +59,7 @@ def scheduler(*, group=False, sequence=False):
             ]
         )
     other = make_target(c, 101, 110, 10, merit=1000, minutes=40, snapshot=40, ss_min=40)
-    cls, options = planner("local_search")
+    cls, options = _planner(kind)
     return cls(
         c,
         [t, other],
@@ -79,9 +71,10 @@ def scheduler(*, group=False, sequence=False):
     )
 
 
+@pytest.mark.parametrize("kind", ["local_search", "cp_sat"])
 @pytest.mark.parametrize("group", [False, True])
-def test_rescoring_a_timeline_does_not_depend_on_request_visit_cursor(group):
-    s = scheduler(group=group)
+def test_rescoring_a_timeline_does_not_depend_on_request_visit_cursor(kind, group):
+    s = scheduler(kind, group=group)
     start = s._start_from_priority_plan()
     request = s._by_obsid[100]
     blocks = [b for b in start.final.timeline if not b.is_fixed]
@@ -119,8 +112,9 @@ def test_each_visit_uses_its_own_deadline_and_group_intersection(group):
         assert request.visit is None
 
 
-def test_an_improvement_is_not_rejected_against_an_undiscounted_baseline():
-    s = scheduler()
+@pytest.mark.parametrize("kind", ["local_search", "cp_sat"])
+def test_an_improvement_is_not_rejected_against_an_undiscounted_baseline(kind):
+    s = scheduler(kind)
     start = s._start_from_priority_plan()
     assert [v.obsid for v in start.sequence] == [101, 100, 100]
     candidate = s._decode(
@@ -136,13 +130,16 @@ def test_an_improvement_is_not_rejected_against_an_undiscounted_baseline():
     science = [e for e in plan if e.collection_begin is not None]
     assert science[0].obsid == 100
     assert s.score == candidate.final.score
-    run = replay(s.config, plan, BEGIN, BEGIN + timedelta(hours=3))
-    assert collected_seconds(run) == HOUR
+    run = DITL(s.config, plan=plan, begin=BEGIN, end=BEGIN + timedelta(hours=3))
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
+    assert sum(h.collection_seconds or 0 for h in run.telemetry.housekeeping) == HOUR
 
 
+@pytest.mark.parametrize("kind", ["local_search", "cp_sat"])
 @pytest.mark.parametrize("group", [False, True])
-def test_sequence_blocks_and_saved_steps_retain_the_scored_visit(group, tmp_path):
-    s = scheduler(group=group, sequence=True)
+def test_sequence_blocks_and_saved_steps_retain_the_scored_visit(kind, group, tmp_path):
+    s = scheduler(kind, group=group, sequence=True)
     start = s._start_from_priority_plan()
     blocks = [b for b in start.final.timeline if b.entry.obsid == 100]
     assert [b.entry.visit for b in blocks] == [0, 1]
@@ -156,5 +153,14 @@ def test_sequence_blocks_and_saved_steps_retain_the_scored_visit(group, tmp_path
     plan = s._finish_best(start)
     saved = Plan.load(plan.save(tmp_path / "sequence.json"))
     assert [e.visit for e in saved if e.obsid == 100] == [0, 0, 0, 1, 1, 1]
-    run = replay(s.config, saved, BEGIN, BEGIN + timedelta(hours=3))
-    assert collected_seconds(run, 100, science=True) == 20 * MIN
+    run = DITL(s.config, plan=saved, begin=BEGIN, end=BEGIN + timedelta(hours=3))
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
+    assert (
+        sum(
+            h.collection_seconds or 0
+            for h in run.telemetry.housekeeping
+            if not h.calibration and h.obsid == 100
+        )
+        == 20 * MIN
+    )

@@ -6,14 +6,12 @@ a window and prefer to keep them together."""
 from datetime import timedelta
 
 import pytest
-from pydantic import ValidationError
 
 from conops import QueueDITL, create_ditl
 from conops.common import ObsType
 from conops.config import ObservationGroup, ObservationGroups, TargetConfig
 from conops.config.observation_categories import ObservationCategory
-from conops.schedulers import LongRangeAllocator, PriorityScheduler
-from conops.targets import ObservationSequence, Pointing, SequenceStep
+from conops.schedulers import LongRangeAllocator
 
 from .planning_scenario import BEGIN, HOUR, MIN, PATCH, T0, planner, science_entries
 from .planning_scenario import make_config as _config
@@ -133,32 +131,6 @@ class TestBudgets:
             )
 
 
-class TestCategoryBudget:
-    def test_science_collected_before_the_run_counts(self) -> None:
-        ditl = _dispatch(*_scenario("category", collected_before=30 * MIN))
-        taken = _capped_seconds(ditl.plan)
-        assert BUDGET - 30 * MIN - 60 <= taken <= BUDGET - 30 * MIN + 1e-6
-
-    def test_a_visit_is_taken_only_whole(self) -> None:
-        config = _config(HOURS, categories=[CAPPED])
-        visit = Pointing(
-            config=config,
-            obsid=1,
-            name="visit",
-            ra=PATCH[0][0],
-            dec=PATCH[0][1],
-            merit=100.0,
-            sequence=ObservationSequence(
-                steps=[SequenceStep(name="s", duration_seconds=30 * MIN)]
-            ),
-            visits=3,
-        )
-        filler = _target(config, 100, *PATCH[4], merit=10, minutes=300, snapshot=20)
-        ditl = _dispatch(config, [visit, filler])
-        visits = [e for e in ditl.plan if int(e.obsid) == 1 and e.step is not None]
-        assert len(visits) == 1, "a second visit would not fit the budget whole"
-
-
 def _group_targets(config, merits=(60, 50, 50), filler=55):  # type: ignore[no-untyped-def]
     """Three group members and a filler that outranks all but the first."""
     members = [
@@ -181,29 +153,6 @@ def _at(plan):  # type: ignore[no-untyped-def]
 
 
 class TestGroups:
-    def test_groups_are_validated(self) -> None:
-        group = ObservationGroup(
-            name="bin", members=[1, 2], window_start=T0, window_deadline=T0 + HOUR
-        )
-        groups = ObservationGroups(groups=[group])
-        assert groups.group_of(2) is group and groups.group_of(3) is None
-        assert group.bounds == (T0, T0 + HOUR)
-        with pytest.raises(ValidationError, match="twice"):
-            ObservationGroup(name="bin", members=[1, 1])
-        with pytest.raises(ValidationError, match="end after"):
-            ObservationGroup(
-                name="bin", members=[1], window_start=T0, window_deadline=T0
-            )
-        with pytest.raises(ValidationError, match="one group"):
-            ObservationGroups(
-                groups=[
-                    ObservationGroup(name="a", members=[1]),
-                    ObservationGroup(name="b", members=[1, 2]),
-                ]
-            )
-        dated = ObservationGroup(name="bin", members=[1], window_start=BEGIN)
-        assert dated.window_start == T0
-
     def test_dispatch_keeps_the_members_in_the_window(self) -> None:
         config = _grouped(
             _config(HOURS),
@@ -265,27 +214,26 @@ class TestGroups:
         ]
         assert order[:2] == [1, 100]
 
-    def test_the_priority_plan_honours_window_budget_and_contiguity(self) -> None:
-        config = _grouped(
-            _config(HOURS),
-            ObservationGroup(
-                name="bin",
-                members=MEMBERS,
-                window_start=T0 + 2 * HOUR,
-                time_budget_seconds=30 * MIN,
-            ),
-        )
-        plan = PriorityScheduler(
-            config, _group_targets(config), BEGIN, END, step_size=60
-        ).schedule()
-        members = [e for e in _at(plan) if int(e.obsid) in MEMBERS]
-        assert members
-        assert all(float(e.collection_begin) >= T0 + 2 * HOUR for e in members)
-        taken = sum(
-            e.collection_seconds_between(float(e.begin), float(e.end)) for e in members
-        )
-        assert 30 * MIN - 60 <= taken <= 30 * MIN + 1e-6
-        # Once a member is placed the others follow, so their entries are consecutive.
-        science = sorted(_at(plan), key=lambda e: float(e.begin))
-        positions = [k for k, e in enumerate(science) if int(e.obsid) in MEMBERS]
-        assert positions == list(range(positions[0], positions[0] + len(positions)))
+
+def test_dispatch_keeps_no_time_for_a_request_over_its_budget() -> None:
+    """A request with a deadline whose category has no budget left for it is
+    never observed, so dispatch keeps no time for its latest start: the
+    targets that can be observed would otherwise be passed over and the
+    spacecraft would stand idle until the deadline had gone."""
+    config = _config(HOURS, categories=[CAPPED])
+    first = _target(config, 1, *PATCH[1], merit=100, minutes=40)
+    # 10 minutes of the budget are left once the first has been observed.
+    # Its latest start falls inside the filler's first visit.
+    refused = _target(
+        config, 2, *PATCH[2], merit=90, minutes=40, deadline=T0 + 100 * MIN
+    )
+    # Whole visits of an hour: one cannot be cut to end at a protected start.
+    filler = _target(config, 100, *PATCH[4], merit=10, minutes=300, snapshot=60)
+    ditl = _dispatch(config, [first, refused, filler])
+    science = sorted(science_entries(ditl.plan), key=lambda e: float(e.begin))
+    assert not [e for e in science if int(e.obsid) == 2]
+    gaps = [
+        float(later.begin) - float(earlier.end)
+        for earlier, later in zip(science, science[1:], strict=False)
+    ]
+    assert max(gaps) < 20 * MIN

@@ -1,7 +1,7 @@
 """A roll-dependent explicit science constraint, such as a stray-light patch
 written as a rust_ephem field-of-view polygon, steers the roll optimiser."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -13,6 +13,7 @@ from conops.config import Constraint, SolarPanel, SolarPanelSet, Telescope
 from conops.config.constraint import imaging_quality_attitude_constraint_names
 from conops.simulation.roll import optimum_body_roll, optimum_instrument_roll
 
+TLE = "examples/example.tle"
 BEGIN = datetime(2025, 11, 1, tzinfo=timezone.utc)
 UTIME = BEGIN.timestamp()
 
@@ -21,6 +22,13 @@ UTIME = BEGIN.timestamp()
 WEST_PATCH = [(-26.0, -5.0), (-16.0, -5.0), (-16.0, 5.0), (-26.0, 5.0)]
 # A patch that holds the Sun 20 degrees off at every roll.
 EVERYWHERE = [(-30.0, -30.0), (30.0, -30.0), (30.0, 30.0), (-30.0, 30.0)]
+
+
+@pytest.fixture(scope="module")
+def ephem() -> TLEEphemeris:
+    return TLEEphemeris(
+        tle=TLE, begin=BEGIN, end=BEGIN + timedelta(hours=2), step_size=60
+    )
 
 
 def _sun_north(ephem: TLEEphemeris) -> tuple[float, float]:
@@ -46,6 +54,38 @@ def _constraint(ephem: TLEEphemeris, science: object = None) -> Constraint:
 
 
 class TestRollDependence:
+    def test_polygon_and_offset_depend_on_roll(self) -> None:
+        polygon = BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
+        assert Constraint(science_constraint=polygon).science_constraint_roll_dependent
+        stars = BrightStarConstraint(stars=[(10.0, 10.0)], fov_polygon=WEST_PATCH)
+        assert Constraint(
+            science_constraint=rust_ephem.SunConstraint(min_angle=30.0) | stars
+        ).science_constraint_roll_dependent
+        offset = rust_ephem.SunConstraint(min_angle=45.0).boresight_offset(yaw_deg=30.0)
+        assert Constraint(science_constraint=~offset).science_constraint_roll_dependent
+
+    def test_plain_constraint_does_not(self) -> None:
+        assert not Constraint().science_constraint_roll_dependent
+        plain = rust_ephem.SunConstraint(min_angle=30.0) & rust_ephem.MoonConstraint(
+            min_angle=10.0
+        )
+        assert not Constraint(
+            science_constraint=plain
+        ).science_constraint_roll_dependent
+        circle = BrightStarConstraint(stars=[(10.0, 10.0)], fov_radius=2.0)
+        assert not Constraint(
+            science_constraint=circle
+        ).science_constraint_roll_dependent
+
+    def test_invalidated_with_the_combined_trees(self) -> None:
+        constraint = Constraint()
+        assert not constraint.science_constraint_roll_dependent
+        constraint.science_constraint = BodyConstraint(
+            body="Sun", fov_polygon=WEST_PATCH
+        )
+        constraint.invalidate_combined_constraint_cache()
+        assert constraint.science_constraint_roll_dependent
+
     @pytest.mark.parametrize(
         ("science", "dependent"),
         [
@@ -74,33 +114,22 @@ class TestRollDependence:
         constraint = Constraint(science_constraint=science)
         assert constraint.science_constraint_roll_dependent == dependent
 
-    def test_invalidated_with_the_combined_trees(self) -> None:
-        constraint = Constraint()
-        assert not constraint.science_constraint_roll_dependent
-        constraint.science_constraint = BodyConstraint(
-            body="Sun", fov_polygon=WEST_PATCH
-        )
-        constraint.invalidate_combined_constraint_cache()
-        assert constraint.science_constraint_roll_dependent
-
 
 class TestBodyRoll:
     """With the Sun due north and a +Y panel the power-optimal body roll is
     90 degrees, which puts the Sun 20 degrees towards -u in the instrument
     frame: on the west patch."""
 
-    def test_first_clear_roll_in_power_order(self, example_ephem: TLEEphemeris) -> None:
-        ra, dec = _sun_north(example_ephem)
+    def test_first_clear_roll_in_power_order(self, ephem: TLEEphemeris) -> None:
+        ra, dec = _sun_north(ephem)
         assert optimum_body_roll(
-            ra, dec, UTIME, example_ephem, _side_panel(), _constraint(example_ephem)
+            ra, dec, UTIME, ephem, _side_panel(), _constraint(ephem)
         ) == pytest.approx(90.0)
         constraint = _constraint(
-            example_ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
+            ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
         )
         assert constraint.in_explicit_science(ra, dec, UTIME, target_roll=90.0)
-        roll = optimum_body_roll(
-            ra, dec, UTIME, example_ephem, _side_panel(), constraint
-        )
+        roll = optimum_body_roll(ra, dec, UTIME, ephem, _side_panel(), constraint)
         assert not constraint.in_explicit_science(ra, dec, UTIME, target_roll=roll)
         # The nearest clear roll on either side of the optimum.
         assert abs(roll - 90.0) == pytest.approx(15.0, abs=1.0)
@@ -114,38 +143,42 @@ class TestBodyRoll:
             == []
         )
 
-    def test_without_panels(self, example_ephem: TLEEphemeris) -> None:
-        ra, dec = _sun_north(example_ephem)
+    def test_without_panels(self, ephem: TLEEphemeris) -> None:
+        ra, dec = _sun_north(ephem)
         constraint = _constraint(
-            example_ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
+            ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
         )
-        roll = optimum_body_roll(ra, dec, UTIME, example_ephem, None, constraint)
+        roll = optimum_body_roll(ra, dec, UTIME, ephem, None, constraint)
         assert not constraint.in_explicit_science(ra, dec, UTIME, target_roll=roll)
 
-    def test_no_clear_roll_falls_back_to_the_optimum(
-        self, example_ephem: TLEEphemeris
-    ) -> None:
-        ra, dec = _sun_north(example_ephem)
+    def test_other_attitudes_keep_the_power_optimum(self, ephem: TLEEphemeris) -> None:
+        ra, dec = _sun_north(ephem)
         constraint = _constraint(
-            example_ephem, BodyConstraint(body="Sun", fov_polygon=EVERYWHERE)
+            ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
         )
         roll = optimum_body_roll(
-            ra, dec, UTIME, example_ephem, _side_panel(), constraint
+            ra, dec, UTIME, ephem, _side_panel(), constraint, science_attitude=False
         )
         assert roll == pytest.approx(90.0)
 
-    def test_reachable_rolls_bound_the_search(
-        self, example_ephem: TLEEphemeris
-    ) -> None:
-        ra, dec = _sun_north(example_ephem)
+    def test_no_clear_roll_falls_back_to_the_optimum(self, ephem: TLEEphemeris) -> None:
+        ra, dec = _sun_north(ephem)
         constraint = _constraint(
-            example_ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
+            ephem, BodyConstraint(body="Sun", fov_polygon=EVERYWHERE)
+        )
+        roll = optimum_body_roll(ra, dec, UTIME, ephem, _side_panel(), constraint)
+        assert roll == pytest.approx(90.0)
+
+    def test_reachable_rolls_bound_the_search(self, ephem: TLEEphemeris) -> None:
+        ra, dec = _sun_north(ephem)
+        constraint = _constraint(
+            ephem, BodyConstraint(body="Sun", fov_polygon=WEST_PATCH)
         )
         roll = optimum_body_roll(
             ra,
             dec,
             UTIME,
-            example_ephem,
+            ephem,
             _side_panel(),
             constraint,
             reference_roll=100.0,
@@ -154,17 +187,14 @@ class TestBodyRoll:
         assert 90.0 <= roll <= 110.0
         assert not constraint.in_explicit_science(ra, dec, UTIME, target_roll=roll)
 
-    def test_bright_star_patch(self, example_ephem: TLEEphemeris) -> None:
+    def test_bright_star_patch(self, ephem: TLEEphemeris) -> None:
         # A star 20 degrees due north of the boresight, and the west patch:
         # the star is on it when the +v axis points east, at roll 90.
         constraint = _constraint(
-            example_ephem,
-            BrightStarConstraint(stars=[(40.0, 30.0)], fov_polygon=WEST_PATCH),
+            ephem, BrightStarConstraint(stars=[(40.0, 30.0)], fov_polygon=WEST_PATCH)
         )
         assert constraint.in_explicit_science(40.0, 10.0, UTIME, target_roll=90.0)
-        roll = optimum_body_roll(
-            40.0, 10.0, UTIME, example_ephem, _side_panel(), constraint
-        )
+        roll = optimum_body_roll(40.0, 10.0, UTIME, ephem, _side_panel(), constraint)
         assert not constraint.in_explicit_science(40.0, 10.0, UTIME, target_roll=roll)
 
 
@@ -180,6 +210,68 @@ def _turned(
         )
         for u, v in polygon
     ]
+
+
+class TestMountedRoll:
+    def test_engineering_roll_preserves_a_free_roll_safety_mask(self, ephem):
+        ra, dec = _sun_north(ephem)
+        telescope = Telescope(boresight=(0.0, 1.0, 0.0))
+        panel = SolarPanelSet(
+            panels=[SolarPanel(normal=(float(np.sqrt(0.75)), 0.5, 0.0), max_power=800)]
+        )
+        raw = rust_ephem.SunConstraint(min_angle=65).boresight_offset(yaw_deg=30)
+        constraint = Constraint(safety_constraint=raw, ignore_roll=True)
+        constraint.ephem = ephem
+        poses = [telescope.target_body_attitude(ra, dec, roll) for roll in range(360)]
+        blocked = np.array(
+            [
+                raw.in_constraint(
+                    ephemeris=ephem,
+                    target_ra=p[0],
+                    target_dec=p[1],
+                    time=BEGIN,
+                    target_roll=p[2],
+                )
+                for p in poses
+            ],
+            dtype=bool,
+        )
+        assert blocked.any() and not blocked.all()
+        unrestricted = optimum_instrument_roll(
+            ra, dec, UTIME, ephem, telescope, panel, science_attitude=False
+        )
+        assert blocked[int(unrestricted)]
+        roll = optimum_instrument_roll(
+            ra, dec, UTIME, ephem, telescope, panel, constraint, science_attitude=False
+        )
+        assert not blocked[int(roll)]
+        powers = np.array(
+            [panel.power(UTIME, p[0], p[1], ephem, roll=p[2]) for p in poses]
+        )
+        assert powers[int(roll)] == pytest.approx(powers[~blocked].max(), rel=1e-12)
+
+    def test_mounted_telescope_clears_the_patch(self, ephem: TLEEphemeris) -> None:
+        ra, dec = _sun_north(ephem)
+        telescope = Telescope(boresight=(0.0, 1.0, 0.0))
+        unguarded = optimum_instrument_roll(
+            ra, dec, UTIME, ephem, telescope, _side_panel(), _constraint(ephem)
+        )
+        # A patch at +v, turned to wherever the unguarded roll puts the Sun.
+        north_patch = [(-5.0, 16.0), (5.0, 16.0), (5.0, 26.0), (-5.0, 26.0)]
+        for angle in range(0, 360, 5):
+            constraint = _constraint(
+                ephem,
+                BodyConstraint(body="Sun", fov_polygon=_turned(north_patch, angle)),
+            )
+            if constraint.in_explicit_science(ra, dec, UTIME, target_roll=unguarded):
+                break
+        else:
+            pytest.fail("no turning of the patch holds the Sun at the unguarded roll")
+        roll = optimum_instrument_roll(
+            ra, dec, UTIME, ephem, telescope, _side_panel(), constraint
+        )
+        assert roll != unguarded
+        assert not constraint.in_explicit_science(ra, dec, UTIME, target_roll=roll)
 
 
 @pytest.mark.parametrize("caller", ["identity_mount", "charger"])
@@ -216,80 +308,3 @@ def test_engineering_guidance_keeps_science_only_patch_out_of_its_roll(
         )
         actual = charger._optimal_roll(ra, dec, UTIME, example_ephem)
     assert actual == expected
-
-
-class TestMountedRoll:
-    def test_engineering_roll_preserves_a_free_roll_safety_mask(self, example_ephem):
-        ra, dec = _sun_north(example_ephem)
-        telescope = Telescope(boresight=(0.0, 1.0, 0.0))
-        panel = SolarPanelSet(
-            panels=[SolarPanel(normal=(float(np.sqrt(0.75)), 0.5, 0.0), max_power=800)]
-        )
-        raw = rust_ephem.SunConstraint(min_angle=65).boresight_offset(yaw_deg=30)
-        constraint = Constraint(safety_constraint=raw, ignore_roll=True)
-        constraint.ephem = example_ephem
-        poses = [telescope.target_body_attitude(ra, dec, roll) for roll in range(360)]
-        blocked = np.array(
-            [
-                raw.in_constraint(
-                    ephemeris=example_ephem,
-                    target_ra=p[0],
-                    target_dec=p[1],
-                    time=BEGIN,
-                    target_roll=p[2],
-                )
-                for p in poses
-            ],
-            dtype=bool,
-        )
-        assert blocked.any() and not blocked.all()
-        unrestricted = optimum_instrument_roll(
-            ra, dec, UTIME, example_ephem, telescope, panel, science_attitude=False
-        )
-        assert blocked[int(unrestricted)]
-        roll = optimum_instrument_roll(
-            ra,
-            dec,
-            UTIME,
-            example_ephem,
-            telescope,
-            panel,
-            constraint,
-            science_attitude=False,
-        )
-        assert not blocked[int(roll)]
-        powers = np.array(
-            [panel.power(UTIME, p[0], p[1], example_ephem, roll=p[2]) for p in poses]
-        )
-        assert powers[int(roll)] == pytest.approx(powers[~blocked].max(), rel=1e-12)
-
-    def test_mounted_telescope_clears_the_patch(
-        self, example_ephem: TLEEphemeris
-    ) -> None:
-        ra, dec = _sun_north(example_ephem)
-        telescope = Telescope(boresight=(0.0, 1.0, 0.0))
-        unguarded = optimum_instrument_roll(
-            ra,
-            dec,
-            UTIME,
-            example_ephem,
-            telescope,
-            _side_panel(),
-            _constraint(example_ephem),
-        )
-        # A patch at +v, turned to wherever the unguarded roll puts the Sun.
-        north_patch = [(-5.0, 16.0), (5.0, 16.0), (5.0, 26.0), (-5.0, 26.0)]
-        for angle in range(0, 360, 5):
-            constraint = _constraint(
-                example_ephem,
-                BodyConstraint(body="Sun", fov_polygon=_turned(north_patch, angle)),
-            )
-            if constraint.in_explicit_science(ra, dec, UTIME, target_roll=unguarded):
-                break
-        else:
-            pytest.fail("no turning of the patch holds the Sun at the unguarded roll")
-        roll = optimum_instrument_roll(
-            ra, dec, UTIME, example_ephem, telescope, _side_panel(), constraint
-        )
-        assert roll != unguarded
-        assert not constraint.in_explicit_science(ra, dec, UTIME, target_roll=roll)

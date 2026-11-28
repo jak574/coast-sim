@@ -13,12 +13,13 @@ from conops.benchmark import (
     run_benchmark,
 )
 from conops.benchmark.harness import Run, _measure
-from conops.ditl import QueueDITL
+from conops.ditl import DITL, QueueDITL
 from conops.ditl.telemetry import Housekeeping
 from conops.schedulers import PriorityScheduler
 from conops.targets import ObservationSequence, Plan, Pointing, SequenceStep, TOORequest
 
-from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config, replay
+from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config
+from .test_activity_safety import _planner
 
 CALIBRATION = 155
 SCIENCE = 421
@@ -27,7 +28,10 @@ END = BEGIN + timedelta(hours=3)
 
 
 def configuration():
-    return make_config(3, open_sky=True)
+    c = make_config(3)
+    c.constraint.sun_constraint = None
+    c.constraint.earth_constraint = None
+    return c
 
 
 def targets(c):
@@ -64,15 +68,29 @@ def scenario():
 
 
 @pytest.mark.parametrize(
-    "contender",
+    "kind,rolling_run",
     [
-        dispatch(),
-        planned(PriorityScheduler),
-        rolling(PriorityScheduler, replan_interval=timedelta(hours=1)),
+        ("dispatch", False),
+        ("priority", False),
+        ("local_search", False),
+        ("cp_sat", False),
+        ("priority", True),
+        ("local_search", True),
+        ("cp_sat", True),
     ],
-    ids=["dispatch", "planned", "rolling"],
 )
-def test_calibration_is_excluded_from_executed_science(contender):
+def test_calibration_is_excluded_from_executed_science(kind, rolling_run):
+    if kind == "dispatch":
+        contender = dispatch()
+    else:
+        scheduler, options = _planner(kind)
+        contender = (
+            rolling(
+                scheduler, replan_interval=timedelta(hours=1), scheduler_options=options
+            )
+            if rolling_run
+            else planned(scheduler, **options)
+        )
     [result] = run_benchmark(scenario(), [contender])
     assert result.error is None
     assert result.mismatches == 0
@@ -86,7 +104,10 @@ def test_calibration_is_excluded_from_executed_science(contender):
 def test_saved_plan_replay_labels_the_flown_calibration(tmp_path):
     c = configuration()
     plan = PriorityScheduler(c, targets(c), BEGIN, END, include_passes=False).schedule()
-    run = replay(c, Plan.load(plan.save(tmp_path / "plan.json")), BEGIN, END)
+    loaded = Plan.load(plan.save(tmp_path / "plan.json"))
+    run = DITL(c, plan=loaded, begin=BEGIN, end=END)
+    assert run.calc()
+    assert run.validate_plan_matches_execution() == []
     hk = run.telemetry.housekeeping
     calibration = [h for h in hk if h.calibration and h.collection_seconds]
     science = [h for h in hk if not h.calibration and h.collection_seconds]
@@ -134,3 +155,8 @@ def test_sequence_too_response_starts_with_science_after_calibration():
     assert summary.too_response_seconds[100] == first_science - T0
     assert summary.science_hours == pytest.approx(SCIENCE / HOUR)
     assert summary.calibration_hours == pytest.approx(CALIBRATION / HOUR)
+
+
+def test_old_housekeeping_without_a_calibration_flag_keeps_its_default():
+    record = Housekeeping(timestamp=BEGIN, collection_seconds=15)
+    assert record.calibration is False

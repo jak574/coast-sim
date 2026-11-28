@@ -6,14 +6,16 @@ import pytest
 
 from conops import create_ditl
 from conops.config import ObservationTiming
-from conops.schedulers import LocalSearchScheduler, PriorityScheduler
+from conops.schedulers import CpSatScheduler, LocalSearchScheduler, PriorityScheduler
 from conops.targets import ObservationSequence, Pointing, SequenceStep, VisitWindow
 
-from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config, planner
+from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config
 
 
 def _case():
-    config = make_config(3, open_sky=True)
+    config = make_config(3)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.payload.observation_timing = ObservationTiming()
     target = Pointing(
         config=config,
@@ -36,23 +38,44 @@ def _case():
 
 
 @pytest.mark.parametrize(
-    "kind", ["dispatch", "priority", "local_search", "cp_sat", "decode"]
+    "planner",
+    ["dispatch", "priority", "local", "cp_sat", "local_decode", "cp_sat_decode"],
 )
-def test_long_calibration_does_not_skip_the_next_admission_window(kind):
+def test_long_calibration_does_not_skip_the_next_admission_window(planner):
+    if planner.startswith("cp_sat"):
+        pytest.importorskip("ortools")
     config, target = _case()
     args = (config, [target], BEGIN, BEGIN + timedelta(hours=3))
-    if kind == "dispatch":
+    if planner == "dispatch":
         run = create_ditl(*args)
         assert run.calc()
         assert not run.validate_plan_matches_execution()
         plan = run.plan
-    elif kind == "decode":  # the priority plan as the search decodes it
-        scheduler = LocalSearchScheduler(*args, include_passes=False)
-        decoded = scheduler._start_from_priority_plan()
-        plan = [e for b in decoded.final.timeline for e in b.steps or [b.entry]]
+    elif planner == "priority":
+        plan = PriorityScheduler(*args, include_passes=False).schedule()
+    elif planner.startswith("local"):
+        scheduler = LocalSearchScheduler(
+            *args, include_passes=False, max_iterations=30, time_limit=60, seed=2029
+        )
+        if planner.endswith("_decode"):
+            decoded = scheduler._start_from_priority_plan()
+            plan = [e for b in decoded.final.timeline for e in b.steps or [b.entry]]
+        else:
+            plan = scheduler.schedule()
     else:
-        scheduler, options = planner(kind)
-        plan = scheduler(*args, include_passes=False, **options).schedule()
+        scheduler = CpSatScheduler(
+            *args,
+            include_passes=False,
+            solver_deterministic_time=1,
+            solver_time_limit=60,
+            workers=1,
+            seed=2029,
+        )
+        if planner.endswith("_decode"):
+            decoded = scheduler._start_from_priority_plan()
+            plan = [e for b in decoded.final.timeline for e in b.steps or [b.entry]]
+        else:
+            plan = scheduler.schedule()
     entries = [e for e in plan if e.obsid == 700]
     assert [e.visit for e in entries] == [0, 0, 0, 1, 1, 1]
     assert [e.step for e in entries] == ["science A", "calibration", "science B"] * 2
@@ -61,8 +84,10 @@ def test_long_calibration_does_not_skip_the_next_admission_window(kind):
     assert float(entries[3].collection_begin) <= target.visit_windows[1].deadline
 
 
-@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
-def test_committed_sequence_keeps_its_actual_window_across_a_replan(kind):
+@pytest.mark.parametrize("planner", ["priority", "local", "cp_sat"])
+def test_committed_sequence_keeps_its_actual_window_across_a_replan(planner):
+    if planner == "cp_sat":
+        pytest.importorskip("ortools")
     config, target = _case()
     end = BEGIN + timedelta(hours=3)
     first = PriorityScheduler(
@@ -72,16 +97,23 @@ def test_committed_sequence_keeps_its_actual_window_across_a_replan(kind):
     assert len(locked) == 3
     # Replan during calibration, after only the first science phase was flown.
     target.record_collection(T0 + 65 * MIN, 300, visit=0)
-    cls, options = planner(kind)
-    scheduler = cls(
-        config,
-        [target],
-        BEGIN + timedelta(minutes=80),
-        end,
-        include_passes=False,
-        locked=locked,
-        **options,
-    )
+    args = (config, [target], BEGIN + timedelta(minutes=80), end)
+    options = dict(include_passes=False, locked=locked)
+    if planner == "priority":
+        scheduler = PriorityScheduler(*args, **options)
+    elif planner == "local":
+        scheduler = LocalSearchScheduler(
+            *args, **options, max_iterations=30, time_limit=60, seed=2029
+        )
+    else:
+        scheduler = CpSatScheduler(
+            *args,
+            **options,
+            solver_deterministic_time=1,
+            solver_time_limit=60,
+            workers=1,
+            seed=2029,
+        )
     plan = scheduler.schedule()
     later = [e for e in plan if e.obsid == 700 and e.visit == 1]
     assert [e.step for e in later] == ["science A", "calibration", "science B"]

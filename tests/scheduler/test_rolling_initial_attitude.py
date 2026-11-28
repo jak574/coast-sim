@@ -6,18 +6,22 @@ import pytest
 
 from conops.config import ObservationTiming, SpacecraftFrame
 from conops.ditl import RollingHorizonDITL
+from conops.schedulers import CpSatScheduler, LocalSearchScheduler, PriorityScheduler
 from conops.targets import Pointing
 
-from .planning_scenario import BEGIN, collected_seconds, make_config, planner
+from .planning_scenario import BEGIN, make_config
 
 
 @pytest.mark.parametrize("declared_frame", [False, True])
-@pytest.mark.parametrize("kind", ["priority", "local_search", "cp_sat"])
+@pytest.mark.parametrize(
+    "planner", [PriorityScheduler, LocalSearchScheduler, CpSatScheduler]
+)
 def test_first_plan_uses_the_executed_initial_pose(
-    declared_frame: bool, kind: str
+    declared_frame: bool, planner: type[PriorityScheduler]
 ) -> None:
-    scheduler, options = planner(kind)
-    config = make_config(1, open_sky=True)
+    config = make_config(1)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
     config.payload.observation_timing = ObservationTiming()
     config.battery.planning_level = None
     config.spacecraft_bus.attitude_control.max_slew_rate = 0.01
@@ -40,8 +44,8 @@ def test_first_plan_uses_the_executed_initial_pose(
         [target],
         begin=BEGIN,
         end=BEGIN + timedelta(minutes=10),
-        scheduler=scheduler,
-        scheduler_options=options,
+        scheduler=planner,
+        scheduler_options={} if planner is PriorityScheduler else {"time_limit": 0},
         include_passes=False,
         horizon=timedelta(minutes=10),
         replan_interval=timedelta(hours=1),
@@ -50,7 +54,7 @@ def test_first_plan_uses_the_executed_initial_pose(
     run.step_size = 60
     run.acs.ra, run.acs.dec, run.acs.roll = target.target_body_attitude(0)
     assert run.calc()
-    assert collected_seconds(run) == 300
+    assert sum(h.collection_seconds or 0 for h in run.telemetry.housekeeping) == 300
     entry = next(e for e in run.plan if e.obsid == target.obsid)
     assert entry.slewtime == 0
     assert float(entry.collection_begin) == BEGIN.timestamp()

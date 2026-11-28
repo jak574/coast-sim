@@ -1,9 +1,10 @@
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from functools import cached_property, lru_cache
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -17,6 +18,7 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+from pydantic_core import PydanticSerializationError
 from rust_ephem.constraints import (
     AndConstraint,
     AtLeastConstraint,
@@ -52,8 +54,34 @@ _RA_DEC_ROUNDER = 10**_RA_DEC_PRECISION
 _INTERVAL_ENDS = 2
 """An eclipse interval is a start and an end."""
 
+_SCIENCE_SAMPLE_CACHE_SIZE = 65_536
 _VARIANT_IGNORED_FIELDS = frozenset({"bestroll", "bestpointing"})
 """Scratch fields, which no constraint check reads."""
+_ScienceSampleKey = tuple[int, int, str, str, str, str | None]
+
+
+class _ScienceSample(BaseModel):
+    """Keep backend owners alive while retaining an exact scalar answer."""
+
+    model_config = ConfigDict(frozen=True)
+    constraint: object
+    ephemeris: object | None
+    geometry: str
+    violated: bool
+
+
+class _ScienceSamples(BaseModel):
+    """A runtime memo is discarded when a configuration is copied deeply."""
+
+    entries: OrderedDict[_ScienceSampleKey, _ScienceSample] = Field(
+        default_factory=OrderedDict
+    )
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "_ScienceSamples":
+        result = type(self)()
+        if memo is not None:
+            memo[id(self)] = result
+        return result
 
 
 class _TargetVariants(BaseModel):
@@ -64,7 +92,7 @@ class _TargetVariants(BaseModel):
 
     entries: dict[str, tuple[tuple[int, ...], object]] = Field(default_factory=dict)
 
-    def __deepcopy__(self, memo: dict[int, object] | None = None) -> "_TargetVariants":
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "_TargetVariants":
         result = type(self)()
         if memo is not None:
             memo[id(self)] = result
@@ -144,12 +172,15 @@ def _default_panel_constraint() -> ConstraintConfig:
 
 
 def _sample_datetime(sample: object) -> datetime:
-    """An ephemeris sample as a timezone-aware datetime."""
+    """An ephemeris sample as a timezone-aware datetime, whether the
+    ephemeris holds datetimes or numpy datetime64 values."""
     if isinstance(sample, datetime):
         return (
             sample if sample.tzinfo is not None else sample.replace(tzinfo=timezone.utc)
         )
-    seconds = float(np.asarray(sample, dtype="datetime64[us]").astype(np.int64)) / 1e6
+    seconds = (
+        float(np.datetime64(cast(np.datetime64, sample), "us").astype(np.int64)) / 1e6
+    )
     return dtutcfromtimestamp(seconds)
 
 
@@ -320,6 +351,13 @@ class Constraint(ConfigModel):
     _cache: dict[tuple[str, float, float, float, float | None], bool] = PrivateAttr(
         default_factory=dict
     )
+    _held_cache: dict[tuple[str, float, float, float, float | None], bool] = (
+        PrivateAttr(default_factory=dict)
+    )
+    """Batch samples keyed by exact inputs, apart from the rounded lookup.
+    A new pose in the same rounded bucket must still refresh the held span."""
+    _science_samples: _ScienceSamples = PrivateAttr(default_factory=_ScienceSamples)
+    _science_sample_context: tuple[object, ...] | None = PrivateAttr(default=None)
     _cache_hits: int = PrivateAttr(default=0)
     _cache_misses: int = PrivateAttr(default=0)
     _body_frame_source: object | None = PrivateAttr(default=None)
@@ -381,24 +419,87 @@ class Constraint(ConfigModel):
 
         held = self._held_over
         if held is not None and len(held) > 1:
-            # Evaluate all the times at once and keep each.
-            self._cache_misses += 1
-            flags = check_fn.in_constraint_batch(
-                ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
-                target_ras=[ra],
-                target_decs=[dec],
-                times=[self._sample_time(t) for t in held],
-                target_rolls=None if target_roll is None else [target_roll],
-            )
-            for t, flag in zip(held, np.asarray(flags).reshape(-1), strict=True):
+            # Reuse only exact batch inputs. Rounded buckets may contain
+            # another pose's answers, which a full batch used to replace.
+            missing = {
+                (constraint_type, ra, dec, t, target_roll): t
+                for t in held
+                if (constraint_type, ra, dec, t, target_roll) not in self._held_cache
+            }
+            if missing:
+                self._cache_misses += 1
+                flags = check_fn.in_constraint_batch(
+                    ephemeris=cast(rust_ephem.Ephemeris, self.ephem),
+                    target_ras=[ra],
+                    target_decs=[dec],
+                    times=[self._sample_time(t) for t in missing.values()],
+                    target_rolls=None if target_roll is None else [target_roll],
+                )
+                for sample_key, flag in zip(
+                    missing, np.asarray(flags).reshape(-1), strict=True
+                ):
+                    self._held_cache[sample_key] = bool(flag)
+            # Preserve full-batch refresh order, including rounded-key
+            # collisions and duplicate times, even when no native call ran.
+            for t in held:
                 self._cache[
                     self._cache_key(constraint_type, ra, dec, t, target_roll)
-                ] = bool(flag)
+                ] = self._held_cache[(constraint_type, ra, dec, t, target_roll)]
             if key in self._cache:
                 return self._cache[key]
 
         # Cache miss - compute result (caller has already asserted ephem is not None)
         self._cache_misses += 1
+        science_key: _ScienceSampleKey | None = None
+        science_geometry: str | None = None
+        sample_frame = (
+            getattr(self._body_frame_source, "frame", None)
+            if constraint_type == "explicit_science"
+            else None
+        )
+        if (
+            constraint_type == "explicit_science"
+            and self._science_sample_context is not None
+            and isinstance(sample_frame, SpacecraftFrame)
+            and self._science_sample_context[0] == id(self.ephem)
+            and self._science_sample_context[2:]
+            == (sample_frame.boresight, sample_frame.sun_side)
+        ):
+            # A pending hardware rebind does not change the raw science
+            # predicate. Check its physical frame without moving the original
+            # hardware-refresh/rounded-cache-clearing boundary.
+            geometry: str | None
+            try:
+                geometry = check_fn.model_dump_json()
+            except (AttributeError, PydanticSerializationError, TypeError):
+                geometry = None
+            if isinstance(geometry, str):
+                science_geometry = geometry
+                science_key = (
+                    id(self.ephem),
+                    id(check_fn),
+                    # Numeric equality merges +0.0 and -0.0. Preserve their
+                    # distinct native inputs when reusing an exact answer.
+                    float(ra).hex(),
+                    float(dec).hex(),
+                    float(utime).hex(),
+                    None if target_roll is None else float(target_roll).hex(),
+                )
+            sample = (
+                self._science_samples.entries.get(science_key)
+                if science_key is not None
+                else None
+            )
+            if (
+                sample is not None
+                and sample.constraint is check_fn
+                and sample.ephemeris is self.ephem
+                and sample.geometry == science_geometry
+            ):
+                assert science_key is not None
+                self._science_samples.entries.move_to_end(science_key)
+                self._cache[key] = sample.violated
+                return sample.violated
         result = cast(
             bool,
             check_fn.in_constraint(
@@ -409,12 +510,26 @@ class Constraint(ConfigModel):
                 target_roll=target_roll,
             ),
         )
+        if science_key is not None:
+            assert science_geometry is not None
+            self._science_samples.entries[science_key] = _ScienceSample.model_construct(
+                constraint=check_fn,
+                ephemeris=self.ephem,
+                geometry=science_geometry,
+                violated=result,
+            )
+            if len(self._science_samples.entries) > _SCIENCE_SAMPLE_CACHE_SIZE:
+                self._science_samples.entries.popitem(last=False)
         self._cache[key] = result
         return result
 
     @contextmanager
     def held_over(self, utimes: Sequence[float]) -> Iterator[None]:
-        """While held, checks at ``utimes`` evaluate all of them in one call."""
+        """While this holds, a check of a pointing at one of ``utimes``
+        evaluates the pointing at all of them in one call and keeps the
+        results, so a scan of a held attitude step by step costs one
+        evaluation per constraint rather than one per step. The answers are
+        those the checks would give one by one."""
         previous = self._held_over
         self._held_over = [float(t) for t in utimes]
         try:
@@ -423,7 +538,11 @@ class Constraint(ConfigModel):
             self._held_over = previous
 
     def _sample_time(self, utime: float) -> datetime:
-        """The ephemeris sample at or before ``utime``, where a check is made."""
+        """The ephemeris sample at or before ``utime``, as the time a check
+        is made at. ``rust_ephem`` evaluates a constraint only at its
+        samples, and a check between them, as at the end of a slew, is made
+        at the sample before. An ephemeris without samples to speak of, a
+        test double, is asked at the time itself."""
         dt = dtutcfromtimestamp(utime)
         ephem = self.ephem
         timestamps = getattr(ephem, "timestamp", None)
@@ -441,6 +560,11 @@ class Constraint(ConfigModel):
     def clear_cache(self) -> None:
         """Clear the constraint result cache. Call at step boundaries."""
         self._cache.clear()
+        self._held_cache.clear()
+        self._science_samples.entries.clear()
+        self._science_sample_context = None
+
+    _default_clear_cache = clear_cache
 
     def cache_stats(self) -> tuple[int, int]:
         """Return (hits, misses) for cache performance monitoring."""
@@ -458,8 +582,8 @@ class Constraint(ConfigModel):
         self.__dict__.pop("safety_constraint_config", None)
         self.__dict__.pop("roll_independent_constraint", None)
         self.__dict__.pop("roll_dependent_constraint", None)
-        self._body_safety_key = None
         self.__dict__.pop("science_constraint_roll_dependent", None)
+        self._body_safety_key = None
 
     @staticmethod
     def _combine_constraints(
@@ -510,9 +634,33 @@ class Constraint(ConfigModel):
             return self.safety_constraint
         key = (id(self.safety_constraint), frame.boresight, frame.sun_side)
         if key != self._body_safety_key:
+            try:
+                sample_context: tuple[object, ...] | None = (
+                    id(self.ephem),
+                    self.model_dump_json(),
+                    frame.boresight,
+                    frame.sun_side,
+                )
+            except (PydanticSerializationError, TypeError):
+                # Test doubles and other opaque components retain the original
+                # unconditional refresh rather than an unverifiable memo.
+                sample_context = None
+            keep_samples = (
+                sample_context is not None
+                and sample_context == self._science_sample_context
+                and getattr(self.clear_cache, "__func__", None)
+                is Constraint._default_clear_cache
+            )
             self._body_safety = frame.constraint_in_body(self.safety_constraint)
             self._body_safety_key = key
-            self._cache.clear()
+            if keep_samples:
+                # Match the default lookup refresh while retaining exact
+                # samples. An overridden clear_cache keeps its full contract.
+                self._cache.clear()
+                self._held_cache.clear()
+            else:
+                self.clear_cache()
+            self._science_sample_context = sample_context
             for name in (
                 "hardware_safety_constraint_config",
                 "safety_constraint_config",
@@ -674,9 +822,19 @@ class Constraint(ConfigModel):
     @staticmethod
     def _contains_boresight_offset(constraint: ConstraintConfig) -> bool:
         """Return whether a constraint tree contains a boresight-offset node."""
-        return Constraint._tree_contains(
-            constraint, lambda c: isinstance(c, BoresightOffsetConstraint)
-        )
+        if isinstance(constraint, BoresightOffsetConstraint):
+            return True
+        if isinstance(constraint, NotConstraint):
+            return Constraint._contains_boresight_offset(constraint.constraint)
+        if isinstance(
+            constraint,
+            (AndConstraint, OrConstraint, XorConstraint, AtLeastConstraint),
+        ):
+            return any(
+                Constraint._contains_boresight_offset(subconstraint)
+                for subconstraint in constraint.constraints
+            )
+        return False
 
     @staticmethod
     def _roll_dependent_subtree(
@@ -1506,6 +1664,14 @@ def _attitude_scope_value(scope: str | Enum) -> str:
         value = scope.value
         return value if isinstance(value, str) else str(value)
     return scope
+
+
+def attitude_constraint_scope_values(scopes: Sequence[str | Enum]) -> list[str]:
+    """The scopes as their values, in order and without repeats: what
+    :func:`attitude_constraint_name_for_scopes` checks one after another. A
+    caller that checks many times with the same scopes resolves them once
+    with this and calls :func:`attitude_constraint_name_for_scope` itself."""
+    return _attitude_scope_values(scopes)
 
 
 def _attitude_scope_values(scopes: Sequence[str | Enum]) -> list[str]:

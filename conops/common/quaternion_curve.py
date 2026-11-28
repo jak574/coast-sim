@@ -1,7 +1,7 @@
 """Rate-continuous quaternion Hermite curves with interval limit checks.
 
-Normalize a cubic quaternion polynomial p(s). For the ECI-to-body convention,
-body rate is -2 vec(p' conjugate(p)) / |p|². Differentiating this rational
+Normalize a cubic quaternion polynomial ``p(s)``. For the ECI-to-body convention,
+body rate is ``-2 vec(p' conjugate(p)) / |p|²``. Differentiating this rational
 expression gives body angular acceleration. Bernstein convex-hull bounds check
 both envelopes over whole intervals, not just a grid of evaluation times.
 """
@@ -16,7 +16,7 @@ from numpy.polynomial.polynomial import polyval
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from .numerics import ROUNDOFF
-from .vector import _quat_mul
+from .vector import _quat_mul, shorter_arc_sign
 
 _RELATIVE_TOLERANCE = 1e-10
 """The relative slack that absorbs floating-point roundoff in the
@@ -103,8 +103,7 @@ class QuaternionHermite(BaseModel):
     @cached_property
     def _coefficients(self) -> npt.NDArray[np.float64]:
         q0, q1 = np.asarray(self.first), np.asarray(self.last)
-        if np.dot(q0, q1) < 0:
-            q1 = -q1
+        q1 = shorter_arc_sign(q0, q1) * q1
         v0 = (
             -0.5
             * self.duration

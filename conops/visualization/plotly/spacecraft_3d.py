@@ -11,15 +11,15 @@ The default frame has +X boresight and +Y Sun-facing side.
 
 Component placement rules
 --------------------------
-  Telescope   – cylinder extending in the boresight direction from the bus surface.
-  Solar panels – use ``PanelGeometry.center_m`` when present; otherwise placed
-                 on the bus face whose outward normal best matches the panel normal.
-  Radiators   – placed on the bus face whose outward normal best matches the
-                radiator normal; sized by ``width_m`` × ``height_m``.
-  Star trackers – small prism on the bus face matching the boresight direction.
-  Momentum wheels – disc at ``MomentumWheel.position_m`` when present; otherwise
-                placed inside the bus along the wheel's spin axis.  The bus is
-                drawn translucent so the wheels show through it.
+- Telescope: cylinder extending in the boresight direction from the bus surface.
+- Solar panels: use ``PanelGeometry.center_m`` when present; otherwise placed
+  on the bus face whose outward normal best matches the panel normal.
+- Radiators: placed on the bus face whose outward normal best matches the
+  radiator normal; sized by ``width_m`` × ``height_m``.
+- Star trackers: small prism on the bus face matching the boresight direction.
+- Momentum wheels: disc at ``MomentumWheel.position_m`` when present; otherwise
+  placed inside the bus along the wheel's spin axis. The bus box is drawn
+  translucent so the wheels show through it.
 """
 
 from __future__ import annotations
@@ -36,8 +36,6 @@ from ...common.numerics import ROUNDOFF
 
 if TYPE_CHECKING:
     from ...config import MissionConfig
-
-_AXIS_COMPONENT_TOLERANCE = 1e-9
 
 # ---------------------------------------------------------------------------
 # Visual palette (dark-themed to match the rest of the codebase)
@@ -70,6 +68,8 @@ _CONE_SIZE: float = 0.07
 # Low-level geometry helpers
 # ---------------------------------------------------------------------------
 
+
+_AXIS_COMPONENT_TOLERANCE = 1e-9
 
 _NEAR_AXIS_COMPONENT = 0.9
 """A unit vector whose component along an axis reaches this lies too near
