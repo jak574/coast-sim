@@ -149,9 +149,9 @@ class SchedulingContext:
         self._window_cache: dict[
             tuple[object, ...], tuple[list[TrackPoint], int, list[tuple[float, float]]]
         ] = {}
-        """Targets' visibility windows by obsid, pointing, step and
-        instrument: a visit's step pointings are asked for again at every
-        selection of a window."""
+        """Targets' visibility windows by obsid, pointing, step, instrument
+        and the target's own constraints: a visit's step pointings are asked
+        for again at every selection of a window."""
         self._hold_cache: dict[
             tuple[Attitude, float, float, ACSMode], float | None
         ] = {}

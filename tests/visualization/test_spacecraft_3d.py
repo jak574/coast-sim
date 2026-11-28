@@ -44,6 +44,7 @@ from conops.config.star_tracker import (
     StarTrackerConfiguration,
     StarTrackerOrientation,
 )
+from conops.config.surfaces import Surface, SurfaceModel
 from conops.visualization import plot_spacecraft_3d
 from conops.visualization.plotly.spacecraft_3d import (
     _BUS_OPACITY_WITH_WHEELS,
@@ -737,6 +738,28 @@ class TestMomentumWheels:
         assert plot_spacecraft_3d(config).data[0].opacity == _BUS_OPACITY_WITH_WHEELS
         hidden = plot_spacecraft_3d(config, show_wheels=False)
         assert hidden.data[0].opacity == 1.0
+        assert not self._wheel_meshes(hidden)
+
+    def test_configured_surfaces_and_wheels_share_the_scene(self) -> None:
+        wheel = MomentumWheel(
+            spin_axis=(1, 0, 0), position_m=(9, 0, 0), capacity_n_m_s=4.0
+        )
+        config = self._config([wheel])
+        plate = Surface(
+            name="Bus plate", center_m=(0, 0, 1), normal=(0, 0, 1), area_m2=4
+        )
+        config.spacecraft_bus.surfaces = SurfaceModel(surfaces=[plate])
+
+        fig = plot_spacecraft_3d(config)
+        mesh = next(trace for trace in fig.data if trace.name == plate.name)
+        wheels = self._wheel_meshes(fig)
+        assert mesh.opacity == _BUS_OPACITY_WITH_WHEELS
+        assert len(wheels) == 3
+        assert fig.layout.scene.xaxis.range[1] > max(wheels[0].x)
+
+        hidden = plot_spacecraft_3d(config, show_wheels=False)
+        mesh = next(trace for trace in hidden.data if trace.name == plate.name)
+        assert mesh.opacity == 1.0
         assert not self._wheel_meshes(hidden)
 
     def test_wheel_name_carries_its_capacity(self) -> None:

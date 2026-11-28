@@ -1853,6 +1853,9 @@ class QueueDITL(DITLMixin, DITLStats):
         if self.acs.in_safe_mode:
             # The thrusters do not fire in safe mode.
             return
+        if self.acs.in_safe_mode:
+            # The thrusters do not fire in safe mode.
+            return
         stored = tracker.stored_momentum_load_n_m_s
         capacity = self.config.spacecraft_bus.attitude_control.stored_momentum.total_capacity_n_m_s
         assert capacity is not None

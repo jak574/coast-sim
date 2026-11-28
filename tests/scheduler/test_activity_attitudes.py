@@ -12,6 +12,7 @@ from conops.common.vector import quaternion_attitude_delta
 from conops.config import (
     ActivityAttitude,
     MissionConfig,
+    ObservationTiming,
     SpacecraftFrame,
     StoredMomentumConfig,
     ThrusterDumpConfig,
@@ -31,7 +32,7 @@ from conops.targets import (
     SequenceStep,
 )
 
-from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config
+from .planning_scenario import BEGIN, HOUR, MIN, T0, make_config, make_target
 from .test_activity_safety import _planner
 
 POSE = ActivityAttitude(kind="fixed", ra_deg=105, dec_deg=10, roll_deg=25)
@@ -525,3 +526,77 @@ def test_a_fixed_attitude_activity_due_in_safe_mode_holds_what_safe_mode_has(
     assert entry.slewtime == 0
     assert (float(entry.ra), float(entry.dec)) != (150.0, 20.0)
     assert any("begins in safe mode" in e.description for e in run.log.events)
+
+
+def test_dispatch_cancels_pending_collection_before_fixed_pose_ingress():
+    config = make_config(2)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    config.payload.observation_timing = ObservationTiming(cleanup_seconds=10 * MIN)
+    hold = ScheduledActivity(
+        name="Fixed hold before an exposure can finish teardown",
+        begin=T0 + 5 * MIN,
+        duration_seconds=20 * MIN,
+        fixed=True,
+        attitude=ActivityAttitude(kind="fixed", ra_deg=105, dec_deg=10, roll_deg=0),
+    )
+    run = QueueDITL(
+        config=config, begin=BEGIN, end=BEGIN + timedelta(hours=2), activities=[hold]
+    )
+    run.ustart, run.uend, run.step_size = T0, T0 + 2 * HOUR, MIN
+    target = make_target(config, 100, 105, 10, minutes=30)
+    target.collection_begin = T0 + MIN
+    target.collection_end = T0 + 30 * MIN
+    target.end = T0 + 40 * MIN
+    run.ppt = target
+    assert run._manage_activities(T0, run.acs.ra, run.acs.dec, run.acs.roll)
+    assert run._active_activity is not None
+    assert run._active_activity.name == hold.name
+    assert run.ppt is None
+
+
+@pytest.mark.parametrize("fixed", [True, False])
+def test_dispatch_budgets_teardown_before_fixed_pose_ingress(fixed):
+    config = make_config(4)
+    config.constraint.sun_constraint = None
+    config.constraint.earth_constraint = None
+    config.payload.observation_timing = ObservationTiming(
+        cleanup_seconds=300, handoff_seconds=120
+    )
+    pose = ActivityAttitude(kind="fixed", ra_deg=170, dec_deg=35, roll_deg=20)
+    hold = ScheduledActivity(
+        name="Required safe hold during a long exposure",
+        begin=T0 + HOUR,
+        duration_seconds=HOUR,
+        fixed=fixed,
+        slide_seconds=0 if fixed else 15 * MIN,
+        attitude=pose,
+    )
+    run = QueueDITL(
+        config=config, begin=BEGIN, end=BEGIN + timedelta(hours=4), activities=[hold]
+    )
+    run.queue.add_request(
+        make_target(config, 100, 105, 10, minutes=150, snapshot=150, ss_min=5)
+    )
+    assert run.calc()
+    assert not run.validate_plan_matches_execution()
+    block = next(e for e in run.plan if e.obstype == ObsType.ACTIVITY)
+    assert block.activity_finishes
+    assert block.activity_hold_end - block.activity_hold_begin == HOUR
+    assert hold.begin <= block.activity_hold_begin <= hold.latest_start
+    before = [
+        e
+        for e in run.plan
+        if e.obstype in (ObsType.PPT, ObsType.AT) and e.end <= block.begin
+    ]
+    assert before
+    assert before[-1].collection_end + 420 <= block.begin
+    collected = sum(
+        float(h.collection_seconds or 0) for h in run.telemetry.housekeeping
+    )
+    planned = sum(
+        float(e.collection_end - e.collection_begin)
+        for e in run.plan
+        if e.collection_begin is not None and e.collection_end is not None
+    )
+    assert collected == pytest.approx(planned)

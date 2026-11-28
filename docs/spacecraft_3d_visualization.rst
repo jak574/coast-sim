@@ -9,66 +9,55 @@ any browser or Jupyter notebook without running a full DITL simulation.
 Features
 --------
 
-The figure draws the spacecraft body, the components attached to it, and
-arrows that show the body-frame axes and the direction each component faces.
-
-Spacecraft body
-^^^^^^^^^^^^^^^
-
-How the body is drawn depends on whether ``spacecraft_bus.surfaces`` has
-plates.
-
-When it does, the visualizer renders the plates at their configured centers,
-normals and areas in the declared body frame. This configured model replaces
-the synthetic bus and telescope described below. A plate's optional
-``geometry`` supplies its rectangular outline. A plate without ``geometry`` is
-illustrated as a square of equal area, because area and normal alone cannot
-recover a facet's aspect ratio or the outline of a scarfed baffle. Front and back
-plates that coincide with a panel are represented once, by the panel geometry.
-The plot bounds include all components.
-
-When no surfaces are configured, the visualizer falls back to a synthetic
-model:
-
-* The spacecraft bus is a lit, solid-shaded box with configurable dimensions.
-* The telescope assembly is a cylindrical baffle tube with an aperture ring,
-  mid-tube baffle rings, and a secondary mirror housing.  It is sized
-  automatically from ``optics.aperture_m`` and ``optics.tube_length_m``.
-
-Components
-^^^^^^^^^^
-
-* Solar panels are drawn as deep-blue solar cell faces on a silver frame.  A
-  panel uses its :class:`~conops.config.geometry.PanelGeometry` when one is
-  configured.  Otherwise the panel is placed on the bus face whose outward
-  normal best matches the panel normal vector, and its area is estimated from
-  ``max_power``.
-* Radiators are drawn as white/MLI panels.  Each is placed on the bus face
-  matching ``orientation.normal`` and sized by ``width_m`` × ``height_m``.
-* Star trackers are drawn as small prism bodies with a coloured aperture face,
-  one per configured tracker.  Each tracker gets a distinct boresight-arrow
-  colour.
-* Momentum wheels are drawn as a copper disc for each wheel in
+* **Spacecraft surfaces** — when ``spacecraft_bus.surfaces`` has plates, render
+  their configured centers, normals and areas in the declared body frame. A
+  plate's optional ``geometry`` supplies its rectangular outline; otherwise a
+  square of equal area illustrates it. Area and normal alone cannot recover a
+  facet's aspect ratio or the outline of a scarfed baffle. The configured model
+  replaces the synthetic bus. Radiators, star trackers, wheels and panels
+  without geometry of their own are placed on the box the hull plates bound,
+  unless ``bus_half_dims`` is given: each face of that box is as far out as the
+  furthest plate facing that way, so a wing seen edge-on or a hull away from
+  the body origin does not move them off it. Along an axis no plate faces, the
+  box takes the plates' own extent. The telescope tube is still drawn,
+  with its boresight where ``show_normals`` is set. The tube is left out only
+  where plates are marked as that telescope's by their ``instrument`` field, as
+  :func:`~conops.config.surfaces.telescope_surfaces` marks the aperture; the
+  boresight then starts at the telescope's foremost plate, and parts are not
+  placed on those plates. An ``instrument`` name must be one the payload has: a
+  configuration with any other is refused, and the plot warns of one assigned to
+  a configuration afterwards. Coincident panel front/back plates are represented
+  once by the panel geometry. The plates share one legend entry, "Surfaces",
+  and their normals another. Plot bounds include all components.
+* **Spacecraft bus fallback** — lit, solid-shaded box with configurable dimensions
+  when no surfaces are configured.
+* **Telescope assembly** — cylindrical baffle tube with aperture ring, mid-tube
+  baffle rings, and secondary mirror housing.  Sized automatically from
+  ``optics.aperture_m`` and ``optics.tube_length_m``.
+* **Solar panels** — deep-blue solar cell faces on a silver frame.  Uses
+  :class:`~conops.config.geometry.PanelGeometry` when configured, otherwise
+  places panels on the bus face whose outward normal best matches the panel
+  normal vector.  Panel area is estimated from ``max_power``.
+* **Radiators** — white/MLI panels placed on the bus face matching
+  ``orientation.normal``, sized by ``width_m`` × ``height_m``.
+* **Star trackers** — small prism bodies with a coloured aperture face, one
+  per configured tracker.  Each gets a distinct boresight-arrow colour.
+* **Momentum wheels** — a copper disc per wheel in
   ``spacecraft_bus.attitude_control.stored_momentum.wheels``, turned to its spin
-  axis and labelled with its capacity.  A wheel is drawn at ``position_m`` when
-  that is configured, and otherwise inside the bus along its spin axis.  The bus
-  box is drawn translucent so the wheels show through it.
-
-Axes and arrows
-^^^^^^^^^^^^^^^
-
-* The body-frame axes are drawn as a +X / +Y / +Z triad with labelled arrows
-  (red, green, blue).
-* Solar panels and radiators have outward-normal arrows.  The telescope and
-  each star tracker have boresight arrows.
+  axis and labelled with its capacity.  Drawn at ``position_m`` when configured,
+  otherwise inside the bus along the spin axis. The configured surfaces or
+  fallback bus box become translucent so the wheels show through.
+* **Body-frame axes** — +X / +Y / +Z triad with labelled arrows (red, green,
+  blue).
+* **Normal / boresight arrows** — outward-normal arrows for solar panels and
+  radiators; boresight arrows for the telescope and each star tracker.
 
 Coordinate system
 -----------------
 
-All geometry is expressed directly in ``spacecraft_bus.frame``, the body frame
-declared in the configuration.  The visualizer does not rotate vectors a
-second time.  The boresight label follows the declared frame.  The following
-axes describe the default frame:
+All geometry is expressed directly in ``spacecraft_bus.frame``; vectors are not
+rotated a second time. The boresight label follows the declared frame. The
+following axes describe the default frame:
 
 .. list-table::
    :header-rows: 1
